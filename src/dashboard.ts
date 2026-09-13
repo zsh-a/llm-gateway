@@ -47,7 +47,10 @@ interface GatewayModel {
   id: string;
   name?: string;
   provider?: string;
+  reasoningEfforts?: { [key: string]: string | null };
+  defaultReasoningEffort?: string;
   capabilities?: {
+    chat?: boolean;
     reasoning?: boolean;
     images?: boolean;
     toolCalling?: boolean;
@@ -100,7 +103,7 @@ const layout = {
   sidebarInnerWidth: 220,
   modelInnerWidth: 335,
   testInnerWidth: 399,
-  panelHeight: 500
+  panelHeight: 540
 };
 
 let gatewayKey = process.env.PROXY_API_KEY?.trim() || "";
@@ -108,11 +111,16 @@ let promptValue = "请用一句话介绍你自己。";
 let models: GatewayModel[] = [];
 let modelSearch = "";
 let selectedModelIndex = 0;
+let selectedReasoningEffort = "";
+let modelSelectionTimerPending = false;
+let pendingModelIndex: number | null = null;
 
 let modelRows: Widget;
 let modelPickerHost: Widget;
+let reasoningPickerHost: Widget;
 let providerRows: Widget;
 let modelPicker: Widget | null = null;
+let reasoningPicker: Widget | null = null;
 let globalStatus: Widget;
 let overviewStatus: Widget;
 let responseStatus: Widget;
@@ -244,17 +252,46 @@ function styleInput(widget: Widget, width: number): void {
   widgetSetHeight(widget, 34);
 }
 
+function effortMap(value: unknown): { [key: string]: string | null } | undefined {
+  const record = asRecord(value);
+  const result: { [key: string]: string | null } = {};
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (item === null || typeof item === "string") result[key] = item;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function effortLabel(value: string): string {
+  const labels: { [key: string]: string } = {
+    off: "关闭",
+    none: "关闭",
+    low: "低",
+    medium: "中",
+    high: "高",
+    xhigh: "超高",
+    max: "最大"
+  };
+  return labels[value] || value;
+}
+
 function modelFrom(value: unknown): GatewayModel | null {
   const record = asRecord(value);
   const id = stringValue(record.id);
   if (!id) return null;
   const capabilities = asRecord(record.capabilities);
+  const reasoningEfforts = effortMap(
+    record.reasoningEfforts ?? record.reasoning_efforts ?? capabilities.reasoningEfforts
+  );
   return {
     id,
     name: stringValue(record.name) || undefined,
     provider: stringValue(record.provider) || undefined,
+    reasoningEfforts,
+    defaultReasoningEffort: stringValue(record.defaultReasoningEffort) || undefined,
     capabilities: {
-      reasoning: capabilities.reasoning === true,
+      chat: capabilities.chat !== false,
+      reasoning: capabilities.reasoning === true || record.reasoning === true,
       images: capabilities.images === true,
       toolCalling: capabilities.toolCalling === true
     }
@@ -378,7 +415,11 @@ function renderModels(): void {
       ? model.name
       : model.id;
     const subtitle = `${providerName(model.provider || "unknown")}  ·  ${
-      model.capabilities?.reasoning ? "Reasoning" : "Chat"
+      model.capabilities?.chat === false
+        ? "非 Chat 模型"
+        : model.capabilities?.reasoning
+          ? "Reasoning"
+          : "Chat"
     }  ·  ${model.id}`;
     const row = button(
       `${title}\n${subtitle}`,
@@ -409,6 +450,7 @@ function renderModels(): void {
     models[selectedModelIndex]?.id || "选择一个模型"
   );
   renderPicker();
+  renderReasoningPicker();
 }
 
 function stateText(): string {
@@ -418,7 +460,7 @@ function stateText(): string {
 
 function renderPicker(): void {
   widgetClearChildren(modelPickerHost);
-  modelPicker = Picker((index) => selectModel(index));
+  modelPicker = Picker((index) => queueModelSelection(index));
   for (const model of models) {
     pickerAddItem(modelPicker, `${model.name || model.id} · ${providerName(model.provider || "unknown")}`);
   }
@@ -427,10 +469,65 @@ function renderPicker(): void {
   widgetAddChild(modelPickerHost, modelPicker);
 }
 
+function queueModelSelection(index: number): void {
+  if (index < 0 || index >= models.length || index === selectedModelIndex) return;
+  pendingModelIndex = index;
+  if (modelSelectionTimerPending) return;
+  modelSelectionTimerPending = true;
+  // Perry's macOS Picker callback temporarily borrows its callback registry.
+  // Rebuilding the widget tree inside that callback would borrow it again.
+  appSetTimer(1, () => {
+    modelSelectionTimerPending = false;
+    const nextIndex = pendingModelIndex;
+    pendingModelIndex = null;
+    if (nextIndex !== null) selectModel(nextIndex);
+  });
+}
+
+function renderReasoningPicker(): void {
+  widgetClearChildren(reasoningPickerHost);
+  reasoningPicker = null;
+  const model = models[selectedModelIndex];
+  const efforts = model?.reasoningEfforts;
+  if (!model || !efforts) {
+    selectedReasoningEffort = "";
+    widgetAddChild(reasoningPickerHost, label("模型默认", 11, colors.subtle));
+    setText("selected-effort", "默认");
+    return;
+  }
+
+  const keys = Object.keys(efforts);
+  if (keys.length === 0) {
+    selectedReasoningEffort = "";
+    widgetAddChild(reasoningPickerHost, label("模型默认", 11, colors.subtle));
+    setText("selected-effort", "默认");
+    return;
+  }
+
+  if (!keys.includes(selectedReasoningEffort)) {
+    selectedReasoningEffort = model.defaultReasoningEffort &&
+      keys.includes(model.defaultReasoningEffort)
+      ? model.defaultReasoningEffort
+      : keys[0];
+  }
+  reasoningPicker = Picker((index) => {
+    const key = keys[index];
+    if (!key) return;
+    selectedReasoningEffort = key;
+    setText("selected-effort", effortLabel(key));
+  });
+  for (const key of keys) pickerAddItem(reasoningPicker, effortLabel(key));
+  pickerSetSelected(reasoningPicker, keys.indexOf(selectedReasoningEffort));
+  widgetSetWidth(reasoningPicker, layout.testInnerWidth);
+  widgetAddChild(reasoningPickerHost, reasoningPicker);
+  setText("selected-effort", effortLabel(selectedReasoningEffort));
+}
+
 function selectModel(index: number): void {
   if (index < 0 || index >= models.length) return;
+  if (index === selectedModelIndex) return;
   selectedModelIndex = index;
-  if (modelPicker) pickerSetSelected(modelPicker, index);
+  selectedReasoningEffort = "";
   renderModels();
 }
 
@@ -523,17 +620,28 @@ async function sendChat(): Promise<void> {
   if (!model) return;
 
   setResponseState("请求中…", colors.muted);
+  setText("response-error", "");
   setText("response-reasoning", "");
   setText("response-answer", "");
   try {
+    const body: { [key: string]: unknown } = {
+      model: model.id,
+      messages: [{ role: "user", content: promptValue }],
+      stream: false
+    };
+    if (selectedReasoningEffort && model.reasoningEfforts) {
+      const wireValue = model.reasoningEfforts[selectedReasoningEffort];
+      if (wireValue === null) {
+        body.thinking = { type: "disabled" };
+      } else if (wireValue !== undefined) {
+        body.reasoning_effort = wireValue;
+        body.thinking = { type: "enabled" };
+      }
+    }
     const payload = asRecord(await requestJson(
       "/v1/chat/completions",
       "POST",
-      JSON.stringify({
-        model: model.id,
-        messages: [{ role: "user", content: promptValue }],
-        stream: false
-      })
+      JSON.stringify(body)
     ));
     const choices = Array.isArray(payload.choices) ? payload.choices : [];
     const first = asRecord(choices[0]);
@@ -692,6 +800,10 @@ function buildUi(): Widget {
   stackSetAlignment(modelPickerHost, 5);
   widgetSetWidth(modelPickerHost, layout.testInnerWidth);
 
+  reasoningPickerHost = VStack(0, []);
+  stackSetAlignment(reasoningPickerHost, 5);
+  widgetSetWidth(reasoningPickerHost, layout.testInnerWidth);
+
   const prompt = TextField("输入一条消息，验证当前网关链路…", (value) => {
     promptValue = value;
   });
@@ -727,6 +839,12 @@ function buildUi(): Widget {
     ]),
     label("目标模型", 10, colors.muted),
     modelPickerHost,
+    HStack(8, [
+      label("Reasoning effort", 10, colors.muted),
+      Spacer(),
+      dynamicLabel("默认", "selected-effort", 10, colors.yellow, 60)
+    ]),
+    reasoningPickerHost,
     label("Prompt", 10, colors.muted),
     prompt,
     HStack(10, [

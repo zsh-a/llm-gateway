@@ -104,6 +104,15 @@ function mimoRequestBody(request: NormalizedChatRequest): JsonRecord {
     delete body.max_tokens;
   }
 
+  if (
+    request.modelDescriptor?.capabilities?.reasoning === false &&
+    !request.reasoningEffortExplicit
+  ) {
+    delete body.reasoning_effort;
+    delete body.thinking;
+    return body;
+  }
+
   if (request.effort === "none") {
     body.thinking = { type: "disabled" };
     delete body.reasoning_effort;
@@ -139,7 +148,23 @@ const MIMO_REASONING_EFFORTS = {
 };
 
 function mimoModelDescriptor(model: ModelDescriptor): ModelDescriptor {
-  if (!model.id.toLowerCase().startsWith("mimo-x-")) return model;
+  const id = model.id.toLowerCase();
+  if (/(asr|tts|seedream|image|voiceclone|voicedesign|audio)/.test(id)) {
+    return {
+      ...model,
+      capabilities: {
+        ...model.capabilities,
+        chat: false,
+        reasoning: false
+      }
+    };
+  }
+  if (!id.startsWith("mimo-x-")) {
+    return {
+      ...model,
+      capabilities: { ...model.capabilities, chat: true }
+    };
+  }
 
   return {
     ...model,
@@ -150,6 +175,24 @@ function mimoModelDescriptor(model: ModelDescriptor): ModelDescriptor {
     },
     reasoningEfforts: model.reasoningEfforts ?? { ...MIMO_REASONING_EFFORTS },
     defaultReasoningEffort: model.defaultReasoningEffort ?? "medium"
+  };
+}
+
+function workbuddyModelDescriptor(model: ModelDescriptor): ModelDescriptor {
+  const id = model.id.toLowerCase();
+  if (/(image|kling|tts|asr|audio|voice)/.test(id)) {
+    return {
+      ...model,
+      capabilities: {
+        ...model.capabilities,
+        chat: false,
+        reasoning: false
+      }
+    };
+  }
+  return {
+    ...model,
+    capabilities: { ...model.capabilities, chat: true }
   };
 }
 
@@ -267,7 +310,8 @@ const providers: ProviderAdapter[] = [
     ["GET", "POST"],
     ["cookie", "authorization", "x-*"],
     macApplicationBinaries("WorkBuddy", ["Electron", "WorkBuddy"]),
-    workbuddyRequestBody
+    workbuddyRequestBody,
+    workbuddyModelDescriptor
   )
 ];
 

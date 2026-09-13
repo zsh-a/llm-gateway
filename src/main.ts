@@ -1,8 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { startDashboard } from "./dashboard.js";
+import {
+  exportDeepSeekHarness,
+  printModels,
+  runDoctor
+} from "./management.js";
 import { startGateway } from "./server.js";
 
-type GatewayMode = "serve" | "desktop";
+type GatewayMode = "serve" | "desktop" | "doctor" | "models" | "export";
 
 function printUsage(): void {
   console.log(`用法: llm-gateway <模式>
@@ -10,15 +15,24 @@ function printUsage(): void {
 模式:
   serve    仅启动 OpenAI 兼容网关（默认）
   desktop  启动网关并打开 Perry 原生控制面板
+  doctor   检查配置、认证缓存和模型目录
+  models   以 OpenAI /v1/models JSON 输出当前模型目录
+  export   导出接入客户端所需的配置片段
 
 示例:
   llm-gateway serve
-  llm-gateway desktop`);
+  llm-gateway desktop
+  llm-gateway doctor
+  llm-gateway models
+  llm-gateway export deepseek-harness`);
 }
 
 function resolveMode(argument: string | undefined): GatewayMode {
   if (!argument || argument === "serve") return "serve";
   if (argument === "desktop") return "desktop";
+  if (argument === "doctor") return "doctor";
+  if (argument === "models") return "models";
+  if (argument === "export") return "export";
   if (argument === "--help" || argument === "-h") {
     printUsage();
     process.exit(0);
@@ -75,9 +89,35 @@ function runDesktopMode(): void {
   startDashboard();
 }
 
-const mode = resolveMode(process.argv[2]);
-if (mode === "serve") {
-  startGateway();
-} else {
-  runDesktopMode();
+async function runMode(): Promise<void> {
+  const mode = resolveMode(process.argv[2]);
+  if (mode === "serve") {
+    startGateway();
+    return;
+  }
+  if (mode === "desktop") {
+    runDesktopMode();
+    return;
+  }
+  if (mode === "doctor") {
+    process.exit(await runDoctor());
+    return;
+  }
+  if (mode === "models") {
+    await printModels();
+    return;
+  }
+
+  if (process.argv[3] !== "deepseek-harness") {
+    console.error("export 目前支持: deepseek-harness");
+    printUsage();
+    process.exit(2);
+  }
+  await exportDeepSeekHarness();
 }
+
+void runMode().catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`命令执行失败: ${message}`);
+  process.exit(1);
+});

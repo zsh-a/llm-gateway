@@ -3,6 +3,8 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
+  unlinkSync,
   writeFileSync
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -272,8 +274,19 @@ function writeCachedModels(file: string, models: ModelDescriptor[]): void {
 
   try {
     mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, `${JSON.stringify(stored)}\n`);
-    chmodSync(file, 0o600);
+    const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      writeFileSync(temporary, `${JSON.stringify(stored)}\n`, { mode: 0o600 });
+      chmodSync(temporary, 0o600);
+      renameSync(temporary, file);
+      chmodSync(file, 0o600);
+    } finally {
+      try {
+        if (existsSync(temporary)) unlinkSync(temporary);
+      } catch {
+        // Best-effort cleanup; the cache remains usable after a successful rename.
+      }
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`无法保存模型列表缓存 ${file}: ${message}`);

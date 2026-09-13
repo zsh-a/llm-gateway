@@ -13,6 +13,8 @@ import {
   modelsResponse,
   normalizeChatRequest,
   toOpenAIChunks,
+  validateChatRequest,
+  validateModelRequest,
   usageOpenAIChunk
 } from "./openai.js";
 import {
@@ -24,7 +26,8 @@ import {
   responseFinishEvents,
   responseInProgress,
   rememberResponse,
-  ResponseAccumulator
+  ResponseAccumulator,
+  validateResponseRequest
 } from "./responses.js";
 import {
   getProviders,
@@ -330,10 +333,13 @@ type RequestNormalizer = (
   defaultModel?: string
 ) => NormalizedChatRequest;
 
+type RequestValidator = (request: NormalizedChatRequest) => string | null;
+
 async function prepareRequest(
   req: IncomingMessage,
   res: ServerResponse,
-  normalize: RequestNormalizer
+  normalize: RequestNormalizer,
+  validate: RequestValidator
 ): Promise<PreparedRequest | null> {
   let rawBody: string;
   try {
@@ -362,6 +368,12 @@ async function prepareRequest(
     return null;
   }
 
+  const validationError = validate(request);
+  if (validationError) {
+    sendError(res, 400, validationError, "invalid_request_error");
+    return null;
+  }
+
   const route = await resolveModel(config, request.model);
   if (!route) {
     sendError(
@@ -372,6 +384,12 @@ async function prepareRequest(
         : "请求必须包含 model",
       "invalid_request_error"
     );
+    return null;
+  }
+
+  const modelValidationError = validateModelRequest(request, route.model);
+  if (modelValidationError) {
+    sendError(res, 400, modelValidationError, "invalid_request_error");
     return null;
   }
 
@@ -392,7 +410,8 @@ async function prepareRequest(
     authHeaders: authSnapshot.headers,
     request: {
       ...request,
-      model: route.upstreamModel
+      model: route.upstreamModel,
+      modelDescriptor: route.model
     }
   };
 }
@@ -401,7 +420,12 @@ async function handleChat(
   req: IncomingMessage,
   res: ServerResponse
 ): Promise<void> {
-  const prepared = await prepareRequest(req, res, normalizeChatRequest);
+  const prepared = await prepareRequest(
+    req,
+    res,
+    normalizeChatRequest,
+    validateChatRequest
+  );
   if (!prepared) return;
 
   if (prepared.request.stream) {
@@ -425,7 +449,12 @@ async function handleResponses(
   req: IncomingMessage,
   res: ServerResponse
 ): Promise<void> {
-  const prepared = await prepareRequest(req, res, normalizeResponseRequest);
+  const prepared = await prepareRequest(
+    req,
+    res,
+    normalizeResponseRequest,
+    validateResponseRequest
+  );
   if (!prepared) return;
 
   if (prepared.request.stream) {
@@ -462,11 +491,32 @@ async function route(
     `http://${req.headers.host ?? "localhost"}`
   );
 
-  if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
+  if (
+    req.method === "GET" &&
+    (url.pathname === "/" ||
+      url.pathname === "/health" ||
+      url.pathname === "/health/live")
+  ) {
     sendJson(res, 200, {
       status: "ok",
       service: "llm-gateway",
+      mode: "live",
       providers: getProviders().map((provider) => provider.id)
+    });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/health/ready") {
+    const auth = authStore.status(getProviders().map((provider) => provider.id));
+    const models = await getModels(config);
+    const ready = auth.ready && models.length > 0;
+    sendJson(res, ready ? 200 : 503, {
+      status: ready ? "ok" : "not_ready",
+      service: "llm-gateway",
+      mode: "ready",
+      authenticated: auth.ready,
+      models: models.length,
+      providers: auth.providers
     });
     return;
   }
@@ -477,6 +527,45 @@ async function route(
       200,
       authStore.status(getProviders().map((provider) => provider.id))
     );
+    return;
+  }
+
+  if (
+    req.method === "GET" &&
+    url.pathname === "/.well-known/llm-gateway/capabilities"
+  ) {
+    const auth = authStore.status(getProviders().map((provider) => provider.id));
+    const models = modelsResponse(await getModels(config));
+    sendJson(res, 200, {
+      object: "llm-gateway.capabilities",
+      version: 1,
+      service: "llm-gateway",
+      authRequired: Boolean(config.apiKey),
+      protocols: {
+        chatCompletions: {
+          path: "/v1/chat/completions",
+          stream: true,
+          tools: true,
+          reasoningContent: true,
+          usageChunk: true,
+          developerRole: false
+        },
+        responses: {
+          path: "/v1/responses",
+          stream: true,
+          reasoningText: true,
+          functionCalls: true,
+          structuredOutputs: true,
+          previousResponseId: "process"
+        }
+      },
+      providers: getProviders().map((provider) => ({
+        id: provider.id,
+        name: provider.name,
+        authenticated: auth.providers[provider.id]?.ready === true
+      })),
+      models: models.data
+    });
     return;
   }
 

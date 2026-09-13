@@ -69,6 +69,11 @@ export function normalizeChatRequest(
   defaultModel = ""
 ): NormalizedChatRequest {
   const body = asRecord(value);
+  for (const key of ["reasoning_effort", "reasoningEffort"]) {
+    if (body[key] !== undefined && typeof body[key] !== "string") {
+      throw new Error(`${key} 必须是字符串`);
+    }
+  }
   const model = typeof body.model === "string" && body.model.trim()
     ? body.model.trim()
     : defaultModel;
@@ -256,6 +261,62 @@ export function usageOpenAIChunk(
 export function includesUsage(request: NormalizedChatRequest): boolean {
   const streamOptions = asRecord(request.options.stream_options);
   return request.stream && streamOptions.include_usage === true;
+}
+
+export function validateChatRequest(
+  request: NormalizedChatRequest
+): string | null {
+  const n = request.options.n;
+  if (n !== undefined && (typeof n !== "number" || !Number.isInteger(n) || n !== 1)) {
+    return "当前网关只支持 n=1；多候选结果无法安全映射到单个上游响应";
+  }
+
+  const streamOptions = request.options.stream_options;
+  if (
+    streamOptions !== undefined &&
+    (streamOptions === null || typeof streamOptions !== "object" || Array.isArray(streamOptions))
+  ) {
+    return "stream_options 必须是对象";
+  }
+  const streamOptionsRecord = asRecord(streamOptions);
+  if (
+    streamOptionsRecord.include_usage !== undefined &&
+    typeof streamOptionsRecord.include_usage !== "boolean"
+  ) {
+    return "stream_options.include_usage 必须是布尔值";
+  }
+
+  const tools = request.options.tools;
+  if (tools !== undefined && !Array.isArray(tools)) {
+    return "tools 必须是数组";
+  }
+  const parallelToolCalls = request.options.parallel_tool_calls;
+  if (parallelToolCalls !== undefined && typeof parallelToolCalls !== "boolean") {
+    return "parallel_tool_calls 必须是布尔值";
+  }
+  return null;
+}
+
+export function validateModelRequest(
+  request: NormalizedChatRequest,
+  model: ModelDescriptor
+): string | null {
+  if (model.capabilities?.chat === false) {
+    return `模型 ${model.publicId ?? model.id} 不支持 Chat Completions/Responses`;
+  }
+  if (!request.reasoningEffortExplicit || request.effort === "none") return null;
+  if (model.capabilities?.reasoning === false) {
+    return `模型 ${model.publicId ?? model.id} 不支持 reasoning_effort`;
+  }
+
+  const efforts = model.reasoningEfforts;
+  if (efforts) {
+    const supported = Object.prototype.hasOwnProperty.call(efforts, request.effort);
+    if (!supported) {
+      return `模型 ${model.publicId ?? model.id} 不支持 reasoning_effort=${request.effort}`;
+    }
+  }
+  return null;
 }
 
 function chatToolCall(call: StreamToolCall): JsonRecord {

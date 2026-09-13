@@ -237,6 +237,20 @@ function previousMessages(id: string): JsonRecord[] | null {
 function responseRequestOptions(body: JsonRecord): ResponseRequestOptions {
   const options: ResponseRequestOptions = {};
 
+  for (const key of [
+    "background",
+    "conversation",
+    "include",
+    "max_tool_calls",
+    "prompt",
+    "service_tier",
+    "stream_options"
+  ]) {
+    if (body[key] !== undefined) {
+      throw new Error(`暂不支持 Responses 字段 ${key}；网关不会静默丢弃该字段`);
+    }
+  }
+
   if (body.instructions !== undefined) options.instructions = body.instructions;
   if (body.text !== undefined && body.text !== null) {
     if (typeof body.text !== "object" || Array.isArray(body.text)) {
@@ -275,6 +289,12 @@ function responseRequestOptions(body: JsonRecord): ResponseRequestOptions {
     options.maxOutputTokens = body.max_output_tokens as number;
   }
   if (body.reasoning !== undefined) {
+    if (
+      body.reasoning !== null &&
+      (typeof body.reasoning !== "object" || Array.isArray(body.reasoning))
+    ) {
+      throw new Error("reasoning 必须是对象或 null");
+    }
     options.reasoning = body.reasoning === null ? null : asRecord(body.reasoning);
   }
 
@@ -334,6 +354,20 @@ export function normalizeResponseRequest(
     ...normalizeChatRequest(normalized, defaultModel),
     response
   };
+}
+
+export function validateResponseRequest(
+  request: NormalizedChatRequest
+): string | null {
+  const truncation = request.response?.truncation;
+  if (
+    truncation !== undefined &&
+    truncation !== null &&
+    truncation !== "disabled"
+  ) {
+    return "当前网关仅支持 Responses truncation=disabled";
+  }
+  return null;
 }
 
 export interface ResponseContext {

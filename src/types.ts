@@ -52,6 +52,7 @@ export interface ResponseRequestOptions {
 
 export interface NormalizedChatRequest {
   model: string;
+  modelDescriptor?: ModelDescriptor;
   messages: unknown[];
   stream: boolean;
   effort: ReasoningEffort;

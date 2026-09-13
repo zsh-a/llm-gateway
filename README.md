@@ -35,6 +35,7 @@ src/responses.ts    Responses 输入/输出适配
 src/server.ts       OpenAI 兼容 HTTP 服务与启动生命周期
 src/dashboard.ts    Perry UI 原生桌面控制面板与启动生命周期
 src/main.ts         serve / desktop 模式入口
+src/management.ts   doctor / models / export 管理命令
 scripts/auth.ts     一次性认证引导工具
 ```
 
@@ -48,6 +49,8 @@ npm install
 npm run typecheck
 npm run build
 ```
+
+构建和运行已拆开：日常启动不会重复编译原生二进制；源码变更后再执行 `npm run build`，或使用 `npm run dev` 一次完成构建和启动。
 
 如果 Perry 找不到网络扩展或标准库源码，准备对应版本的 Perry 工作区：
 
@@ -63,6 +66,16 @@ npm run build
 dist/llm-gateway
 dist/scripts/auth.js
 ```
+
+常用管理命令：
+
+```bash
+npm run doctor                 # 检查运行目录、认证缓存和模型目录
+npm run models                 # 输出当前 OpenAI 模型目录 JSON
+npm run export:harness         # 输出 DeepSeek Harness 的 settings.yaml 片段
+```
+
+`export:harness` 只输出配置，不会修改 Harness 文件；它会把当前自动发现的 Chat 模型、上下文窗口、最大输出和 reasoning 档位生成到一个统一的 `llm-gateway` Provider 下。
 
 ## 首次认证
 
@@ -217,10 +230,14 @@ llm-pi-ai:
 
 ```bash
 curl http://127.0.0.1:3000/health
+curl http://127.0.0.1:3000/health/live
+curl -i http://127.0.0.1:3000/health/ready
 curl http://127.0.0.1:3000/health/auth
 ```
 
 `/health/auth` 只返回各 Provider 是否有缓存，不返回敏感请求头。
+
+`/health/live` 只检查进程是否存活，`/health/ready` 同时检查至少一个 Provider 已认证且模型目录可用。`/.well-known/llm-gateway/capabilities` 返回协议能力、认证状态和模型元数据，适合桌面 UI 或其他客户端做能力发现。
 
 ## 网关配置
 
@@ -243,7 +260,10 @@ MODEL_DISCOVERY=true
 ```text
 GET  /
 GET  /health
+GET  /health/live
+GET  /health/ready
 GET  /health/auth
+GET  /.well-known/llm-gateway/capabilities
 GET  /v1/models
 POST /v1/chat/completions
 POST /chat/completions
@@ -252,6 +272,8 @@ POST /responses
 ```
 
 网关始终以流式方式请求上游；客户端使用 `stream: false` 时由网关聚合为普通 JSON，同时保留工具调用、思维内容和 usage（若上游提供）。
+
+网关不会伪装未实现的协议能力：Chat Completions 当前明确限制 `n=1`，Responses 对 `background`、`conversation`、`include`、`max_tool_calls`、`prompt`、`service_tier` 和 `stream_options` 等未实现字段返回 400；不支持 Chat 的音频、图片模型也会在目录中标记，并拒绝被当作对话模型调用。
 
 Chat Completions 流式请求支持标准 `stream_options.include_usage`：网关会在 `[DONE]` 前输出 `choices: []` 的最终 usage chunk，并完整合并现代 `tool_calls`（包括 `index`、函数名和分片 `function.arguments`）。旧式 `function_call` 会在统一内部流事件层转换为现代工具调用格式。
 
