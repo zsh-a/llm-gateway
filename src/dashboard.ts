@@ -10,7 +10,6 @@ import {
   SecureField,
   Spacer,
   Text,
-  TextArea,
   TextField,
   VStack,
   appSetTimer,
@@ -22,23 +21,24 @@ import {
   setCornerRadius,
   setPadding,
   setText,
+  stackSetAlignment,
   showToast,
   textSetColor,
   textSetFontFamily,
   textSetFontSize,
-  textSetSelectable,
   textSetWraps,
   textfieldSetBackgroundColor,
   textfieldSetBorderless,
   textfieldSetFontSize,
+  textfieldSetString,
   textfieldSetTextColor,
-  textareaSetString,
   widgetAddChild,
   widgetClearChildren,
   widgetSetBackgroundColor,
   widgetSetBorderColor,
   widgetSetBorderWidth,
   widgetSetHeight,
+  widgetSetTooltip,
   widgetSetWidth
 } from "perry/ui";
 import type { Widget } from "perry/ui";
@@ -89,6 +89,20 @@ const colors: { [key: string]: Color } = {
   red: { r: 0.98, g: 0.44, b: 0.53, a: 1 }
 };
 
+const layout = {
+  windowWidth: 1120,
+  windowHeight: 760,
+  contentWidth: 1076,
+  sidebarWidth: 250,
+  workspaceWidth: 810,
+  modelWidth: 365,
+  testWidth: 429,
+  sidebarInnerWidth: 220,
+  modelInnerWidth: 335,
+  testInnerWidth: 399,
+  panelHeight: 500
+};
+
 let gatewayKey = process.env.PROXY_API_KEY?.trim() || "";
 let promptValue = "请用一句话介绍你自己。";
 let models: GatewayModel[] = [];
@@ -100,6 +114,7 @@ let modelPickerHost: Widget;
 let providerRows: Widget;
 let modelPicker: Widget | null = null;
 let globalStatus: Widget;
+let overviewStatus: Widget;
 let responseStatus: Widget;
 
 function asRecord(value: unknown): { [key: string]: unknown } {
@@ -156,21 +171,33 @@ function dynamicLabel(
   content: string,
   id: string,
   size: number,
-  value: Color
+  value: Color,
+  maxWidth = 620
 ): Widget {
   const widget = Text(content, id);
   color(widget, value);
   textSetFontSize(widget, size);
-  textSetWraps(widget, 620);
+  textSetWraps(widget, maxWidth);
   return widget;
 }
 
 function card(widget: Widget, width = 0): Widget {
   fill(widget, colors.panel);
   border(widget, colors.border);
-  setCornerRadius(widget, 16);
-  setPadding(widget, 16, 16, 16, 16);
+  setCornerRadius(widget, 13);
+  setPadding(widget, 14, 14, 14, 14);
+  stackSetAlignment(widget, 5);
   if (width > 0) widgetSetWidth(widget, width);
+  return widget;
+}
+
+function surface(widget: Widget, width = 0, height = 0): Widget {
+  fill(widget, colors.panelMuted);
+  setCornerRadius(widget, 10);
+  setPadding(widget, 10, 11, 10, 11);
+  stackSetAlignment(widget, 5);
+  if (width > 0) widgetSetWidth(widget, width);
+  if (height > 0) widgetSetHeight(widget, height);
   return widget;
 }
 
@@ -188,14 +215,22 @@ function button(
   return widget;
 }
 
+function primaryButton(title: string, onPress: () => void, width = 0): Widget {
+  const widget = button(title, onPress, colors.background, width);
+  fill(widget, colors.accent);
+  setCornerRadius(widget, 9);
+  return widget;
+}
+
 function metric(title: string, valueId: string, foot: string): Widget {
-  const widget = VStack(5, [
-    label(title, 11, colors.subtle),
-    dynamicLabel("—", valueId, 23, colors.text),
-    label(foot, 10, colors.subtle)
+  const widget = HStack(8, [
+    label(title, 11, colors.muted),
+    Spacer(),
+    dynamicLabel("—", valueId, 13, colors.text, 90)
   ]);
-  card(widget, 175);
-  widgetSetHeight(widget, 86);
+  setPadding(widget, 6, 0, 6, 0);
+  stackSetAlignment(widget, 12);
+  if (foot) widgetSetTooltip(widget, foot);
   return widget;
 }
 
@@ -206,6 +241,7 @@ function styleInput(widget: Widget, width: number): void {
   textfieldSetFontSize(widget, 12);
   textfieldSetTextColor(widget, colors.text.r, colors.text.g, colors.text.b, 1);
   setPadding(widget, 8, 10, 8, 10);
+  widgetSetHeight(widget, 34);
 }
 
 function modelFrom(value: unknown): GatewayModel | null {
@@ -317,8 +353,10 @@ async function requestJson(
 }
 
 function setGlobalState(text: string, value: Color): void {
-  setText("global-status", text);
+  setText("global-status", `● ${text}`);
+  setText("overview-status", `● ${text}`);
   color(globalStatus, value);
+  color(overviewStatus, value);
 }
 
 function setResponseState(text: string, value: Color): void {
@@ -337,21 +375,27 @@ function renderModels(): void {
     visible += 1;
 
     const title = model.name && model.name !== model.id
-      ? `${model.name} · ${model.id}`
+      ? model.name
       : model.id;
     const subtitle = `${providerName(model.provider || "unknown")}  ·  ${
       model.capabilities?.reasoning ? "Reasoning" : "Chat"
-    }`;
+    }  ·  ${model.id}`;
     const row = button(
       `${title}\n${subtitle}`,
       () => selectModel(index),
       index === selectedModelIndex ? colors.accent : colors.muted,
-      520
+      layout.modelInnerWidth
     );
-    fill(row, index === selectedModelIndex ? colors.panelMuted : colors.background);
-    border(row, index === selectedModelIndex ? colors.accent : colors.border);
-    setCornerRadius(row, 10);
-    widgetSetHeight(row, 52);
+    fill(row, index === selectedModelIndex ? colors.accent : colors.background);
+    buttonSetTextColor(
+      row,
+      index === selectedModelIndex ? colors.background.r : colors.text.r,
+      index === selectedModelIndex ? colors.background.g : colors.text.g,
+      index === selectedModelIndex ? colors.background.b : colors.text.b,
+      1
+    );
+    setCornerRadius(row, 9);
+    widgetSetHeight(row, 48);
     widgetAddChild(modelRows, row);
   });
 
@@ -360,11 +404,15 @@ function renderModels(): void {
     widgetAddChild(modelRows, label(message, 12, colors.subtle));
   }
   setText("model-count", String(models.length));
+  setText(
+    "selected-model",
+    models[selectedModelIndex]?.id || "选择一个模型"
+  );
   renderPicker();
 }
 
 function stateText(): string {
-  if (models.length === 0) return "暂无模型，请先完成 Provider 认证。";
+  if (models.length === 0) return "暂无模型 · 请先完成 Provider 认证";
   return "没有匹配的模型。";
 }
 
@@ -375,7 +423,7 @@ function renderPicker(): void {
     pickerAddItem(modelPicker, `${model.name || model.id} · ${providerName(model.provider || "unknown")}`);
   }
   if (models.length > 0) pickerSetSelected(modelPicker, selectedModelIndex);
-  widgetSetWidth(modelPicker, 430);
+  widgetSetWidth(modelPicker, layout.testInnerWidth);
   widgetAddChild(modelPickerHost, modelPicker);
 }
 
@@ -384,7 +432,6 @@ function selectModel(index: number): void {
   selectedModelIndex = index;
   if (modelPicker) pickerSetSelected(modelPicker, index);
   renderModels();
-  setText("selected-model", models[index].id);
 }
 
 function renderProviders(statusValue: unknown): void {
@@ -396,25 +443,21 @@ function renderProviders(statusValue: unknown): void {
     const status = asRecord(providers[id]) as ProviderStatus;
     const ready = status.ready === true;
     const statusColor = ready ? colors.green : colors.yellow;
-    const detail = ready
-      ? `认证缓存 · ${formatTime(status.capturedAt)}`
-      : `运行 npm run auth -- --provider ${id}`;
-    const providerCard = VStack(8, [
-      HStack(8, [
-        label(providerName(id), 14, colors.text),
-        Spacer(),
-        label(ready ? "● 已认证" : "● 待认证", 11, statusColor)
+    const providerRow = HStack(8, [
+      VStack(2, [
+        label(providerName(id), 12, colors.text),
+        label(id, 10, colors.subtle)
       ]),
-      label(id, 10, colors.subtle),
-      Divider(),
-      label(detail, 11, ready ? colors.muted : colors.yellow)
+      Spacer(),
+      label(ready ? `已认证 · ${formatTime(status.capturedAt)}` : "待认证", 10, statusColor)
     ]);
-    card(providerCard, 1040);
-    widgetAddChild(providerRows, providerCard);
+    surface(providerRow, layout.sidebarInnerWidth, 44);
+    stackSetAlignment(providerRow, 12);
+    widgetAddChild(providerRows, providerRow);
   }
 
   if (ids.length === 0) {
-    widgetAddChild(providerRows, label("暂时无法读取 Provider 状态。", 12, colors.subtle));
+    widgetAddChild(providerRows, label("暂时无法读取 Provider 状态。", 11, colors.subtle));
   }
   setText("metric-providers", String(ids.length || "—"));
 }
@@ -507,140 +550,229 @@ function saveKey(): void {
 }
 
 function buildUi(): Widget {
-  const brand = VStack(4, [
-    label("LLM Gateway", 22, colors.text),
-    label("ONE ENDPOINT · MULTIPLE PROVIDERS", 10, colors.cyan)
+  const brand = VStack(2, [
+    label("LLM Gateway", 18, colors.text),
+    label("UNIFIED MODEL ACCESS", 9, colors.subtle)
   ]);
-  const endpoint = label(`${gatewayUrl}/v1`, 10, colors.cyan);
-  globalStatus = dynamicLabel("检测中", "global-status", 12, colors.muted);
-  const refresh = button("刷新", () => { void loadDashboard(); }, colors.text, 72);
+  stackSetAlignment(brand, 5);
+
+  const endpoint = label(gatewayUrl + "/v1", 10, colors.cyan);
+  textSetFontFamily(endpoint, "SF Mono");
+  globalStatus = dynamicLabel("● 检测中", "global-status", 11, colors.muted, 100);
+  const refresh = button("刷新", () => { void loadDashboard(); }, colors.cyan, 58);
   const header = HStack(14, [brand, Spacer(), endpoint, globalStatus, refresh]);
-  setPadding(header, 16, 22, 16, 22);
-  fill(header, colors.panelMuted);
-  widgetSetWidth(header, 1180);
+  stackSetAlignment(header, 12);
+  setPadding(header, 14, 22, 14, 22);
+  fill(header, colors.panel);
+  widgetSetWidth(header, layout.windowWidth);
+  widgetSetHeight(header, 64);
 
-  const hero = VStack(8, [
-    label("CONTROL PLANE", 10, colors.cyan),
-    label("你的模型入口，一处管理。", 30, colors.text),
-    label("统一查看认证状态、模型目录，并通过同一个 OpenAI 兼容接口连接 MiMo、WorkBuddy 以及未来的更多 Provider。", 13, colors.muted),
-    label(`Base URL  ${gatewayUrl}/v1`, 11, colors.accent)
-  ]);
-  card(hero);
-  widgetSetHeight(hero, 148);
-  widgetSetWidth(hero, 1136);
-
-  const metrics = HStack(12, [
-    metric("Provider", "metric-providers", "已注册上游"),
-    metric("认证状态", "metric-auth", "可直接调用"),
-    metric("模型目录", "metric-models", "自动发现与缓存"),
-    metric("API Endpoint", "metric-endpoint", "OpenAI compatible")
-  ]);
-  widgetSetWidth(metrics, 1136);
-  setText("metric-endpoint", `${gatewayHost}:${config.port}`);
-
-  modelRows = VStack(8, []);
-  const modelScroll = ScrollView();
-  scrollviewSetChild(modelScroll, modelRows);
-  widgetSetHeight(modelScroll, 315);
-  widgetSetWidth(modelScroll, 520);
-  const search = TextField("搜索模型名称或 ID", (value) => {
-    modelSearch = value.trim();
-    renderModels();
-  });
-  styleInput(search, 520);
-  const modelPanel = VStack(12, [
-    HStack(8, [
-      VStack(3, [label("模型目录", 15, colors.text), label("来自各 Provider 的可用模型", 11, colors.subtle)]),
-      Spacer(),
-      dynamicLabel("—", "model-count", 11, colors.cyan)
+  const intro = HStack(16, [
+    VStack(3, [
+      label("CONTROL PLANE", 9, colors.cyan),
+      label("一处连接，统一调用。", 23, colors.text),
+      label("管理认证、模型目录，并通过一个 OpenAI 兼容入口连接多个 Provider。", 11, colors.muted)
     ]),
-    search,
-    modelScroll,
-    dynamicLabel("", "model-error", 10, colors.red)
+    Spacer(),
+    VStack(3, [
+      label("SERVICE", 9, colors.subtle),
+      label("OpenAI compatible", 11, colors.accent),
+      label("MiMo · WorkBuddy · more", 10, colors.muted)
+    ])
   ]);
-  card(modelPanel, 570);
+  stackSetAlignment(intro, 12);
+  card(intro, layout.contentWidth);
+  stackSetAlignment(intro, 12);
+  widgetSetHeight(intro, 84);
 
-  modelPickerHost = VStack(8, []);
-  const prompt = TextArea("输入一条消息，验证当前网关链路…", (value) => {
-    promptValue = value;
-  });
-  textareaSetString(prompt, promptValue);
-  widgetSetWidth(prompt, 430);
-  widgetSetHeight(prompt, 112);
-  fill(prompt, colors.panelMuted);
-  border(prompt, colors.border);
-  setPadding(prompt, 10, 11, 10, 11);
-
-  responseStatus = dynamicLabel("准备就绪", "response-status", 11, colors.subtle);
-  const testPanel = VStack(12, [
+  overviewStatus = dynamicLabel("● 检测中", "overview-status", 12, colors.muted, 120);
+  const overview = VStack(9, [
     HStack(8, [
-      VStack(3, [label("快速测试", 15, colors.text), label("发送一条真实的 OpenAI 兼容请求", 11, colors.subtle)]),
+      VStack(2, [
+        label("服务状态", 14, colors.text),
+        label("网关与上游连接", 10, colors.subtle)
+      ]),
       Spacer(),
-      responseStatus
+      overviewStatus
     ]),
-    label("目标模型", 11, colors.muted),
-    modelPickerHost,
-    label("Prompt", 11, colors.muted),
-    prompt,
-    HStack(10, [button("发送请求", () => { void sendChat(); }, colors.text, 120), label("stream: false · ⌘ / Ctrl + Enter", 10, colors.subtle)]),
     Divider(),
-    label("思考过程", 10, colors.yellow),
-    dynamicLabel("", "response-reasoning", 10, colors.yellow),
-    label("回答", 10, colors.cyan),
-    dynamicLabel("选择模型并发送消息，响应会显示在这里。", "response-answer", 13, colors.text),
-    dynamicLabel("", "response-error", 10, colors.red)
+    metric("Provider", "metric-providers", "已注册上游"),
+    metric("已认证", "metric-auth", "可直接调用"),
+    metric("模型", "metric-models", "自动发现目录")
   ]);
-  card(testPanel, 470);
+  stackSetAlignment(overview, 5);
+  card(overview, layout.sidebarWidth);
+  widgetSetHeight(overview, 154);
 
-  providerRows = VStack(10, []);
-  const providerScroll = ScrollView();
-  scrollviewSetChild(providerScroll, providerRows);
-  widgetSetHeight(providerScroll, 175);
-  widgetSetWidth(providerScroll, 1040);
-  const providerPanel = VStack(10, [
+  providerRows = VStack(8, []);
+  stackSetAlignment(providerRows, 5);
+  widgetSetWidth(providerRows, layout.sidebarInnerWidth);
+  const providerPanel = VStack(9, [
     HStack(8, [
-      VStack(3, [label("Provider 状态", 15, colors.text), label("认证只在首次引导时发生，网关运行时仅读取缓存。", 11, colors.subtle)]),
+      VStack(2, [
+        label("Providers", 14, colors.text),
+        label("认证状态", 10, colors.subtle)
+      ]),
       Spacer(),
-      label("/health/auth", 10, colors.subtle)
+      label("/health/auth", 9, colors.subtle)
     ]),
-    providerScroll
+    Divider(),
+    providerRows
   ]);
-  card(providerPanel, 1080);
+  stackSetAlignment(providerPanel, 5);
+  card(providerPanel, layout.sidebarWidth);
+  widgetSetHeight(providerPanel, 166);
 
   const key = SecureField("PROXY_API_KEY（可选）", (value) => {
     gatewayKey = value.trim();
   });
-  widgetSetWidth(key, 320);
+  styleInput(key, layout.sidebarInnerWidth);
   const keyPanel = VStack(8, [
     HStack(8, [
-      VStack(3, [label("Gateway API Key", 13, colors.text), label("仅用于访问当前网关，不会读取上游认证信息。", 10, colors.subtle)]),
+      VStack(2, [
+        label("访问密钥", 14, colors.text),
+        label("保护本地网关", 10, colors.subtle)
+      ]),
       Spacer(),
-      dynamicLabel(gatewayKey ? "当前运行时已设置" : "未设置", "key-state", 10, colors.subtle)
+      dynamicLabel(gatewayKey ? "已设置" : "未设置", "key-state", 10, colors.subtle, 70)
     ]),
-    HStack(8, [key, button("保存", saveKey, colors.text, 72)])
+    key,
+    HStack(8, [
+      label("仅影响 Gateway API", 9, colors.subtle),
+      Spacer(),
+      button("保存", saveKey, colors.cyan, 58)
+    ])
   ]);
-  card(keyPanel, 1080);
+  stackSetAlignment(keyPanel, 5);
+  card(keyPanel, layout.sidebarWidth);
+  widgetSetHeight(keyPanel, 148);
+
+  const sidebar = VStack(12, [overview, providerPanel, keyPanel]);
+  stackSetAlignment(sidebar, 5);
+  widgetSetWidth(sidebar, layout.sidebarWidth);
+
+  modelRows = VStack(7, []);
+  stackSetAlignment(modelRows, 5);
+  widgetSetWidth(modelRows, layout.modelInnerWidth);
+  const modelScroll = ScrollView();
+  scrollviewSetChild(modelScroll, modelRows);
+  widgetSetHeight(modelScroll, 354);
+  widgetSetWidth(modelScroll, layout.modelInnerWidth);
+  const search = TextField("搜索模型名称或 ID", (value) => {
+    modelSearch = value.trim();
+    renderModels();
+  });
+  styleInput(search, layout.modelInnerWidth);
+  const modelPanel = VStack(10, [
+    HStack(8, [
+      VStack(2, [
+        label("模型目录", 15, colors.text),
+        label("来自已认证 Provider", 10, colors.subtle)
+      ]),
+      Spacer(),
+      dynamicLabel("—", "model-count", 12, colors.cyan, 48)
+    ]),
+    search,
+    modelScroll,
+    dynamicLabel("", "model-error", 10, colors.red, layout.modelInnerWidth)
+  ]);
+  stackSetAlignment(modelPanel, 5);
+  card(modelPanel, layout.modelWidth);
+  widgetSetHeight(modelPanel, layout.panelHeight);
+
+  modelPickerHost = VStack(0, []);
+  stackSetAlignment(modelPickerHost, 5);
+  widgetSetWidth(modelPickerHost, layout.testInnerWidth);
+
+  const prompt = TextField("输入一条消息，验证当前网关链路…", (value) => {
+    promptValue = value;
+  });
+  textfieldSetString(prompt, promptValue);
+  styleInput(prompt, layout.testInnerWidth);
+
+  responseStatus = dynamicLabel("准备就绪", "response-status", 11, colors.subtle, 76);
+  const selectedModel = dynamicLabel("选择一个模型", "selected-model", 10, colors.accent, 190);
+  const reasoning = surface(
+    VStack(4, [
+      label("THINKING", 9, colors.yellow),
+      dynamicLabel("暂无思考内容", "response-reasoning", 10, colors.yellow, layout.testInnerWidth - 22)
+    ]),
+    layout.testInnerWidth,
+    64
+  );
+  const answer = surface(
+    VStack(4, [
+      label("ANSWER", 9, colors.cyan),
+      dynamicLabel("选择模型并发送消息，响应会显示在这里。", "response-answer", 12, colors.text, layout.testInnerWidth - 22)
+    ]),
+    layout.testInnerWidth,
+    144
+  );
+  const testPanel = VStack(10, [
+    HStack(8, [
+      VStack(2, [
+        label("快速测试", 15, colors.text),
+        label("发送一条真实的兼容请求", 10, colors.subtle)
+      ]),
+      Spacer(),
+      VStack(2, [selectedModel, responseStatus])
+    ]),
+    label("目标模型", 10, colors.muted),
+    modelPickerHost,
+    label("Prompt", 10, colors.muted),
+    prompt,
+    HStack(10, [
+      primaryButton("发送请求", () => { void sendChat(); }, 112),
+      label("stream: false", 9, colors.subtle)
+    ]),
+    reasoning,
+    answer,
+    dynamicLabel("", "response-error", 10, colors.red, layout.testInnerWidth)
+  ]);
+  stackSetAlignment(testPanel, 5);
+  card(testPanel, layout.testWidth);
+  widgetSetHeight(testPanel, layout.panelHeight);
+
+  const workspaceHeading = HStack(10, [
+    VStack(2, [
+      label("工作台", 15, colors.text),
+      label("选择模型并验证请求链路", 10, colors.subtle)
+    ]),
+    Spacer(),
+    label("POST /v1/chat/completions", 9, colors.subtle)
+  ]);
+  stackSetAlignment(workspaceHeading, 12);
+
+  const workspace = VStack(12, [
+    workspaceHeading,
+    HStack(16, [modelPanel, testPanel])
+  ]);
+  stackSetAlignment(workspace, 5);
+  widgetSetWidth(workspace, layout.workspaceWidth);
+
+  const main = HStack(16, [sidebar, workspace]);
+  stackSetAlignment(main, 3);
+  widgetSetWidth(main, layout.contentWidth);
 
   const content = VStack(16, [
-    hero,
-    metrics,
-    HStack(16, [modelPanel, testPanel]),
-    providerPanel,
-    keyPanel,
-    label(`API Base URL  ${gatewayUrl}/v1  ·  认证缓存不会通过 UI 暴露  ·  需要重新认证时运行 npm run auth`, 10, colors.subtle)
+    intro,
+    main,
+    label("认证独立于网关运行 · 模型目录来自 /v1/models · 重新认证请运行 npm run auth", 10, colors.subtle)
   ]);
-  setPadding(content, 20, 22, 30, 22);
-  widgetSetWidth(content, 1180);
+  stackSetAlignment(content, 5);
+  setPadding(content, 18, 22, 24, 22);
+  widgetSetWidth(content, layout.contentWidth);
 
   const scroll = ScrollView();
   scrollviewSetChild(scroll, content);
-  widgetSetWidth(scroll, 1180);
-  widgetSetHeight(scroll, 760);
+  widgetSetWidth(scroll, layout.windowWidth);
+  widgetSetHeight(scroll, layout.windowHeight - 64);
 
   const root = VStack(0, [header, scroll]);
+  stackSetAlignment(root, 5);
   fill(root, colors.background);
-  widgetSetWidth(root, 1180);
-  widgetSetHeight(root, 820);
+  widgetSetWidth(root, layout.windowWidth);
+  widgetSetHeight(root, layout.windowHeight);
   return root;
 }
 
