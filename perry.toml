@@ -1,0 +1,10 @@
+# Perry configuration
+# https://github.com/PerryTS/perry
+
+[project]
+name = "mimo-proxy"
+entry = "src/server.ts"
+
+[build]
+out_dir = "dist"
+opt_level = 2
