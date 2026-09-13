@@ -2,7 +2,7 @@
 # https://github.com/PerryTS/perry
 
 [project]
-name = "mimo-proxy"
+name = "llm-gateway"
 entry = "src/server.ts"
 
 [build]

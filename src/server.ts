@@ -337,12 +337,12 @@ const server = createServer((req, res) => {
 });
 
 server.on("error", (error) => {
-  console.error("OpenAI Gateway 服务错误:", error.message);
+  console.error("LLM Gateway 服务错误:", error.message);
 });
 
 server.listen(config.port, config.bindHost, () => {
   console.log(
-    `OpenAI Gateway 已启动: http://${config.bindHost}:${config.port}`
+    `LLM Gateway 已启动: http://${config.bindHost}:${config.port}`
   );
   console.log(
     `- 兼容接口: http://${config.bindHost}:${config.port}/v1/chat/completions`

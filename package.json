@@ -1,33 +1,26 @@
 {
-  "name": "mimo-proxy",
+  "name": "llm-gateway",
   "version": "1.0.0",
   "description": "A small, native TypeScript OpenAI gateway for desktop LLM clients",
   "type": "module",
   "main": "src/server.ts",
   "bin": {
-    "mimo-chat": "./dist/mimo-chat",
-    "mimo-server": "./dist/mimo-server"
+    "llm-gateway": "./dist/llm-gateway"
   },
   "scripts": {
-    "build": "node scripts/prepare-dist.mjs && node scripts/build-native.mjs src/server.ts dist/mimo-server && node scripts/build-native.mjs src/cli.ts dist/mimo-chat && npm run build:auth",
-    "build:server": "node scripts/prepare-dist.mjs && node scripts/build-native.mjs src/server.ts dist/mimo-server",
-    "build:cli": "node scripts/prepare-dist.mjs && node scripts/build-native.mjs src/cli.ts dist/mimo-chat",
+    "build": "node scripts/prepare-dist.mjs && node scripts/build-native.mjs src/server.ts dist/llm-gateway && npm run build:auth",
+    "build:server": "node scripts/prepare-dist.mjs && node scripts/build-native.mjs src/server.ts dist/llm-gateway",
     "build:auth": "node scripts/prepare-dist.mjs && tsc -p tsconfig.auth.json",
-    "start": "npm run build:server && ./dist/mimo-server",
+    "start": "npm run build:server && ./dist/llm-gateway",
     "launch": "npm run start",
     "auth": "npm run build:auth && node dist/scripts/auth.js",
-    "cli": "npm run build:cli && ./dist/mimo-chat",
     "typecheck": "tsc --noEmit"
   },
   "engines": {
     "node": ">=18.0.0"
   },
-  "dependencies": {
-    "ws": "^8.18.3"
-  },
   "devDependencies": {
     "@types/node": "^22.15.0",
-    "@types/ws": "^8.5.13",
     "@perryts/perry": "0.5.1520",
     "typescript": "^5.8.3"
   }

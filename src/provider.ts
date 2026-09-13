@@ -50,7 +50,6 @@ export interface ProviderAdapter {
   readonly authMethods: string[];
   readonly captureHeaders: string[];
   readonly clientCandidates: string[];
-  readonly supportsBrowserFallback: boolean;
   streamChat(
     authHeaders: AuthHeaders,
     request: NormalizedChatRequest,
@@ -112,7 +111,6 @@ class OpenAICompatibleProvider implements ProviderAdapter {
     public readonly authMethods: string[],
     public readonly captureHeaders: string[],
     public readonly clientCandidates: string[],
-    public readonly supportsBrowserFallback: boolean,
     private readonly buildBody: RequestBodyBuilder
   ) {}
 
@@ -196,7 +194,6 @@ const providers: ProviderAdapter[] = [
     ["POST"],
     ["cookie", "authorization", "x-*"],
     macApplicationBinaries("Xiaomi MiMo", ["Xiaomi MiMo", "Electron"]),
-    true,
     mimoRequestBody
   ),
   new OpenAICompatibleProvider(
@@ -212,7 +209,6 @@ const providers: ProviderAdapter[] = [
     ["GET", "POST"],
     ["cookie", "authorization", "x-*"],
     macApplicationBinaries("WorkBuddy", ["Electron", "WorkBuddy"]),
-    false,
     workbuddyRequestBody
   )
 ];

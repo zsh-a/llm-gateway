@@ -9,7 +9,6 @@ export type ReasoningEffort =
 export interface GatewayConfig {
   port: number;
   bindHost: string;
-  cdpJsonUrl: string;
   requestTimeoutMs: number;
   maxBodyBytes: number;
   apiKey: string;
@@ -80,7 +79,6 @@ export function loadConfig(): GatewayConfig {
   return {
     port: positiveInt("PORT", 3000),
     bindHost: env("BIND_HOST", "127.0.0.1"),
-    cdpJsonUrl: env("CDP_JSON_URL", "http://127.0.0.1:9222/json"),
     requestTimeoutMs: positiveInt("REQUEST_TIMEOUT_MS", 180000),
     maxBodyBytes: positiveInt("MAX_BODY_BYTES", 1024 * 1024),
     apiKey: process.env.PROXY_API_KEY ?? "",

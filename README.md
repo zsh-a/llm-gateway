@@ -1,4 +1,4 @@
-# OpenAI Gateway
+# LLM Gateway
 
 一个用 TypeScript 编写、由 Perry 编译核心服务的统一 OpenAI 兼容网关。
 当前内置 MiMo 和 WorkBuddy 两个 Provider，客户端只需要配置一次网关地址，模型会自动路由到对应上游。
@@ -30,8 +30,6 @@ src/models.ts       多 Provider 模型聚合和自动路由
 src/sse.ts          SSE/JSON 流解析器
 src/openai.ts       OpenAI 请求/响应适配
 src/server.ts       OpenAI 兼容 HTTP 服务
-src/cli.ts          命令行客户端
-src/cdp.ts          MiMo CLI 的浏览器回退通道
 scripts/auth.ts     一次性认证引导工具
 ```
 
@@ -56,8 +54,7 @@ npm run build
 产物：
 
 ```text
-dist/mimo-server
-dist/mimo-chat
+dist/llm-gateway
 dist/scripts/auth.js
 ```
 
