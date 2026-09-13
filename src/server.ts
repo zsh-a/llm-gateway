@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
 
 import { getAuthStore } from "./auth-store.js";
 import { loadConfig } from "./config.js";
@@ -13,6 +13,18 @@ import {
   normalizeChatRequest,
   toOpenAIChunk
 } from "./openai.js";
+import {
+  createResponseContext,
+  normalizeResponseRequest,
+  responseChunkEvents,
+  responseContentPartAdded,
+  responseCreated,
+  responseFailed,
+  responseFinishEvents,
+  responseInProgress,
+  responseOutputItemAdded,
+  ResponseAccumulator
+} from "./responses.js";
 import {
   getProviders,
   UpstreamError,
@@ -129,6 +141,12 @@ function writeStreamHeaders(res: ServerResponse): void {
   });
 }
 
+function writeResponseEvent(res: ServerResponse, value: Record<string, unknown>): void {
+  if (res.destroyed) return;
+  const type = typeof value.type === "string" ? value.type : "message";
+  res.write(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);
+}
+
 async function handleStreaming(
   res: ServerResponse,
   authHeaders: Record<string, string>,
@@ -210,10 +228,103 @@ async function handleNonStreaming(
   }
 }
 
-async function handleChat(
-  req: IncomingMessage,
-  res: ServerResponse
+async function handleResponseStreaming(
+  res: ServerResponse,
+  authHeaders: Record<string, string>,
+  route: ModelRoute,
+  request: NormalizedChatRequest
 ): Promise<void> {
+  const context = createResponseContext(route.publicModel);
+  const accumulator = new ResponseAccumulator();
+  const clientAbort = new AbortController();
+  let headersSent = false;
+
+  res.on("close", () => {
+    if (!res.writableEnded) clientAbort.abort();
+  });
+
+  try {
+    writeStreamHeaders(res);
+    headersSent = true;
+    for (const value of [
+      responseCreated(context),
+      responseInProgress(context),
+      responseOutputItemAdded(context),
+      responseContentPartAdded(context)
+    ]) {
+      writeResponseEvent(res, value);
+    }
+
+    await route.provider.streamChat(
+      authHeaders,
+      request,
+      config,
+      (chunk: UpstreamChunk) => {
+        for (const value of responseChunkEvents(chunk, context, accumulator)) {
+          writeResponseEvent(res, value);
+        }
+      },
+      clientAbort.signal
+    );
+
+    if (res.destroyed) return;
+    for (const value of responseFinishEvents(context, accumulator)) {
+      writeResponseEvent(res, value);
+    }
+    res.end();
+  } catch (error) {
+    if (res.destroyed) return;
+    const failure = upstreamError(error);
+    if (failure.status === 401 || failure.status === 403) {
+      authStore.invalidate(route.provider.id);
+    }
+    if (!headersSent) {
+      sendError(res, failure.status, failure.message, failure.type);
+      return;
+    }
+    writeResponseEvent(res, responseFailed(context, failure.message));
+    res.end();
+  }
+}
+
+async function handleResponseNonStreaming(
+  res: ServerResponse,
+  authHeaders: Record<string, string>,
+  route: ModelRoute,
+  request: NormalizedChatRequest
+): Promise<void> {
+  const context = createResponseContext(route.publicModel);
+  const accumulator = new ResponseAccumulator();
+  try {
+    await route.provider.streamChat(authHeaders, request, config, (chunk) => {
+      accumulator.add(chunk);
+    });
+    sendJson(res, 200, accumulator.response(context));
+  } catch (error) {
+    const failure = upstreamError(error);
+    if (failure.status === 401 || failure.status === 403) {
+      authStore.invalidate(route.provider.id);
+    }
+    sendError(res, failure.status, failure.message, failure.type);
+  }
+}
+
+interface PreparedRequest {
+  route: ModelRoute;
+  authHeaders: Record<string, string>;
+  request: NormalizedChatRequest;
+}
+
+type RequestNormalizer = (
+  value: unknown,
+  defaultModel?: string
+) => NormalizedChatRequest;
+
+async function prepareRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  normalize: RequestNormalizer
+): Promise<PreparedRequest | null> {
   let rawBody: string;
   try {
     rawBody = await readBody(req, config.maxBodyBytes);
@@ -221,7 +332,7 @@ async function handleChat(
     const message = error instanceof Error ? error.message : String(error);
     const status = message.includes("大小限制") ? 413 : 400;
     sendError(res, status, message, "invalid_request_error");
-    return;
+    return null;
   }
 
   let parsed: unknown;
@@ -229,21 +340,29 @@ async function handleChat(
     parsed = JSON.parse(rawBody || "{}");
   } catch {
     sendError(res, 400, "请求体不是合法 JSON", "invalid_request_error");
-    return;
+    return null;
   }
 
-  const request = normalizeChatRequest(parsed, config.defaultModel);
+  let request: NormalizedChatRequest;
+  try {
+    request = normalize(parsed, config.defaultModel);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    sendError(res, 400, message, "invalid_request_error");
+    return null;
+  }
+
   const route = await resolveModel(config, request.model);
   if (!route) {
     sendError(
       res,
       400,
       request.model
-        ? `未找到模型 ${request.model}，请先请求 /v1/models`
+        ? "未找到模型 " + request.model + "，请先请求 /v1/models"
         : "请求必须包含 model",
       "invalid_request_error"
     );
-    return;
+    return null;
   }
 
   const authSnapshot = authStore.get(route.provider.id);
@@ -251,20 +370,68 @@ async function handleChat(
     sendError(
       res,
       503,
-      `未找到 ${route.provider.name} 认证，请先执行 npm run auth -- --provider ${route.provider.id}`,
+      "未找到 " + route.provider.name +
+        " 认证，请先执行 npm run auth -- --provider " + route.provider.id,
       "auth_error"
     );
-    return;
+    return null;
   }
 
-  const routedRequest: NormalizedChatRequest = {
-    ...request,
-    model: route.upstreamModel
+  return {
+    route,
+    authHeaders: authSnapshot.headers,
+    request: {
+      ...request,
+      model: route.upstreamModel
+    }
   };
-  if (request.stream) {
-    await handleStreaming(res, authSnapshot.headers, route, routedRequest);
+}
+
+async function handleChat(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  const prepared = await prepareRequest(req, res, normalizeChatRequest);
+  if (!prepared) return;
+
+  if (prepared.request.stream) {
+    await handleStreaming(
+      res,
+      prepared.authHeaders,
+      prepared.route,
+      prepared.request
+    );
   } else {
-    await handleNonStreaming(res, authSnapshot.headers, route, routedRequest);
+    await handleNonStreaming(
+      res,
+      prepared.authHeaders,
+      prepared.route,
+      prepared.request
+    );
+  }
+}
+
+async function handleResponses(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  const prepared = await prepareRequest(req, res, normalizeResponseRequest);
+  if (!prepared) return;
+
+  if (prepared.request.stream) {
+    await handleResponseStreaming(
+      res,
+      prepared.authHeaders,
+      prepared.route,
+      prepared.request
+    );
+  } else {
+    await handleResponseNonStreaming(
+      res,
+      prepared.authHeaders,
+      prepared.route,
+      prepared.request
+    );
   }
 }
 
@@ -315,6 +482,14 @@ async function route(
 
   if (
     req.method === "POST" &&
+    (url.pathname === "/v1/responses" || url.pathname === "/responses")
+  ) {
+    await handleResponses(req, res);
+    return;
+  }
+
+  if (
+    req.method === "POST" &&
     (url.pathname === "/v1/chat/completions" ||
       url.pathname === "/chat/completions")
   ) {
@@ -325,27 +500,38 @@ async function route(
   sendError(res, 404, "Not found", "invalid_request_error");
 }
 
-const server = createServer((req, res) => {
-  void route(req, res).catch((error) => {
-    if (res.headersSent || res.destroyed) {
-      if (!res.writableEnded) res.end();
-      return;
-    }
-    const message = error instanceof Error ? error.message : String(error);
-    sendError(res, 500, message, "internal_error");
+let gatewayServer: Server | null = null;
+
+export function startGateway(): Server {
+  if (gatewayServer) return gatewayServer;
+
+  gatewayServer = createServer((req, res) => {
+    void route(req, res).catch((error) => {
+      if (res.headersSent || res.destroyed) {
+        if (!res.writableEnded) res.end();
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      sendError(res, 500, message, "internal_error");
+    });
   });
-});
 
-server.on("error", (error) => {
-  console.error("LLM Gateway 服务错误:", error.message);
-});
+  gatewayServer.on("error", (error) => {
+    console.error("LLM Gateway 服务错误:", error.message);
+  });
 
-server.listen(config.port, config.bindHost, () => {
-  console.log(
-    `LLM Gateway 已启动: http://${config.bindHost}:${config.port}`
-  );
-  console.log(
-    `- 兼容接口: http://${config.bindHost}:${config.port}/v1/chat/completions`
-  );
-  console.log(`- 模型列表: http://${config.bindHost}:${config.port}/v1/models`);
-});
+  gatewayServer.listen(config.port, config.bindHost, () => {
+    console.log(
+      `LLM Gateway 已启动: http://${config.bindHost}:${config.port}`
+    );
+    console.log(
+      `- 兼容接口: http://${config.bindHost}:${config.port}/v1/chat/completions`
+    );
+    console.log(
+      `- Responses 接口: http://${config.bindHost}:${config.port}/v1/responses`
+    );
+    console.log(`- 模型列表: http://${config.bindHost}:${config.port}/v1/models`);
+  });
+
+  return gatewayServer;
+}

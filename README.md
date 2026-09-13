@@ -3,7 +3,7 @@
 一个用 TypeScript 编写、由 Perry 编译核心服务的统一 OpenAI 兼容网关。
 当前内置 MiMo 和 WorkBuddy 两个 Provider，客户端只需要配置一次网关地址，模型会自动路由到对应上游。
 
-认证流程与网关运行时完全分离：`npm run auth` 负责首次捕获并缓存认证，`npm run launch` 只运行轻量网关。
+认证流程与网关运行时完全分离：`npm run auth` 负责首次捕获并缓存认证；网关和桌面控制面板由同一个二进制提供 `serve`、`desktop` 两种模式。
 
 ## 架构
 
@@ -16,8 +16,9 @@
   .runtime/auth/workbuddy.json
       │ 只读缓存
       ▼
-网关（Perry 原生服务）
-  OpenAI Client → ModelCatalog → Provider → LLM 上游
+同一个 Perry 原生二进制
+  serve   → OpenAI Client → ModelCatalog → Provider → LLM 上游
+  desktop → 托管 serve 子进程 + Perry UI 控制面板
 ```
 
 核心代码：
@@ -29,13 +30,15 @@ src/auth-store.ts   网关只读/失效认证缓存
 src/models.ts       多 Provider 模型聚合和自动路由
 src/sse.ts          SSE/JSON 流解析器
 src/openai.ts       OpenAI 请求/响应适配
-src/server.ts       OpenAI 兼容 HTTP 服务
-src/dashboard.ts    Perry UI 原生桌面控制面板
+src/responses.ts    Responses 输入/输出适配
+src/server.ts       OpenAI 兼容 HTTP 服务与启动生命周期
+src/dashboard.ts    Perry UI 原生桌面控制面板与启动生命周期
+src/main.ts         serve / desktop 模式入口
 scripts/auth.ts     一次性认证引导工具
 ```
 
-网关进程不导入 `child_process`、mitmproxy 控制逻辑或桌面客户端启动逻辑。
-桌面控制面板是独立的 Perry 原生 UI 进程，通过 OpenAI 接口读取网关状态和发送测试请求。
+`serve` 模式只运行网关，不创建 UI；`desktop` 模式由同一个入口托管 Gateway 子进程和 Perry 原生控制面板。这样构建产物和启动方式统一，同时避开当前 Perry macOS UI 事件循环对 `node:http` 异步 accept 的限制。
+认证工具仍然独立，不会被网关或桌面模式自动启动。
 
 ## 安装与构建
 
@@ -57,7 +60,6 @@ npm run build
 
 ```text
 dist/llm-gateway
-dist/llm-gateway-ui
 dist/scripts/auth.js
 ```
 
@@ -116,23 +118,29 @@ CLIENT_BIN="/path/to/client" npm run auth -- --provider workbuddy
 ls .runtime/auth
 ```
 
-## 启动网关
+## 启动模式
 
-认证完成后直接启动：
+认证完成后，后台或无图形环境运行 `serve` 模式：
 
 ```bash
 npm run launch
+# 等价于：
+# ./dist/llm-gateway serve
 ```
 
-需要桌面控制面板时，再执行：
+桌面端一键启动 Gateway 和控制面板：
 
 ```bash
-npm run ui
+npm run desktop
+# 等价于：
+# ./dist/llm-gateway desktop
 ```
 
-它会打开 Perry 原生窗口，查看网关、Provider、认证和模型状态，并直接发送一条测试请求。控制面板默认连接 `http://127.0.0.1:3000`；如果配置了 `PROXY_API_KEY`，在窗口中输入同一个 Key 即可。也可以通过 `GATEWAY_URL` 指定网关地址。UI 使用系统 `curl` 异步访问网关，macOS 无需额外安装依赖。
+`desktop` 会由同一个二进制托管 Gateway 子进程并打开 Perry 原生窗口，查看网关、Provider、认证和模型状态，并发送真实测试请求。控制面板默认连接当前托管实例的 `http://127.0.0.1:3000`；如果配置了 `PROXY_API_KEY`，在窗口中输入同一个 Key 即可。也可以通过 `GATEWAY_URL` 指定其他网关地址。UI 使用系统 `curl` 异步访问网关，macOS 无需额外安装依赖。
 
 网关不会启动 mitmproxy，也不会启动桌面客户端。之后可以关闭 MiMo、WorkBuddy 和 mitmweb。
+
+`desktop` 模式的生命周期由 UI 入口管理：关闭窗口或退出桌面进程会自动结束托管的 Gateway 子进程。需要让 Gateway 独立常驻时，请使用 `serve` 模式。
 
 客户端统一配置为：
 
@@ -210,9 +218,21 @@ GET  /health/auth
 GET  /v1/models
 POST /v1/chat/completions
 POST /chat/completions
+POST /v1/responses
+POST /responses
 ```
 
 网关始终以流式方式请求上游；客户端使用 `stream: false` 时由网关聚合为普通 JSON，同时保留工具调用、思维内容和 usage（若上游提供）。
+
+Responses API 会将 `input`、`instructions` 和 Responses 风格的 function tools 适配为上游所需的 Chat Completions 请求，并返回兼容的 `response` 对象。`stream: true` 时输出标准 Responses SSE 事件，包含 `response.created`、`response.output_text.delta` 和 `response.completed`。
+
+调用示例：
+
+```bash
+curl http://127.0.0.1:3000/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-pro","input":"你好","stream":false}'
+```
 
 ## 扩展 Provider
 

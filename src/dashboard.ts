@@ -462,8 +462,9 @@ function renderProviders(statusValue: unknown): void {
   setText("metric-providers", String(ids.length || "—"));
 }
 
-async function loadDashboard(): Promise<void> {
+async function loadDashboard(retry = 0): Promise<void> {
   setGlobalState("刷新中…", colors.muted);
+  let connected = false;
   try {
     const values = await Promise.all([
       requestJson("/health"),
@@ -476,8 +477,14 @@ async function loadDashboard(): Promise<void> {
     const ready = ids.filter((id) => asRecord(providers[id]).ready === true).length;
     setText("metric-auth", ids.length > 0 ? `${ready} / ${ids.length}` : "—");
     renderProviders(auth);
+    connected = true;
     setGlobalState(health.status === "ok" ? "在线" : "异常", health.status === "ok" ? colors.green : colors.yellow);
   } catch (error) {
+    if (retry < 20) {
+      setGlobalState("连接中…", colors.muted);
+      appSetTimer(250, () => { void loadDashboard(retry + 1); });
+      return;
+    }
     setGlobalState("离线", colors.red);
     setText("metric-providers", "—");
     setText("metric-auth", "—");
@@ -492,6 +499,7 @@ async function loadDashboard(): Promise<void> {
     models = [];
     setText("model-error", errorMessage(error));
   }
+  if (!connected) return;
   selectedModelIndex = Math.min(selectedModelIndex, Math.max(0, models.length - 1));
   setText("metric-models", String(models.length || "—"));
   renderModels();
@@ -776,18 +784,20 @@ function buildUi(): Widget {
   return root;
 }
 
-const root = buildUi();
-let dashboardStarted = false;
-appSetTimer(100, () => {
-  if (dashboardStarted) return;
-  dashboardStarted = true;
-  void loadDashboard();
-});
+export function startDashboard(): void {
+  const root = buildUi();
+  let dashboardStarted = false;
+  appSetTimer(100, () => {
+    if (dashboardStarted) return;
+    dashboardStarted = true;
+    void loadDashboard();
+  });
 
-App({
-  title: "LLM Gateway",
-  width: 1180,
-  height: 820,
-  body: root,
-  vibrancy: "windowBackground"
-});
+  App({
+    title: "LLM Gateway",
+    width: 1180,
+    height: 820,
+    body: root,
+    vibrancy: "windowBackground"
+  });
+}

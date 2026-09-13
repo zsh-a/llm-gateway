@@ -4,8 +4,9 @@ import { resolve } from "node:path";
 const distDir = resolve(process.cwd(), "dist");
 mkdirSync(distDir, { recursive: true });
 
-// Remove artifacts from the former combined launcher/auth implementation.
+// Remove stale generated artifacts from previous project layouts.
 for (const staleFile of [
+  "llm-gateway-ui",
   "mimo-chat",
   "mimo-server",
   "scripts/launch.js",
