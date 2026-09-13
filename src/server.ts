@@ -9,20 +9,21 @@ import {
   createStreamContext,
   errorResponse,
   finalOpenAIChunk,
+  includesUsage,
   modelsResponse,
   normalizeChatRequest,
-  toOpenAIChunk
+  toOpenAIChunks,
+  usageOpenAIChunk
 } from "./openai.js";
 import {
   createResponseContext,
   normalizeResponseRequest,
   responseChunkEvents,
-  responseContentPartAdded,
   responseCreated,
   responseFailed,
   responseFinishEvents,
   responseInProgress,
-  responseOutputItemAdded,
+  rememberResponse,
   ResponseAccumulator
 } from "./responses.js";
 import {
@@ -154,6 +155,8 @@ async function handleStreaming(
   request: NormalizedChatRequest
 ): Promise<void> {
   const context = createStreamContext(route.publicModel);
+  const accumulator = new ChatAccumulator();
+  const includeUsage = includesUsage(request);
   let headersSent = false;
   let finishSeen = false;
   const clientAbort = new AbortController();
@@ -174,9 +177,14 @@ async function handleStreaming(
           headersSent = true;
         }
 
-        const finishReason = chunk.choices?.[0]?.finish_reason;
-        if (finishReason) finishSeen = true;
-        res.write(`data: ${JSON.stringify(toOpenAIChunk(chunk, context))}\n\n`);
+        const events = accumulator.add(chunk);
+        if (events.some((event) => event.type === "finish")) finishSeen = true;
+        const visibleEvents = includeUsage
+          ? events.filter((event) => event.type !== "usage")
+          : events;
+        for (const value of toOpenAIChunks(visibleEvents, context)) {
+          res.write(`data: ${JSON.stringify(value)}\n\n`);
+        }
       },
       clientAbort.signal
     );
@@ -187,7 +195,12 @@ async function handleStreaming(
       headersSent = true;
     }
     if (!finishSeen) {
-      res.write(`data: ${JSON.stringify(finalOpenAIChunk(context))}\n\n`);
+      res.write(`data: ${JSON.stringify(finalOpenAIChunk(context, accumulator.finishReason))}\n\n`);
+    }
+    if (includeUsage) {
+      res.write(
+        `data: ${JSON.stringify(usageOpenAIChunk(context, accumulator.usage))}\n\n`
+      );
     }
     res.end("data: [DONE]\n\n");
   } catch (error) {
@@ -234,7 +247,7 @@ async function handleResponseStreaming(
   route: ModelRoute,
   request: NormalizedChatRequest
 ): Promise<void> {
-  const context = createResponseContext(route.publicModel);
+  const context = createResponseContext(route.publicModel, request.response);
   const accumulator = new ResponseAccumulator();
   const clientAbort = new AbortController();
   let headersSent = false;
@@ -246,12 +259,7 @@ async function handleResponseStreaming(
   try {
     writeStreamHeaders(res);
     headersSent = true;
-    for (const value of [
-      responseCreated(context),
-      responseInProgress(context),
-      responseOutputItemAdded(context),
-      responseContentPartAdded(context)
-    ]) {
+    for (const value of [responseCreated(context), responseInProgress(context)]) {
       writeResponseEvent(res, value);
     }
 
@@ -271,6 +279,7 @@ async function handleResponseStreaming(
     for (const value of responseFinishEvents(context, accumulator)) {
       writeResponseEvent(res, value);
     }
+    rememberResponse(context, accumulator);
     res.end();
   } catch (error) {
     if (res.destroyed) return;
@@ -293,13 +302,14 @@ async function handleResponseNonStreaming(
   route: ModelRoute,
   request: NormalizedChatRequest
 ): Promise<void> {
-  const context = createResponseContext(route.publicModel);
+  const context = createResponseContext(route.publicModel, request.response);
   const accumulator = new ResponseAccumulator();
   try {
     await route.provider.streamChat(authHeaders, request, config, (chunk) => {
       accumulator.add(chunk);
     });
     sendJson(res, 200, accumulator.response(context));
+    rememberResponse(context, accumulator);
   } catch (error) {
     const failure = upstreamError(error);
     if (failure.status === 401 || failure.status === 403) {

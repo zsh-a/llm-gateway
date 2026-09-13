@@ -14,7 +14,12 @@ import {
   getProviders,
   type ProviderAdapter
 } from "./provider.js";
-import type { JsonRecord, ModelCapabilities, ModelDescriptor } from "./types.js";
+import type {
+  JsonRecord,
+  ModelCapabilities,
+  ModelDescriptor,
+  ReasoningEfforts
+} from "./types.js";
 
 type ModelSource = "local" | "remote" | "cache" | "fallback";
 
@@ -56,6 +61,38 @@ function booleanValue(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
+function reasoningEffortsValue(value: unknown): ReasoningEfforts | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const efforts: ReasoningEfforts = {};
+  for (const [id, wireValue] of Object.entries(value as JsonRecord)) {
+    if (wireValue === null || typeof wireValue === "string") {
+      efforts[id] = wireValue;
+    }
+  }
+  return Object.keys(efforts).length > 0 ? efforts : undefined;
+}
+
+const GENERIC_REASONING_EFFORTS: ReasoningEfforts = {
+  off: null,
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "xhigh",
+  max: "max"
+};
+
+const DEEPSEEK_V4_REASONING_EFFORTS: ReasoningEfforts = {
+  off: null,
+  low: "low",
+  medium: "high",
+  high: "high",
+  xhigh: "high",
+  max: "max"
+};
+
 function modelId(value: unknown): string {
   if (typeof value === "string") return value.trim();
 
@@ -76,19 +113,37 @@ function modelDescriptor(
   if (typeof value === "string") return { id, ownedBy: defaultOwnedBy };
 
   const record = asRecord(value);
+  const recordCapabilities = asRecord(record.capabilities);
   const capabilities: ModelCapabilities = {};
   const toolCalling = booleanValue(
-    record.supportsToolCall ?? record.supportsToolCalls ?? record.tool_calling
+    record.supportsToolCall ?? record.supportsToolCalls ?? record.tool_calling ??
+      recordCapabilities.toolCalling ?? recordCapabilities.tool_calling
   );
   const images = booleanValue(
-    record.supportsImages ?? record.supportsVision ?? record.vision
+    record.supportsImages ?? record.supportsVision ?? record.vision ??
+      recordCapabilities.images ?? recordCapabilities.vision
   );
+  const rawReasoning = record.supportsReasoning ?? record.reasoning ??
+    record.thinking ?? recordCapabilities.reasoning ?? recordCapabilities.thinking;
   const reasoning = booleanValue(
-    record.supportsReasoning ?? record.reasoning ?? record.thinking
+    rawReasoning
+  );
+  const nestedReasoning = asRecord(record.reasoning);
+  const efforts = reasoningEffortsValue(
+    record.reasoningEfforts ?? record.reasoning_efforts ??
+      recordCapabilities.reasoningEfforts ?? recordCapabilities.reasoning_efforts ??
+      nestedReasoning.efforts
+  );
+  const reasoningEnabled = reasoning ?? (
+    rawReasoning !== undefined && typeof rawReasoning === "object"
+      ? true
+      : efforts !== undefined
+        ? true
+        : undefined
   );
   if (toolCalling !== undefined) capabilities.toolCalling = toolCalling;
   if (images !== undefined) capabilities.images = images;
-  if (reasoning !== undefined) capabilities.reasoning = reasoning;
+  if (reasoningEnabled !== undefined) capabilities.reasoning = reasoningEnabled;
   if (Object.keys(capabilities).length > 0) capabilities.chat = true;
 
   const name = stringValue(
@@ -100,6 +155,23 @@ function modelDescriptor(
   const descriptor: ModelDescriptor = { id, ownedBy };
   if (name && name !== id) descriptor.name = name;
   if (Object.keys(capabilities).length > 0) descriptor.capabilities = capabilities;
+
+  if (efforts !== undefined && reasoningEnabled !== false) {
+    descriptor.reasoningEfforts = efforts;
+  } else if (reasoningEnabled === true) {
+    descriptor.reasoningEfforts = id.toLowerCase().startsWith("deepseek-v4-")
+      ? { ...DEEPSEEK_V4_REASONING_EFFORTS }
+      : { ...GENERIC_REASONING_EFFORTS };
+  }
+
+  const defaultReasoningEffort = stringValue(
+    record.defaultReasoningEffort ?? record.default_reasoning_effort ??
+      nestedReasoning.defaultEffort ?? nestedReasoning.default_effort ??
+      nestedReasoning.effort
+  );
+  if (defaultReasoningEffort) {
+    descriptor.defaultReasoningEffort = defaultReasoningEffort;
+  }
 
   const maxInputTokens = numberValue(
     record.maxInputTokens ?? record.max_input_tokens ?? record.contextWindow
@@ -291,11 +363,14 @@ class ModelCatalog {
     models: ModelDescriptor[],
     provider: ProviderAdapter
   ): ModelDescriptor[] {
-    return models.map((model) => ({
-      ...model,
-      providerId: provider.id,
-      publicId: undefined
-    }));
+    return models.map((model) => {
+      const described = provider.describeModel?.(model) ?? model;
+      return {
+        ...described,
+        providerId: provider.id,
+        publicId: undefined
+      };
+    });
   }
 
   private async fetchRemote(provider: ProviderAdapter): Promise<ModelDescriptor[]> {

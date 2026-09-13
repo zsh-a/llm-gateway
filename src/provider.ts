@@ -1,7 +1,11 @@
 import type { AuthHeaders } from "./auth-store.js";
 import type { GatewayConfig } from "./config.js";
 import { consumeSseJson } from "./sse.js";
-import type { JsonRecord, NormalizedChatRequest } from "./types.js";
+import type {
+  JsonRecord,
+  ModelDescriptor,
+  NormalizedChatRequest
+} from "./types.js";
 
 export type ProviderId = "mimo" | "workbuddy";
 
@@ -9,9 +13,11 @@ export interface UpstreamDelta {
   role?: string;
   content?: string;
   reasoning_content?: string;
+  reasoning?: string;
+  thinking?: string;
   tool_calls?: unknown;
   function_call?: unknown;
-  refusal?: string;
+  refusal?: string | null;
 }
 
 export interface UpstreamChoice {
@@ -22,7 +28,7 @@ export interface UpstreamChoice {
 export interface UpstreamChunk {
   id?: string;
   choices?: UpstreamChoice[];
-  usage?: JsonRecord;
+  usage?: JsonRecord | null;
 }
 
 export class UpstreamError extends Error {
@@ -50,6 +56,7 @@ export interface ProviderAdapter {
   readonly authMethods: string[];
   readonly captureHeaders: string[];
   readonly clientCandidates: string[];
+  readonly describeModel?: (model: ModelDescriptor) => ModelDescriptor;
   streamChat(
     authHeaders: AuthHeaders,
     request: NormalizedChatRequest,
@@ -63,10 +70,28 @@ type RequestBodyBuilder = (
   request: NormalizedChatRequest
 ) => JsonRecord;
 
+function asRecord(value: unknown): JsonRecord {
+  return value !== null && typeof value === "object"
+    ? value as JsonRecord
+    : {};
+}
+
+function upstreamMessages(messages: unknown[]): unknown[] {
+  return messages.map((value) => {
+    const message = asRecord(value);
+    if (message.role !== "developer") return value;
+    // DeepSeek/WorkBuddy-compatible endpoints generally accept `system` but
+    // reject the OpenAI reasoning-model `developer` role. Harness uses the
+    // latter for system prompts once reasoning is enabled, so normalize it at
+    // this single provider boundary.
+    return { ...message, role: "system" };
+  });
+}
+
 function baseRequestBody(request: NormalizedChatRequest): JsonRecord {
   const body: JsonRecord = { ...request.options };
   body.model = request.model;
-  body.messages = request.messages;
+  body.messages = upstreamMessages(request.messages);
   body.stream = true;
   return body;
 }
@@ -91,10 +116,41 @@ function mimoRequestBody(request: NormalizedChatRequest): JsonRecord {
 
 function workbuddyRequestBody(request: NormalizedChatRequest): JsonRecord {
   const body = baseRequestBody(request);
-  if (request.effort !== "medium" && body.reasoning_effort === undefined) {
+
+  if (request.effort === "none") {
+    body.thinking = { type: "disabled" };
+    delete body.reasoning_effort;
+  } else if (
+    request.reasoningEffortExplicit ||
+    request.effort !== "medium"
+  ) {
     body.reasoning_effort = request.effort;
   }
   return body;
+}
+
+const MIMO_REASONING_EFFORTS = {
+  off: null,
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "xhigh",
+  max: "max"
+};
+
+function mimoModelDescriptor(model: ModelDescriptor): ModelDescriptor {
+  if (!model.id.toLowerCase().startsWith("mimo-x-")) return model;
+
+  return {
+    ...model,
+    capabilities: {
+      ...model.capabilities,
+      chat: true,
+      reasoning: true
+    },
+    reasoningEfforts: model.reasoningEfforts ?? { ...MIMO_REASONING_EFFORTS },
+    defaultReasoningEffort: model.defaultReasoningEffort ?? "medium"
+  };
 }
 
 class OpenAICompatibleProvider implements ProviderAdapter {
@@ -111,7 +167,8 @@ class OpenAICompatibleProvider implements ProviderAdapter {
     public readonly authMethods: string[],
     public readonly captureHeaders: string[],
     public readonly clientCandidates: string[],
-    private readonly buildBody: RequestBodyBuilder
+    private readonly buildBody: RequestBodyBuilder,
+    public readonly describeModel?: (model: ModelDescriptor) => ModelDescriptor
   ) {}
 
   async streamChat(
@@ -194,7 +251,8 @@ const providers: ProviderAdapter[] = [
     ["POST"],
     ["cookie", "authorization", "x-*"],
     macApplicationBinaries("Xiaomi MiMo", ["Xiaomi MiMo", "Electron"]),
-    mimoRequestBody
+    mimoRequestBody,
+    mimoModelDescriptor
   ),
   new OpenAICompatibleProvider(
     "workbuddy",

@@ -1,6 +1,13 @@
 import { ChatAccumulator, normalizeChatRequest } from "./openai.js";
 import type { UpstreamChunk } from "./provider.js";
-import type { JsonRecord, NormalizedChatRequest } from "./types.js";
+import type { StreamEvent, StreamToolCall } from "./stream.js";
+import type {
+  JsonRecord,
+  NormalizedChatRequest,
+  OpenAIResponse,
+  OpenAIResponseStreamEvent,
+  ResponseRequestOptions
+} from "./types.js";
 
 function asRecord(value: unknown): JsonRecord {
   return value !== null && typeof value === "object"
@@ -15,7 +22,8 @@ function stringValue(value: unknown): string {
 function serializedValue(value: unknown): string {
   if (typeof value === "string") return value;
   try {
-    return JSON.stringify(value);
+    const result = JSON.stringify(value);
+    return result === undefined ? String(value) : result;
   } catch {
     return String(value);
   }
@@ -169,13 +177,125 @@ function responseTools(value: unknown): unknown {
   });
 }
 
+function responseToolChoice(value: unknown): unknown {
+  if (typeof value === "string" || value === undefined || value === null) {
+    return value;
+  }
+  const choice = asRecord(value);
+  if (
+    stringValue(choice.type) === "function" &&
+    choice.function === undefined &&
+    stringValue(choice.name)
+  ) {
+    return {
+      type: "function",
+      function: { name: stringValue(choice.name) }
+    };
+  }
+  return value;
+}
+
+function responseFormat(value: unknown): unknown {
+  if (value === undefined || value === null) return undefined;
+  const format = asRecord(value);
+  const type = stringValue(format.type);
+
+  if (type === "text") return undefined;
+  if (type === "json_object") return { type: "json_object" };
+  if (type === "json_schema") {
+    const name = stringValue(format.name);
+    if (!name || format.schema === undefined) {
+      throw new Error("text.format=json_schema 必须包含 name 和 schema");
+    }
+    const schema: JsonRecord = {
+      name,
+      schema: format.schema
+    };
+    if (format.description !== undefined) schema.description = format.description;
+    if (format.strict !== undefined) schema.strict = format.strict;
+    return { type: "json_schema", json_schema: schema };
+  }
+
+  throw new Error("暂不支持 Responses text.format 类型: " + (type || "unknown"));
+}
+
+interface StoredResponse {
+  messages: JsonRecord[];
+}
+
+const responseHistory = new Map<string, StoredResponse>();
+const MAX_RESPONSE_HISTORY = 128;
+
+function previousMessages(id: string): JsonRecord[] | null {
+  const stored = responseHistory.get(id);
+  if (!stored) return null;
+  responseHistory.delete(id);
+  responseHistory.set(id, stored);
+  return stored.messages.map((message) => ({ ...message }));
+}
+
+function responseRequestOptions(body: JsonRecord): ResponseRequestOptions {
+  const options: ResponseRequestOptions = {};
+
+  if (body.instructions !== undefined) options.instructions = body.instructions;
+  if (body.text !== undefined && body.text !== null) {
+    if (typeof body.text !== "object" || Array.isArray(body.text)) {
+      throw new Error("Responses text 必须是对象");
+    }
+    options.text = body.text as JsonRecord;
+  }
+
+  if (body.previous_response_id === null) {
+    options.previousResponseId = null;
+  } else if (body.previous_response_id !== undefined) {
+    const id = stringValue(body.previous_response_id);
+    if (!id) throw new Error("previous_response_id 必须是非空字符串或 null");
+    options.previousResponseId = id;
+  }
+
+  if (body.metadata !== undefined) {
+    options.metadata = body.metadata === null ? null : asRecord(body.metadata);
+  }
+  if (body.store !== undefined) {
+    if (typeof body.store !== "boolean") throw new Error("store 必须是布尔值");
+    options.store = body.store;
+  }
+  if (body.parallel_tool_calls !== undefined) {
+    if (typeof body.parallel_tool_calls !== "boolean") {
+      throw new Error("parallel_tool_calls 必须是布尔值");
+    }
+    options.parallelToolCalls = body.parallel_tool_calls;
+  }
+  if (body.temperature !== undefined) options.temperature = body.temperature as number;
+  if (body.top_p !== undefined) options.topP = body.top_p as number;
+  if (body.tool_choice !== undefined) options.toolChoice = body.tool_choice;
+  if (Array.isArray(body.tools)) options.tools = body.tools;
+  if (body.truncation !== undefined) options.truncation = body.truncation as string;
+  if (body.max_output_tokens !== undefined) {
+    options.maxOutputTokens = body.max_output_tokens as number;
+  }
+  if (body.reasoning !== undefined) {
+    options.reasoning = body.reasoning === null ? null : asRecord(body.reasoning);
+  }
+
+  return options;
+}
+
 export function normalizeResponseRequest(
   value: unknown,
   defaultModel = ""
 ): NormalizedChatRequest {
   const body = asRecord(value);
+  const response = responseRequestOptions(body);
   const messages: unknown[] = [];
 
+  if (response.previousResponseId) {
+    const previous = previousMessages(response.previousResponseId);
+    if (!previous) {
+      throw new Error("previous_response_id 不存在或已过期；网关只在当前进程内保存 Responses 会话");
+    }
+    messages.push(...previous);
+  }
   if (body.instructions !== undefined) {
     messages.push(...inputMessages(body.instructions, "system"));
   }
@@ -200,8 +320,20 @@ export function normalizeResponseRequest(
     normalized.max_completion_tokens = body.max_output_tokens;
   }
   if (body.tools !== undefined) normalized.tools = responseTools(body.tools);
+  if (body.tool_choice !== undefined) {
+    normalized.tool_choice = responseToolChoice(body.tool_choice);
+  }
 
-  return normalizeChatRequest(normalized, defaultModel);
+  if (body.text !== undefined && body.text !== null) {
+    const text = asRecord(body.text);
+    const format = responseFormat(text.format);
+    if (format !== undefined) normalized.response_format = format;
+  }
+
+  return {
+    ...normalizeChatRequest(normalized, defaultModel),
+    response
+  };
 }
 
 export interface ResponseContext {
@@ -211,17 +343,38 @@ export interface ResponseContext {
   messageId: string;
   reasoningId: string;
   sequence: number;
+  options: ResponseRequestOptions;
+  nextOutputIndex: number;
+  messageOutputIndex: number;
+  messagePartType: "output_text" | "refusal" | null;
+  reasoningOutputIndex: number;
+  functionOutputs: {
+    [key: string]: {
+      outputIndex: number;
+      itemId: string;
+      callId: string;
+    };
+  };
 }
 
-export function createResponseContext(model: string): ResponseContext {
-  const token = Date.now().toString(36);
+export function createResponseContext(
+  model: string,
+  options: ResponseRequestOptions = {}
+): ResponseContext {
+  const token = Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
   return {
     id: "resp_" + token,
     created: Math.floor(Date.now() / 1000),
     model,
     messageId: "msg_" + token,
     reasoningId: "rs_" + token,
-    sequence: 0
+    sequence: 0,
+    options,
+    nextOutputIndex: 0,
+    messageOutputIndex: -1,
+    messagePartType: null,
+    reasoningOutputIndex: -1,
+    functionOutputs: {}
   };
 }
 
@@ -246,57 +399,115 @@ function responseUsage(value: JsonRecord | null): JsonRecord | null {
 
 function outputMessage(
   accumulator: ResponseAccumulator,
-  context: ResponseContext
+  context: ResponseContext,
+  status = "completed"
 ): JsonRecord {
-  const message: JsonRecord = {
+  const content: JsonRecord[] = [];
+  if (accumulator.content || !accumulator.refusal) {
+    content.push({
+      type: "output_text",
+      text: accumulator.content,
+      annotations: []
+    });
+  }
+  if (accumulator.refusal) {
+    content.push({ type: "refusal", refusal: accumulator.refusal });
+  }
+
+  return {
     id: context.messageId,
     type: "message",
-    status: "completed",
+    status,
     role: "assistant",
-    content: [
-      {
-        type: "output_text",
-        text: accumulator.content,
-        annotations: []
-      }
-    ]
+    content
   };
-  if (accumulator.reasoning) {
-    message.reasoning_content = accumulator.reasoning;
-  }
-  return message;
+}
+
+function callItem(
+  context: ResponseContext,
+  call: StreamToolCall,
+  status: string,
+  argumentsValue: string
+): JsonRecord {
+  const slot = context.functionOutputs[String(call.index)];
+  const itemId = slot?.itemId ?? call.id ?? call.callId ??
+    context.id + "_call_" + String(call.index);
+  const callId = slot?.callId ?? call.callId ?? call.id ?? itemId;
+  return {
+    id: itemId,
+    type: "function_call",
+    status,
+    call_id: callId,
+    name: call.name,
+    arguments: argumentsValue
+  };
+}
+
+function reasoningItem(
+  accumulator: ResponseAccumulator,
+  context: ResponseContext,
+  status = "completed"
+): JsonRecord {
+  return {
+    id: context.reasoningId,
+    type: "reasoning",
+    status,
+    // DeepSeek's Responses dialect exposes the actual chain-of-thought as a
+    // reasoning_text content part. `summary_text` is a different, optional
+    // Responses feature and causes clients such as Harness to hide the text.
+    content: [{ type: "reasoning_text", text: accumulator.reasoning }],
+    summary: []
+  };
 }
 
 function functionOutputs(
   accumulator: ResponseAccumulator,
   context: ResponseContext
 ): JsonRecord[] {
-  return accumulator.toolCalls.map((value, index) => {
-    const call = asRecord(value);
-    const functionValue = asRecord(call.function);
-    const callId = stringValue(call.id) ||
-      context.messageId + "_call_" + String(index);
-    return {
-      id: callId,
-      type: "function_call",
-      status: "completed",
-      call_id: callId,
-      name: stringValue(functionValue.name),
-      arguments: stringValue(functionValue.arguments) || "{}"
-    };
-  });
+  const output: JsonRecord[] = [];
+  for (const call of accumulator.toolCalls) {
+    if (!call) continue;
+    output.push(callItem(context, call, "completed", call.arguments));
+  }
+  return output;
 }
 
 function outputItems(
   accumulator: ResponseAccumulator,
   context: ResponseContext
 ): JsonRecord[] {
-  const output: JsonRecord[] = [];
-  if (accumulator.content || accumulator.toolCalls.length === 0) {
-    output.push(outputMessage(accumulator, context));
+  const entries: Array<{ index: number; item: JsonRecord }> = [];
+  let fallbackIndex = 0;
+
+  if (accumulator.reasoning) {
+    entries.push({
+      index: context.reasoningOutputIndex >= 0
+        ? context.reasoningOutputIndex
+        : fallbackIndex++,
+      item: reasoningItem(accumulator, context)
+    });
   }
-  output.push(...functionOutputs(accumulator, context));
-  return output;
+  if (accumulator.content || accumulator.refusal || accumulator.toolCalls.length === 0) {
+    entries.push({
+      index: context.messageOutputIndex >= 0
+        ? context.messageOutputIndex
+        : fallbackIndex++,
+      item: outputMessage(accumulator, context)
+    });
+  }
+  const calls = functionOutputs(accumulator, context);
+  let callOutputIndex = 0;
+  for (const item of accumulator.toolCalls) {
+    if (!item) continue;
+    entries.push({
+      index: context.functionOutputs[String(item.index)]?.outputIndex ??
+        fallbackIndex++,
+      item: calls[callOutputIndex++]
+    });
+  }
+
+  entries.sort((left, right) => left.index - right.index);
+  return entries.map((entry) => entry.item);
 }
 
 function responseObject(
@@ -307,7 +518,8 @@ function responseObject(
   usage: JsonRecord | null,
   error: JsonRecord | null = null
 ): JsonRecord {
-  return {
+  const options = context.options;
+  const result: JsonRecord = {
     id: context.id,
     object: "response",
     created_at: context.created,
@@ -317,21 +529,24 @@ function responseObject(
     incomplete_details: status === "incomplete"
       ? { reason: "max_output_tokens" }
       : null,
+    instructions: options.instructions ?? null,
+    metadata: options.metadata ?? null,
     model: context.model,
     output,
     output_text: outputText,
-    parallel_tool_calls: true,
-    previous_response_id: null,
-    reasoning: { effort: null, summary: null },
-    store: false,
-    temperature: 1,
-    text: { format: { type: "text" } },
-    tool_choice: "auto",
-    tools: [],
-    top_p: 1,
-    truncation: "disabled",
+    parallel_tool_calls: options.parallelToolCalls ?? true,
+    previous_response_id: options.previousResponseId ?? null,
+    reasoning: options.reasoning ?? { effort: null, summary: null },
+    store: options.store ?? false,
+    temperature: options.temperature ?? 1,
+    text: options.text ?? { format: { type: "text" } },
+    tool_choice: options.toolChoice ?? "auto",
+    tools: options.tools ?? [],
+    top_p: options.topP ?? 1,
+    truncation: options.truncation ?? "disabled",
     usage
   };
+  return result as unknown as OpenAIResponse as unknown as JsonRecord;
 }
 
 export class ResponseAccumulator {
@@ -345,7 +560,11 @@ export class ResponseAccumulator {
     return this.chat.reasoning;
   }
 
-  get toolCalls(): JsonRecord[] {
+  get refusal(): string {
+    return this.chat.refusal;
+  }
+
+  get toolCalls(): StreamToolCall[] {
     return this.chat.toolCalls;
   }
 
@@ -353,18 +572,26 @@ export class ResponseAccumulator {
     return this.chat.finishReason;
   }
 
-  add(chunk: UpstreamChunk): void {
-    this.chat.add(chunk);
+  get usage(): JsonRecord | null {
+    return this.chat.usage;
+  }
+
+  assistantMessage(): JsonRecord {
+    return this.chat.assistantMessage();
+  }
+
+  add(chunk: UpstreamChunk): StreamEvent[] {
+    return this.chat.add(chunk);
   }
 
   response(context: ResponseContext): JsonRecord {
-    const output = outputItems(this, context);
+    const status = this.finishReason === "length" ? "incomplete" : "completed";
     const result = responseObject(
       context,
-      this.finishReason === "length" ? "incomplete" : "completed",
-      output,
+      status,
+      outputItems(this, context),
       this.content,
-      responseUsage(this.chat.usage)
+      responseUsage(this.usage)
     );
     if (this.reasoning) result.reasoning_content = this.reasoning;
     return result;
@@ -377,11 +604,95 @@ function event(
   value: JsonRecord
 ): JsonRecord {
   context.sequence += 1;
-  return {
+  const result = {
     type,
     ...value,
     sequence_number: context.sequence
   };
+  return result as unknown as OpenAIResponseStreamEvent as unknown as JsonRecord;
+}
+
+function nextOutputIndex(context: ResponseContext): number {
+  const index = context.nextOutputIndex;
+  context.nextOutputIndex += 1;
+  return index;
+}
+
+function startMessage(
+  context: ResponseContext,
+  partType: "output_text" | "refusal"
+): JsonRecord[] {
+  if (context.messageOutputIndex >= 0) return [];
+  context.messageOutputIndex = nextOutputIndex(context);
+  context.messagePartType = partType;
+
+  const part = partType === "refusal"
+    ? { type: "refusal", refusal: "" }
+    : { type: "output_text", text: "", annotations: [] };
+  return [
+    event(context, "response.output_item.added", {
+      output_index: context.messageOutputIndex,
+      item: {
+        id: context.messageId,
+        type: "message",
+        status: "in_progress",
+        role: "assistant",
+        content: []
+      }
+    }),
+    event(context, "response.content_part.added", {
+      item_id: context.messageId,
+      output_index: context.messageOutputIndex,
+      content_index: 0,
+      part
+    })
+  ];
+}
+
+function startReasoning(context: ResponseContext): JsonRecord[] {
+  if (context.reasoningOutputIndex >= 0) return [];
+  context.reasoningOutputIndex = nextOutputIndex(context);
+  return [
+    event(context, "response.output_item.added", {
+      output_index: context.reasoningOutputIndex,
+      item: {
+        id: context.reasoningId,
+        type: "reasoning",
+        status: "in_progress",
+        content: [],
+        summary: []
+      }
+    }),
+    event(context, "response.content_part.added", {
+      item_id: context.reasoningId,
+      output_index: context.reasoningOutputIndex,
+      content_index: 0,
+      part: { type: "reasoning_text", text: "" }
+    })
+  ];
+}
+
+function startFunctionCall(
+  context: ResponseContext,
+  call: StreamToolCall
+): JsonRecord[] {
+  const key = String(call.index);
+  if (context.functionOutputs[key]) return [];
+
+  const itemId = call.id ?? call.callId ?? context.id + "_call_" + key;
+  const callId = call.callId ?? call.id ?? itemId;
+  context.functionOutputs[key] = {
+    outputIndex: nextOutputIndex(context),
+    itemId,
+    callId
+  };
+
+  return [
+    event(context, "response.output_item.added", {
+      output_index: context.functionOutputs[key].outputIndex,
+      item: callItem(context, call, "in_progress", "")
+    })
+  ];
 }
 
 export function responseCreated(context: ResponseContext): JsonRecord {
@@ -396,103 +707,202 @@ export function responseInProgress(context: ResponseContext): JsonRecord {
   });
 }
 
-export function responseOutputItemAdded(context: ResponseContext): JsonRecord {
-  return event(context, "response.output_item.added", {
-    output_index: 0,
-    item: {
-      id: context.messageId,
-      type: "message",
-      status: "in_progress",
-      role: "assistant",
-      content: []
-    }
-  });
-}
-
-export function responseContentPartAdded(context: ResponseContext): JsonRecord {
-  return event(context, "response.content_part.added", {
-    item_id: context.messageId,
-    output_index: 0,
-    content_index: 0,
-    part: { type: "output_text", text: "", annotations: [] }
-  });
-}
-
 export function responseChunkEvents(
   chunk: UpstreamChunk,
   context: ResponseContext,
   accumulator: ResponseAccumulator
 ): JsonRecord[] {
-  accumulator.add(chunk);
-  const delta = chunk.choices?.[0]?.delta;
-  if (!delta) return [];
+  const events = accumulator.add(chunk);
+  const output: JsonRecord[] = [];
 
-  const events: JsonRecord[] = [];
-  if (delta.reasoning_content) {
-    events.push(event(context, "response.reasoning_summary_text.delta", {
-      item_id: context.reasoningId,
-      delta: delta.reasoning_content
-    }));
+  for (const streamEvent of events) {
+    switch (streamEvent.type) {
+      case "reasoning":
+        output.push(...startReasoning(context));
+        output.push(event(context, "response.reasoning_text.delta", {
+          item_id: context.reasoningId,
+          output_index: context.reasoningOutputIndex,
+          content_index: 0,
+          delta: streamEvent.text
+        }));
+        break;
+      case "text":
+        output.push(...startMessage(context, "output_text"));
+        output.push(event(context, "response.output_text.delta", {
+          item_id: context.messageId,
+          output_index: context.messageOutputIndex,
+          content_index: 0,
+          delta: streamEvent.text,
+          logprobs: []
+        }));
+        break;
+      case "refusal":
+        output.push(...startMessage(context, "refusal"));
+        output.push(event(context, "response.refusal.delta", {
+          item_id: context.messageId,
+          output_index: context.messageOutputIndex,
+          content_index: 0,
+          delta: streamEvent.text
+        }));
+        break;
+      case "tool_call": {
+        const call = accumulator.toolCalls[streamEvent.index];
+        if (!call) break;
+        output.push(...startFunctionCall(context, call));
+        if (streamEvent.arguments !== undefined && streamEvent.arguments !== "") {
+          const slot = context.functionOutputs[String(streamEvent.index)];
+          output.push(event(context, "response.function_call_arguments.delta", {
+            item_id: slot.itemId,
+            output_index: slot.outputIndex,
+            delta: streamEvent.arguments
+          }));
+        }
+        break;
+      }
+      case "role":
+      case "finish":
+      case "usage":
+        break;
+    }
   }
-  if (delta.content) {
-    events.push(event(context, "response.output_text.delta", {
+
+  return output;
+}
+
+function finishMessageEvents(
+  context: ResponseContext,
+  accumulator: ResponseAccumulator
+): JsonRecord[] {
+  if (context.messageOutputIndex < 0) return [];
+  const output: JsonRecord[] = [];
+
+  if (context.messagePartType === "refusal") {
+    output.push(event(context, "response.refusal.done", {
       item_id: context.messageId,
-      output_index: 0,
+      output_index: context.messageOutputIndex,
       content_index: 0,
-      delta: delta.content,
+      refusal: accumulator.refusal
+    }));
+  } else {
+    output.push(event(context, "response.output_text.done", {
+      item_id: context.messageId,
+      output_index: context.messageOutputIndex,
+      content_index: 0,
+      text: accumulator.content,
       logprobs: []
     }));
   }
-  if (delta.refusal) {
-    events.push(event(context, "response.refusal.delta", {
-      item_id: context.messageId,
-      output_index: 0,
+
+  const part = context.messagePartType === "refusal"
+    ? { type: "refusal", refusal: accumulator.refusal }
+    : { type: "output_text", text: accumulator.content, annotations: [] };
+  output.push(event(context, "response.content_part.done", {
+    item_id: context.messageId,
+    output_index: context.messageOutputIndex,
+    content_index: 0,
+    part
+  }));
+  output.push(event(context, "response.output_item.done", {
+    output_index: context.messageOutputIndex,
+    item: outputMessage(accumulator, context)
+  }));
+  return output;
+}
+
+function finishReasoningEvents(
+  context: ResponseContext,
+  accumulator: ResponseAccumulator
+): JsonRecord[] {
+  if (context.reasoningOutputIndex < 0) return [];
+  return [
+    event(context, "response.reasoning_text.done", {
+      item_id: context.reasoningId,
+      output_index: context.reasoningOutputIndex,
       content_index: 0,
-      delta: delta.refusal
-    }));
-  }
-  return events;
+      text: accumulator.reasoning
+    }),
+    event(context, "response.content_part.done", {
+      item_id: context.reasoningId,
+      output_index: context.reasoningOutputIndex,
+      content_index: 0,
+      part: { type: "reasoning_text", text: accumulator.reasoning }
+    }),
+    event(context, "response.output_item.done", {
+      output_index: context.reasoningOutputIndex,
+      item: reasoningItem(accumulator, context)
+    })
+  ];
+}
+
+function finishFunctionCallEvents(
+  context: ResponseContext,
+  call: StreamToolCall
+): JsonRecord[] {
+  const slot = context.functionOutputs[String(call.index)];
+  if (!slot) return [];
+  return [
+    event(context, "response.function_call_arguments.done", {
+      item_id: slot.itemId,
+      output_index: slot.outputIndex,
+      arguments: call.arguments
+    }),
+    event(context, "response.output_item.done", {
+      output_index: slot.outputIndex,
+      item: callItem(context, call, "completed", call.arguments)
+    })
+  ];
 }
 
 export function responseFinishEvents(
   context: ResponseContext,
   accumulator: ResponseAccumulator
 ): JsonRecord[] {
-  const events: JsonRecord[] = [
-    event(context, "response.output_text.done", {
-      item_id: context.messageId,
-      output_index: 0,
-      content_index: 0,
-      text: accumulator.content,
-      logprobs: []
-    }),
-    event(context, "response.content_part.done", {
-      item_id: context.messageId,
-      output_index: 0,
-      content_index: 0,
-      part: {
-        type: "output_text",
-        text: accumulator.content,
-        annotations: []
-      }
-    }),
-    event(context, "response.output_item.done", {
-      output_index: 0,
-      item: outputMessage(accumulator, context)
-    })
-  ];
+  const output: JsonRecord[] = [];
 
-  if (accumulator.reasoning) {
-    events.push(event(context, "response.reasoning_summary_text.done", {
-      item_id: context.reasoningId,
-      summary_index: 0,
-      text: accumulator.reasoning
-    }));
+  for (const call of accumulator.toolCalls) {
+    if (!call) continue;
+    output.push(...startFunctionCall(context, call));
   }
-  events.push(event(context, "response.completed", {
+  if (
+    context.messageOutputIndex < 0 &&
+    accumulator.toolCalls.length === 0
+  ) {
+    output.push(...startMessage(context, "output_text"));
+  }
+
+  const closers: Array<{
+    index: number;
+    build: () => JsonRecord[];
+  }> = [];
+  if (context.messageOutputIndex >= 0) {
+    closers.push({
+      index: context.messageOutputIndex,
+      build: () => finishMessageEvents(context, accumulator)
+    });
+  }
+  if (context.reasoningOutputIndex >= 0) {
+    closers.push({
+      index: context.reasoningOutputIndex,
+      build: () => finishReasoningEvents(context, accumulator)
+    });
+  }
+  for (const call of accumulator.toolCalls) {
+    if (!call) continue;
+    const slot = context.functionOutputs[String(call.index)];
+    if (slot) {
+      closers.push({
+        index: slot.outputIndex,
+        build: () => finishFunctionCallEvents(context, call)
+      });
+    }
+  }
+  closers.sort((left, right) => left.index - right.index);
+  for (const closer of closers) output.push(...closer.build());
+
+  output.push(event(context, "response.completed", {
     response: accumulator.response(context)
   }));
-  return events;
+  return output;
 }
 
 export function responseFailed(
@@ -509,4 +919,19 @@ export function responseFailed(
       { code: "upstream_error", message }
     )
   });
+}
+
+export function rememberResponse(
+  context: ResponseContext,
+  accumulator: ResponseAccumulator
+): void {
+  responseHistory.delete(context.id);
+  responseHistory.set(context.id, {
+    messages: [accumulator.assistantMessage()]
+  });
+  while (responseHistory.size > MAX_RESPONSE_HISTORY) {
+    const first = responseHistory.keys().next().value;
+    if (first === undefined) break;
+    responseHistory.delete(first);
+  }
 }

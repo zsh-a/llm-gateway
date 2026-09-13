@@ -32,6 +32,8 @@ const VALID_EFFORTS: ReasoningEffort[] = [
 ];
 
 const EFFORT_ALIASES: { [key: string]: ReasoningEffort } = {
+  minimal: "low",
+  ultra: "max",
   "无": "none",
   "低": "low",
   "中": "medium",
@@ -71,7 +73,7 @@ export function normalizeEffort(
     return normalized as ReasoningEffort;
   }
 
-  return EFFORT_ALIASES[value.trim()] ?? fallback;
+  return EFFORT_ALIASES[normalized] ?? EFFORT_ALIASES[value.trim()] ?? fallback;
 }
 
 export function loadConfig(): GatewayConfig {

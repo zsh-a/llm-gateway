@@ -28,7 +28,8 @@ src/config.ts       轻量网关配置
 src/provider.ts     Provider 注册表、默认上游和统一传输
 src/auth-store.ts   网关只读/失效认证缓存
 src/models.ts       多 Provider 模型聚合和自动路由
-src/sse.ts          SSE/JSON 流解析器
+src/sse.ts          基于 eventsource-parser 的 SSE/JSON 流解析器
+src/stream.ts       Provider chunk → StreamEvent 统一中间表示
 src/openai.ts       OpenAI 请求/响应适配
 src/responses.ts    Responses 输入/输出适配
 src/server.ts       OpenAI 兼容 HTTP 服务与启动生命周期
@@ -173,6 +174,34 @@ curl http://127.0.0.1:3000/v1/chat/completions \
 
 网关会根据模型目录自动选择 MiMo 或 WorkBuddy，并把冲突模型的前缀去掉后再发送给上游。
 
+### DeepSeek Harness
+
+DeepSeek Harness 的自定义 Provider 表单只保存模型基础信息，思考档位需要写入它的配置文件。对于 WorkBuddy 中的 DeepSeek V4，推荐使用 Chat Completions 协议：
+
+```yaml
+llm-pi-ai:
+  providers:
+    llm-gateway:
+      api: openai-completions
+      baseURL: http://127.0.0.1:3000/v1
+      compat:
+        thinkingFormat: deepseek
+        supportsReasoningEffort: true
+        supportsDeveloperRole: false
+      reasoning: high
+      models:
+        - id: deepseek-v4-flash
+          contextWindow: 1000000
+          maxTokens: 50000
+          reasoningEfforts:
+            off:
+            low: low
+            high: high
+            max: max
+```
+
+`reasoningEfforts` 的左侧是 Harness 的档位，右侧是发送给网关的 `reasoning_effort` 值；`off` 配合 `thinkingFormat: deepseek` 会发送关闭 thinking 的请求。网关会将 Harness 可能发送的 `developer` 系统消息转换为上游可接受的 `system`，并透传 `reasoning_content`。如果 Harness 版本的模型发现流程丢弃了 `reasoningEfforts`，需要保留上面的模型配置并刷新页面、新建会话；这是 Harness 配置发现层的限制，不是 `/v1/chat/completions` 没有返回 thinking。
+
 如果模型目录暂时不可用，也可以显式使用 `mimo/model-id` 或 `workbuddy/model-id` 路由。
 
 ## 认证缓存
@@ -224,7 +253,9 @@ POST /responses
 
 网关始终以流式方式请求上游；客户端使用 `stream: false` 时由网关聚合为普通 JSON，同时保留工具调用、思维内容和 usage（若上游提供）。
 
-Responses API 会将 `input`、`instructions` 和 Responses 风格的 function tools 适配为上游所需的 Chat Completions 请求，并返回兼容的 `response` 对象。`stream: true` 时输出标准 Responses SSE 事件，包含 `response.created`、`response.output_text.delta` 和 `response.completed`。
+Chat Completions 流式请求支持标准 `stream_options.include_usage`：网关会在 `[DONE]` 前输出 `choices: []` 的最终 usage chunk，并完整合并现代 `tool_calls`（包括 `index`、函数名和分片 `function.arguments`）。旧式 `function_call` 会在统一内部流事件层转换为现代工具调用格式。
+
+Responses API 会将 `input`、`instructions` 和 Responses 风格的 function tools 适配为上游所需的 Chat Completions 请求，并返回兼容的 `response` 对象。`stream: true` 时输出标准 Responses SSE 事件，包含 `response.reasoning_text.delta/done`、文本、拒答和函数调用的增量/完成事件（如 `response.function_call_arguments.delta/done`）。`text.format` 会转换为上游的结构化输出参数；`previous_response_id` 支持当前网关进程内的轻量会话链，网关重启后会按无状态服务返回 400，而不是静默丢弃。
 
 调用示例：
 
