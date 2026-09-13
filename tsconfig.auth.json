@@ -8,5 +8,5 @@
     "declaration": false,
     "sourceMap": false
   },
-  "include": ["src/config.ts", "scripts/launch.ts"]
+  "include": ["scripts/auth.ts"]
 }

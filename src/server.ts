@@ -1,9 +1,9 @@
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { getAuth, getAuthStatus, invalidateAuth } from "./auth.js";
+import { getAuthStore } from "./auth-store.js";
 import { loadConfig } from "./config.js";
-import { getModelIds } from "./models.js";
+import { getModels, resolveModel, type ModelRoute } from "./models.js";
 import {
   ChatAccumulator,
   createStreamContext,
@@ -13,10 +13,15 @@ import {
   normalizeChatRequest,
   toOpenAIChunk
 } from "./openai.js";
-import { streamChat, UpstreamError, type UpstreamChunk } from "./mimo.js";
+import {
+  getProviders,
+  UpstreamError,
+  type UpstreamChunk
+} from "./provider.js";
 import type { NormalizedChatRequest } from "./types.js";
 
 const config = loadConfig();
+const authStore = getAuthStore(config);
 
 function setCors(req: IncomingMessage, res: ServerResponse): void {
   const requestOrigin = req.headers.origin;
@@ -127,9 +132,10 @@ function writeStreamHeaders(res: ServerResponse): void {
 async function handleStreaming(
   res: ServerResponse,
   authHeaders: Record<string, string>,
+  route: ModelRoute,
   request: NormalizedChatRequest
 ): Promise<void> {
-  const context = createStreamContext(request.model);
+  const context = createStreamContext(route.publicModel);
   let headersSent = false;
   let finishSeen = false;
   const clientAbort = new AbortController();
@@ -139,7 +145,7 @@ async function handleStreaming(
   });
 
   try {
-    await streamChat(
+    await route.provider.streamChat(
       authHeaders,
       request,
       config,
@@ -170,7 +176,7 @@ async function handleStreaming(
     if (res.destroyed) return;
     const failure = upstreamError(error);
     if (failure.status === 401 || failure.status === 403) {
-      invalidateAuth(config);
+      authStore.invalidate(route.provider.id);
     }
     if (!headersSent) {
       sendError(res, failure.status, failure.message, failure.type);
@@ -186,18 +192,19 @@ async function handleStreaming(
 async function handleNonStreaming(
   res: ServerResponse,
   authHeaders: Record<string, string>,
+  route: ModelRoute,
   request: NormalizedChatRequest
 ): Promise<void> {
   const accumulator = new ChatAccumulator();
   try {
-    await streamChat(authHeaders, request, config, (chunk) => {
+    await route.provider.streamChat(authHeaders, request, config, (chunk) => {
       accumulator.add(chunk);
     });
-    sendJson(res, 200, accumulator.response(request.model));
+    sendJson(res, 200, accumulator.response(route.publicModel));
   } catch (error) {
     const failure = upstreamError(error);
     if (failure.status === 401 || failure.status === 403) {
-      invalidateAuth(config);
+      authStore.invalidate(route.provider.id);
     }
     sendError(res, failure.status, failure.message, failure.type);
   }
@@ -225,22 +232,39 @@ async function handleChat(
     return;
   }
 
-  const request = normalizeChatRequest(parsed);
-  const authHeaders = await getAuth(config);
-  if (!authHeaders) {
+  const request = normalizeChatRequest(parsed, config.defaultModel);
+  const route = await resolveModel(config, request.model);
+  if (!route) {
+    sendError(
+      res,
+      400,
+      request.model
+        ? `未找到模型 ${request.model}，请先请求 /v1/models`
+        : "请求必须包含 model",
+      "invalid_request_error"
+    );
+    return;
+  }
+
+  const authSnapshot = authStore.get(route.provider.id);
+  if (!authSnapshot) {
     sendError(
       res,
       503,
-      "未能获取有效凭证，请配置 MIMO_COOKIE 或启动 mitmproxy",
+      `未找到 ${route.provider.name} 认证，请先执行 npm run auth -- --provider ${route.provider.id}`,
       "auth_error"
     );
     return;
   }
 
+  const routedRequest: NormalizedChatRequest = {
+    ...request,
+    model: route.upstreamModel
+  };
   if (request.stream) {
-    await handleStreaming(res, authHeaders, request);
+    await handleStreaming(res, authSnapshot.headers, route, routedRequest);
   } else {
-    await handleNonStreaming(res, authHeaders, request);
+    await handleNonStreaming(res, authSnapshot.headers, route, routedRequest);
   }
 }
 
@@ -262,12 +286,20 @@ async function route(
   );
 
   if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
-    sendJson(res, 200, { status: "ok", service: "mimo-openai-proxy" });
+    sendJson(res, 200, {
+      status: "ok",
+      service: "openai-gateway",
+      providers: getProviders().map((provider) => provider.id)
+    });
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/health/auth") {
-    sendJson(res, 200, await getAuthStatus(config));
+    sendJson(
+      res,
+      200,
+      authStore.status(getProviders().map((provider) => provider.id))
+    );
     return;
   }
 
@@ -277,7 +309,7 @@ async function route(
   }
 
   if (req.method === "GET" && url.pathname === "/v1/models") {
-    sendJson(res, 200, modelsResponse(await getModelIds(config)));
+    sendJson(res, 200, modelsResponse(await getModels(config)));
     return;
   }
 
@@ -305,12 +337,12 @@ const server = createServer((req, res) => {
 });
 
 server.on("error", (error) => {
-  console.error("MiMo 代理服务错误:", error.message);
+  console.error("OpenAI Gateway 服务错误:", error.message);
 });
 
 server.listen(config.port, config.bindHost, () => {
   console.log(
-    `MiMo OpenAI 兼容反代服务已启动: http://${config.bindHost}:${config.port}`
+    `OpenAI Gateway 已启动: http://${config.bindHost}:${config.port}`
   );
   console.log(
     `- 兼容接口: http://${config.bindHost}:${config.port}/v1/chat/completions`

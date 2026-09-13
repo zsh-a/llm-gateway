@@ -1,10 +1,10 @@
-import {
-  DEFAULT_MODEL,
-  FALLBACK_MODEL_IDS,
-  normalizeEffort
-} from "./config.js";
-import type { NormalizedChatRequest, JsonRecord } from "./types.js";
-import type { UpstreamChunk } from "./mimo.js";
+import { normalizeEffort } from "./config.js";
+import type { UpstreamChunk } from "./provider.js";
+import type {
+  JsonRecord,
+  ModelDescriptor,
+  NormalizedChatRequest
+} from "./types.js";
 
 export interface StreamContext {
   id: string;
@@ -27,36 +27,83 @@ function asBoolean(value: unknown): boolean {
   return normalized === "true" || normalized === "1" || normalized === "yes";
 }
 
-export function normalizeChatRequest(value: unknown): NormalizedChatRequest {
+const REQUEST_OPTION_KEYS = [
+  "temperature",
+  "top_p",
+  "max_tokens",
+  "max_completion_tokens",
+  "stop",
+  "frequency_penalty",
+  "presence_penalty",
+  "tools",
+  "tool_choice",
+  "parallel_tool_calls",
+  "response_format",
+  "seed",
+  "user",
+  "stream_options",
+  "reasoning_effort",
+  "thinking"
+];
+
+function requestOptions(body: JsonRecord): JsonRecord {
+  const options: JsonRecord = {};
+  for (const key of REQUEST_OPTION_KEYS) {
+    if (body[key] !== undefined) options[key] = body[key];
+  }
+  return options;
+}
+
+export function normalizeChatRequest(
+  value: unknown,
+  defaultModel = ""
+): NormalizedChatRequest {
   const body = asRecord(value);
   const model = typeof body.model === "string" && body.model.trim()
     ? body.model.trim()
-    : DEFAULT_MODEL;
+    : defaultModel;
   const messages = Array.isArray(body.messages) ? body.messages : [];
+  const thinking = asRecord(body.thinking);
   const effortValue = body.reasoning_effort !== undefined
     ? body.reasoning_effort
-    : body.thinking === true
-      ? "high"
-      : "medium";
+    : body.thinking === false || thinking.type === "disabled"
+      ? "none"
+      : body.thinking === true
+        ? "high"
+        : "medium";
 
   return {
     model,
     messages,
     stream: asBoolean(body.stream),
-    effort: normalizeEffort(effortValue)
+    effort: normalizeEffort(effortValue),
+    options: requestOptions(body)
   };
 }
 
-export function modelsResponse(modelIds: string[] = FALLBACK_MODEL_IDS): JsonRecord {
+export function modelsResponse(
+  models: Array<ModelDescriptor | string> = []
+): JsonRecord {
   const created = Math.floor(Date.now() / 1000);
   return {
     object: "list",
-    data: modelIds.map((id) => ({
-      id,
-      object: "model",
-      created,
-      owned_by: "xiaomi"
-    }))
+    data: models.map((value) => {
+      const model = typeof value === "string"
+        ? { id: value, ownedBy: "unknown" }
+        : value;
+      const item: JsonRecord = {
+        id: model.publicId ?? model.id,
+        object: "model",
+        created,
+        owned_by: model.ownedBy ?? "unknown"
+      };
+      if (model.name) item.name = model.name;
+      if (model.providerId) item.provider = model.providerId;
+      if (model.capabilities) item.capabilities = model.capabilities;
+      if (model.maxInputTokens) item.max_input_tokens = model.maxInputTokens;
+      if (model.maxOutputTokens) item.max_output_tokens = model.maxOutputTokens;
+      return item;
+    })
   };
 }
 
@@ -95,7 +142,7 @@ export function toOpenAIChunk(
   context: StreamContext
 ): JsonRecord {
   const choice = firstChoice(chunk);
-  return {
+  const result: JsonRecord = {
     id: typeof chunk.id === "string" ? chunk.id : context.id,
     object: "chat.completion.chunk",
     created: context.created,
@@ -108,6 +155,8 @@ export function toOpenAIChunk(
       }
     ]
   };
+  if (chunk.usage !== undefined) result.usage = chunk.usage;
+  return result;
 }
 
 export function finalOpenAIChunk(context: StreamContext): JsonRecord {
@@ -124,11 +173,15 @@ export class ChatAccumulator {
   public reasoning: string;
   public content: string;
   public finishReason: string;
+  public toolCalls: JsonRecord[];
+  public usage: JsonRecord | null;
 
   constructor() {
     this.reasoning = "";
     this.content = "";
     this.finishReason = "stop";
+    this.toolCalls = [];
+    this.usage = null;
   }
 
   add(chunk: UpstreamChunk): void {
@@ -136,6 +189,8 @@ export class ChatAccumulator {
     const delta = choice?.delta;
     if (delta?.reasoning_content) this.reasoning += delta.reasoning_content;
     if (delta?.content) this.content += delta.content;
+    if (delta?.tool_calls !== undefined) this.mergeToolCalls(delta.tool_calls);
+    if (chunk.usage !== undefined) this.usage = chunk.usage;
     if (choice?.finish_reason) this.finishReason = choice.finish_reason;
   }
 
@@ -145,8 +200,9 @@ export class ChatAccumulator {
       content: this.content
     };
     if (this.reasoning) message.reasoning_content = this.reasoning;
+    if (this.toolCalls.length > 0) message.tool_calls = this.toolCalls;
 
-    return {
+    const result: JsonRecord = {
       id: `chatcmpl-${Date.now()}`,
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
@@ -159,6 +215,39 @@ export class ChatAccumulator {
         }
       ]
     };
+    if (this.usage) result.usage = this.usage;
+    return result;
+  }
+
+  private mergeToolCalls(value: unknown): void {
+    if (!Array.isArray(value)) return;
+
+    for (const item of value) {
+      const incoming = asRecord(item);
+      const rawIndex = Number(incoming.index);
+      const index = Number.isInteger(rawIndex) && rawIndex >= 0
+        ? rawIndex
+        : this.toolCalls.length;
+      const current = this.toolCalls[index] ?? {};
+      const currentFunction = asRecord(current.function);
+      const incomingFunction = asRecord(incoming.function);
+
+      for (const key of ["id", "type", "index"]) {
+        if (incoming[key] !== undefined) current[key] = incoming[key];
+      }
+      for (const key of ["name", "arguments"]) {
+        if (incomingFunction[key] === undefined) continue;
+        if (key === "arguments") {
+          currentFunction[key] = `${String(currentFunction[key] ?? "")}${String(
+            incomingFunction[key]
+          )}`;
+        } else {
+          currentFunction[key] = incomingFunction[key];
+        }
+      }
+      if (Object.keys(currentFunction).length > 0) current.function = currentFunction;
+      this.toolCalls[index] = current;
+    }
   }
 }
 

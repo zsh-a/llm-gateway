@@ -1,107 +1,197 @@
-# MiMo Proxy
+# OpenAI Gateway
 
-一个用 TypeScript 编写、面向 Perry 原生编译的 Xiaomi MiMo OpenAI 兼容桥接器。
+一个用 TypeScript 编写、由 Perry 编译核心服务的统一 OpenAI 兼容网关。
+当前内置 MiMo 和 WorkBuddy 两个 Provider，客户端只需要配置一次网关地址，模型会自动路由到对应上游。
 
-项目只负责三件事：复用已有登录态、请求 MiMo 上游接口、在 MiMo SSE 与 OpenAI 响应格式之间做适配。
+认证流程与网关运行时完全分离：`npm run auth` 负责首次捕获并缓存认证，`npm run launch` 只运行轻量网关。
 
-## 结构
+## 架构
 
 ```text
-  src/
-    config.ts   配置、模型和思考强度
-    auth.ts     可扩展凭证提供者、缓存和认证诊断
-    models.ts   远程模型发现、缓存和 fallback
-    sse.ts      可复用的 SSE/JSON 流解析器
-    mimo.ts     MiMo 上游请求与超时控制
-    openai.ts   OpenAI 请求/响应适配器
-    server.ts   OpenAI 兼容 HTTP 服务
-    cli.ts      命令行客户端
-    cdp.ts      Chrome CDP 回退通道
-  scripts/
-    launch.ts         统一启动 mitmweb、服务端和可选客户端
-    build-native.mjs 发现 Perry 源码并执行原生编译
+首次认证（独立工具）
+  npm run auth
+      │ 启动 mitmweb / 桌面客户端、捕获请求头
+      ▼
+  .runtime/auth/mimo.json
+  .runtime/auth/workbuddy.json
+      │ 只读缓存
+      ▼
+网关（Perry 原生服务）
+  OpenAI Client → ModelCatalog → Provider → LLM 上游
 ```
+
+核心代码：
+
+```text
+src/config.ts       轻量网关配置
+src/provider.ts     Provider 注册表、默认上游和统一传输
+src/auth-store.ts   网关只读/失效认证缓存
+src/models.ts       多 Provider 模型聚合和自动路由
+src/sse.ts          SSE/JSON 流解析器
+src/openai.ts       OpenAI 请求/响应适配
+src/server.ts       OpenAI 兼容 HTTP 服务
+src/cli.ts          命令行客户端
+src/cdp.ts          MiMo CLI 的浏览器回退通道
+scripts/auth.ts     一次性认证引导工具
+```
+
+网关进程不导入 `child_process`、mitmproxy 控制逻辑或桌面客户端启动逻辑。
 
 ## 安装与构建
 
-先安装依赖。Perry 编译器会作为项目开发依赖安装：
-
 ```bash
 npm install
-```
-
-当前 Perry 的原生 npm 发布包可能不包含 `node:http`/网络扩展的构建库。`npm run build` 会自动查找项目旁边的 `../perry` 以及临时 Perry 工作区；如果仍未找到，请准备与 `package.json` 中 Perry 版本一致的 Perry 源码工作区：
-
-```bash
-git clone --depth 1 --branch v0.5.1520 https://github.com/PerryTS/perry.git ../perry
-export PERRY_WORKSPACE_ROOT="$PWD/../perry"
-```
-
-检查类型并生成原生服务、CLI 以及 Node 进程编排器：
-
-```bash
 npm run typecheck
 npm run build
 ```
 
-产物为：
+如果 Perry 找不到网络扩展或标准库源码，准备对应版本的 Perry 工作区：
+
+```bash
+git clone --depth 1 --branch v0.5.1520 https://github.com/PerryTS/perry.git ../perry
+export PERRY_WORKSPACE_ROOT="$PWD/../perry"
+npm run build
+```
+
+产物：
 
 ```text
 dist/mimo-server
 dist/mimo-chat
-dist/scripts/launch.js
+dist/scripts/auth.js
 ```
 
-启动代理：
+## 首次认证
+
+认证所有内置 Provider：
 
 ```bash
-./dist/mimo-server
+npm run auth
 ```
 
-一键启动统一运行环境（自动启动 mitmweb 和服务端）：
+只认证一个 Provider：
+
+```bash
+npm run auth -- --provider mimo
+npm run auth -- --provider workbuddy
+```
+
+重新捕获：
+
+```bash
+npm run auth -- --provider workbuddy --force
+```
+
+认证工具会：
+
+1. 启动 mitmweb。
+2. 自动探测对应桌面客户端入口，并同时注入 Chromium 代理参数和 `HTTP_PROXY/HTTPS_PROXY` 环境变量（macOS 的 WorkBuddy 使用应用包内的 `Electron`）。
+3. 等待对应上游的成功认证或模型请求。
+4. 只保存 `Cookie`、`Authorization`、`X-*` 等认证请求头。
+5. 退出桌面客户端和 mitmweb。
+
+如果桌面客户端报 `ERR_CERT_AUTHORITY_INVALID`，优先安装并信任 mitmproxy CA；本机调试也可以设置：
+
+```bash
+CLIENT_IGNORE_CERT_ERRORS=true npm run auth -- --provider workbuddy
+```
+
+认证工具会自动将 `~/.mitmproxy/mitmproxy-ca-cert.pem` 注入客户端的 Node TLS 信任链；如果 mitmproxy 使用了自定义证书目录，可通过 `MITM_CA_CERT` 指定证书路径。
+
+如果客户端已经手动启动，可以使用：
+
+```bash
+npm run auth -- --provider workbuddy --no-client
+```
+
+如果客户端安装在非标准位置，可以显式指定入口：
+
+```bash
+CLIENT_BIN="/path/to/client" npm run auth -- --provider workbuddy
+```
+
+认证完成后检查：
+
+```bash
+ls .runtime/auth
+```
+
+## 启动网关
+
+认证完成后直接启动：
 
 ```bash
 npm run launch
 ```
 
-如果希望同时启动 Xiaomi MiMo Desktop：
+网关不会启动 mitmproxy，也不会启动桌面客户端。之后可以关闭 MiMo、WorkBuddy 和 mitmweb。
 
-```bash
-npm run launch:desktop
-```
-
-启动器会把客户端指向 `127.0.0.1:8080`，并通过 `127.0.0.1:8081/flows` 复用客户端产生的登录态。进程编排使用标准 Node.js `child_process`，服务核心仍由 TypeScript/Perry 原生编译；这样可以避免 Perry 当前版本原生进程扩展在 macOS 上的运行时崩溃。客户端路径可通过 `MIMO_CLIENT_BIN` 替换，其他支持 Electron/Chromium 代理参数的客户端也可以复用同一套入口。
-
-运行 CLI：
-
-```bash
-./dist/mimo-chat "解释一下 SSE 的工作原理" mimo-x-pro-preview high
-```
-
-也可以使用：
-
-```bash
-npm start
-npm run cli -- "你好"
-```
-
-## 认证方式
-
-认证优先级为：
+客户端统一配置为：
 
 ```text
-MIMO_COOKIE
-→ MIMO_COOKIE_FILE / ./cookie.txt
-→ mitmproxy /flows 中最近一次成功的 MiMo 请求
+Base URL: http://127.0.0.1:3000/v1
 ```
 
-`MIMO_AUTH_MODE` 可以设为 `cookie`、`mitm` 或 `auto`。首次从 mitmproxy 获取到认证后，会持久化到 `./.runtime/auth.json`，后续重启服务也能直接复用，不必再次启动 MiMo Desktop。收到上游 `401/403` 后会自动删除缓存，下一个请求重新获取。缓存文件只保存认证相关请求头，并尝试设置为仅当前用户可读写；如需退出登录，可手动删除该文件。`GET /health/auth` 只返回认证来源和各提供者状态，不返回敏感请求头。
+不需要设置 `UPSTREAM_PROVIDER`，也不需要在请求中指定 Provider。
 
-`GET /v1/models` 默认请求 MiMo Desktop 的 `/api/model/list`，解析 `data.models` 后动态返回；请求失败时依次回退到 `.runtime/models.json` 和内置默认列表。也可以通过 `MIMO_MODEL_LIST_URL` 指向官方 OpenAI 兼容的 `/v1/models` 接口，并用 `MIMO_MODEL_API_KEY` 提供官方 API Key。
+## 自动模型路由
 
-mitmproxy 的匹配规则默认使用 MiMo 上游域名和 `/api/route/chat/completions` 路径。可以通过 `MIMO_AUTH_HOSTS`、`MIMO_AUTH_PATHS` 配置多个相似客户端或上游。
+```bash
+curl http://127.0.0.1:3000/v1/models
+```
 
-CLI 在以上方式不可用或直连失败时，会尝试连接 `CDP_JSON_URL` 指向的 Chrome 页面，并调用网页中的 `window.mimo` 接口。该页面必须已经登录 MiMo，并以远程调试模式启动。
+模型目录会合并 MiMo 和 WorkBuddy 的模型。模型 ID 唯一时直接使用原始 ID；发生冲突时自动使用：
+
+```text
+mimo/model-id
+workbuddy/model-id
+```
+
+调用示例：
+
+```bash
+curl http://127.0.0.1:3000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"你好"}],"stream":true}'
+```
+
+网关会根据模型目录自动选择 MiMo 或 WorkBuddy，并把冲突模型的前缀去掉后再发送给上游。
+
+如果模型目录暂时不可用，也可以显式使用 `mimo/model-id` 或 `workbuddy/model-id` 路由。
+
+## 认证缓存
+
+缓存按 Provider 独立保存：
+
+```text
+.runtime/auth/mimo.json
+.runtime/auth/workbuddy.json
+```
+
+某个 Provider 返回 `401/403` 时，只会删除该 Provider 的缓存，不影响其他 Provider。
+
+```bash
+curl http://127.0.0.1:3000/health
+curl http://127.0.0.1:3000/health/auth
+```
+
+`/health/auth` 只返回各 Provider 是否有缓存，不返回敏感请求头。
+
+## 网关配置
+
+网关只需要少量通用变量：
+
+```bash
+PORT=3000
+BIND_HOST=127.0.0.1
+PROXY_API_KEY=change-me
+RUNTIME_DIR=./.runtime
+AUTH_CACHE_DIR=./.runtime/auth
+MODEL_CACHE_DIR=./.runtime/models
+MODEL_DISCOVERY=true
+```
+
+认证工具的 mitmproxy 和客户端参数见 [.env.example](./.env.example)，这些参数不会被网关进程使用。
 
 ## HTTP 接口
 
@@ -113,6 +203,8 @@ POST /v1/chat/completions
 POST /chat/completions
 ```
 
-服务端始终以流式方式请求上游；客户端传入 `stream: true` 时返回 SSE，传入 `stream: false` 时聚合后返回普通 JSON。
+网关始终以流式方式请求上游；客户端使用 `stream: false` 时由网关聚合为普通 JSON，同时保留工具调用、思维内容和 usage（若上游提供）。
 
-默认只监听 `127.0.0.1`。如需局域网访问，显式设置 `BIND_HOST`，并建议同时设置 `MIMO_PROXY_API_KEY`。
+## 扩展 Provider
+
+新增客户端时，在 [`src/provider.ts`](./src/provider.ts) 注册一个 `ProviderAdapter`，提供默认上游、认证匹配规则和模型源即可。模型目录、认证缓存、路由、SSE 和 OpenAI 转换逻辑无需复制。

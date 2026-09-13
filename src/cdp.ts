@@ -1,6 +1,6 @@
 import { WebSocket } from "ws";
 
-import type { AppConfig } from "./config.js";
+import type { GatewayConfig } from "./config.js";
 
 interface CdpTarget {
   type?: string;
@@ -169,7 +169,7 @@ function firstTarget(value: unknown): CdpTarget | null {
 }
 
 export async function streamViaCdp(
-  config: AppConfig,
+  config: GatewayConfig,
   messages: unknown[],
   model: string,
   onReason: (text: string) => void,
