@@ -30,10 +30,12 @@ src/models.ts       多 Provider 模型聚合和自动路由
 src/sse.ts          SSE/JSON 流解析器
 src/openai.ts       OpenAI 请求/响应适配
 src/server.ts       OpenAI 兼容 HTTP 服务
+src/dashboard.ts    Perry UI 原生桌面控制面板
 scripts/auth.ts     一次性认证引导工具
 ```
 
 网关进程不导入 `child_process`、mitmproxy 控制逻辑或桌面客户端启动逻辑。
+桌面控制面板是独立的 Perry 原生 UI 进程，通过 OpenAI 接口读取网关状态和发送测试请求。
 
 ## 安装与构建
 
@@ -55,6 +57,7 @@ npm run build
 
 ```text
 dist/llm-gateway
+dist/llm-gateway-ui
 dist/scripts/auth.js
 ```
 
@@ -120,6 +123,14 @@ ls .runtime/auth
 ```bash
 npm run launch
 ```
+
+需要桌面控制面板时，再执行：
+
+```bash
+npm run ui
+```
+
+它会打开 Perry 原生窗口，查看网关、Provider、认证和模型状态，并直接发送一条测试请求。控制面板默认连接 `http://127.0.0.1:3000`；如果配置了 `PROXY_API_KEY`，在窗口中输入同一个 Key 即可。也可以通过 `GATEWAY_URL` 指定网关地址。UI 使用系统 `curl` 异步访问网关，macOS 无需额外安装依赖。
 
 网关不会启动 mitmproxy，也不会启动桌面客户端。之后可以关闭 MiMo、WorkBuddy 和 mitmweb。
 
@@ -193,6 +204,7 @@ MODEL_DISCOVERY=true
 ## HTTP 接口
 
 ```text
+GET  /
 GET  /health
 GET  /health/auth
 GET  /v1/models

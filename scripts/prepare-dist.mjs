@@ -10,7 +10,8 @@ for (const staleFile of [
   "mimo-server",
   "scripts/launch.js",
   "src/auth.js",
-  "src/mimo.js"
+  "src/mimo.js",
+  "src/ui.js"
 ]) {
   rmSync(resolve(distDir, staleFile), { force: true });
 }

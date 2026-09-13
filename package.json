@@ -5,14 +5,17 @@
   "type": "module",
   "main": "src/server.ts",
   "bin": {
-    "llm-gateway": "./dist/llm-gateway"
+    "llm-gateway": "./dist/llm-gateway",
+    "llm-gateway-ui": "./dist/llm-gateway-ui"
   },
   "scripts": {
-    "build": "node scripts/prepare-dist.mjs && node scripts/build-native.mjs src/server.ts dist/llm-gateway && npm run build:auth",
+    "build": "node scripts/prepare-dist.mjs && node scripts/build-native.mjs src/server.ts dist/llm-gateway && node scripts/build-native.mjs src/dashboard.ts dist/llm-gateway-ui && npm run build:auth",
     "build:server": "node scripts/prepare-dist.mjs && node scripts/build-native.mjs src/server.ts dist/llm-gateway",
+    "build:ui": "node scripts/prepare-dist.mjs && node scripts/build-native.mjs src/dashboard.ts dist/llm-gateway-ui",
     "build:auth": "node scripts/prepare-dist.mjs && tsc -p tsconfig.auth.json",
     "start": "npm run build:server && ./dist/llm-gateway",
     "launch": "npm run start",
+    "ui": "npm run build:ui && ./dist/llm-gateway-ui",
     "auth": "npm run build:auth && node dist/scripts/auth.js",
     "typecheck": "tsc --noEmit"
   },
