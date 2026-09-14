@@ -14,11 +14,30 @@ import type { JsonRecord, NormalizedChatRequest } from "./types.js";
 export type MetricProtocol = "chat" | "responses";
 export type MetricStatus = "success" | "error" | "canceled";
 
+export interface TokenBreakdown {
+  cachedTokens?: number;
+  audioTokens?: number;
+  imageTokens?: number;
+  textTokens?: number;
+  reasoningTokens?: number;
+  acceptedPredictionTokens?: number;
+  rejectedPredictionTokens?: number;
+}
+
 export interface TokenUsage {
   inputTokens?: number;
   outputTokens?: number;
   reasoningTokens?: number;
   cachedTokens?: number;
+  cacheCreationTokens?: number;
+  inputAudioTokens?: number;
+  outputAudioTokens?: number;
+  inputImageTokens?: number;
+  outputImageTokens?: number;
+  acceptedPredictionTokens?: number;
+  rejectedPredictionTokens?: number;
+  inputDetails?: TokenBreakdown;
+  outputDetails?: TokenBreakdown;
   totalTokens?: number;
 }
 
@@ -82,6 +101,13 @@ interface TokenTotals {
   outputTokens: number;
   reasoningTokens: number;
   cachedTokens: number;
+  cacheCreationTokens: number;
+  inputAudioTokens: number;
+  outputAudioTokens: number;
+  inputImageTokens: number;
+  outputImageTokens: number;
+  acceptedPredictionTokens: number;
+  rejectedPredictionTokens: number;
   totalTokens: number;
   requestsWithUsage: number;
 }
@@ -126,31 +152,115 @@ function firstNumber(record: JsonRecord, keys: string[]): number | undefined {
   return undefined;
 }
 
+function firstNumberFrom(records: JsonRecord[], keys: string[]): number | undefined {
+  for (const record of records) {
+    const value = firstNumber(record, keys);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+function detailRecord(value: unknown): JsonRecord {
+  return asRecord(value);
+}
+
+function normalizeBreakdown(
+  records: JsonRecord[],
+  includeReasoning = false,
+  includePrediction = false
+): TokenBreakdown | undefined {
+  const result: TokenBreakdown = {};
+  const cachedTokens = firstNumberFrom(records, ["cached_tokens", "cachedTokens"]);
+  const audioTokens = firstNumberFrom(records, ["audio_tokens", "audioTokens"]);
+  const imageTokens = firstNumberFrom(records, ["image_tokens", "imageTokens"]);
+  const textTokens = firstNumberFrom(records, ["text_tokens", "textTokens"]);
+  const reasoningTokens = includeReasoning
+    ? firstNumberFrom(records, ["reasoning_tokens", "reasoningTokens"])
+    : undefined;
+  const acceptedPredictionTokens = includePrediction
+    ? firstNumberFrom(records, ["accepted_prediction_tokens", "acceptedPredictionTokens"])
+    : undefined;
+  const rejectedPredictionTokens = includePrediction
+    ? firstNumberFrom(records, ["rejected_prediction_tokens", "rejectedPredictionTokens"])
+    : undefined;
+
+  if (cachedTokens !== undefined) result.cachedTokens = cachedTokens;
+  if (audioTokens !== undefined) result.audioTokens = audioTokens;
+  if (imageTokens !== undefined) result.imageTokens = imageTokens;
+  if (textTokens !== undefined) result.textTokens = textTokens;
+  if (reasoningTokens !== undefined) result.reasoningTokens = reasoningTokens;
+  if (acceptedPredictionTokens !== undefined) result.acceptedPredictionTokens = acceptedPredictionTokens;
+  if (rejectedPredictionTokens !== undefined) result.rejectedPredictionTokens = rejectedPredictionTokens;
+
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 /** Normalize Chat Completions and Responses usage into one private metric shape. */
 export function normalizeUsage(value: unknown): TokenUsage | null {
   const record = asRecord(value);
-  const inputDetails = asRecord(
-    record.prompt_tokens_details ?? record.input_tokens_details ?? record.input_token_details
-  );
-  const outputDetails = asRecord(
-    record.completion_tokens_details ?? record.output_tokens_details ?? record.output_token_details
-  );
+  const inputDetails = [
+    detailRecord(record.prompt_tokens_details),
+    detailRecord(record.input_tokens_details),
+    detailRecord(record.input_token_details)
+  ];
+  const outputDetails = [
+    detailRecord(record.completion_tokens_details),
+    detailRecord(record.output_tokens_details),
+    detailRecord(record.output_token_details)
+  ];
+  const inputSources = [record, ...inputDetails];
+  const outputSources = [record, ...outputDetails];
   const inputTokens = firstNumber(record, ["input_tokens", "prompt_tokens"]);
   const outputTokens = firstNumber(record, ["output_tokens", "completion_tokens"]);
-  const reasoningTokens = firstNumber(record, ["reasoning_tokens", "reasoningTokens"]) ??
-    firstNumber(outputDetails, ["reasoning_tokens", "reasoningTokens"]);
-  const cachedTokens = firstNumber(record, ["cached_tokens", "cachedTokens"]) ??
-    firstNumber(inputDetails, ["cached_tokens", "cachedTokens"]);
+  const reasoningTokens = firstNumberFrom(outputSources, ["reasoning_tokens", "reasoningTokens"]);
+  const cachedTokens = firstNumberFrom(inputSources, [
+    "cached_tokens",
+    "cachedTokens",
+    "input_cached_tokens",
+    "cache_read_input_tokens",
+    "cacheReadInputTokens"
+  ]);
+  const cacheCreationTokens = firstNumberFrom(inputSources, [
+    "cache_creation_input_tokens",
+    "cacheCreationInputTokens",
+    "cache_write_input_tokens",
+    "cacheWriteInputTokens"
+  ]);
+  const inputAudioTokens = firstNumberFrom(inputSources, ["input_audio_tokens", "audio_input_tokens"]) ??
+    firstNumberFrom(inputDetails, ["audio_tokens", "audioTokens"]);
+  const outputAudioTokens = firstNumberFrom(outputSources, ["output_audio_tokens", "audio_output_tokens"]) ??
+    firstNumberFrom(outputDetails, ["audio_tokens", "audioTokens"]);
+  const inputImageTokens = firstNumberFrom(inputSources, ["input_image_tokens", "image_input_tokens"]) ??
+    firstNumberFrom(inputDetails, ["image_tokens", "imageTokens"]);
+  const outputImageTokens = firstNumberFrom(outputSources, ["output_image_tokens", "image_output_tokens"]) ??
+    firstNumberFrom(outputDetails, ["image_tokens", "imageTokens"]);
+  const acceptedPredictionTokens = firstNumberFrom(outputSources, [
+    "accepted_prediction_tokens",
+    "acceptedPredictionTokens"
+  ]);
+  const rejectedPredictionTokens = firstNumberFrom(outputSources, [
+    "rejected_prediction_tokens",
+    "rejectedPredictionTokens"
+  ]);
   const totalTokens = firstNumber(record, ["total_tokens", "totalTokens"]) ??
     (inputTokens !== undefined && outputTokens !== undefined
       ? inputTokens + outputTokens
       : undefined);
+  const normalizedInputDetails = normalizeBreakdown(inputDetails, false, false);
+  const normalizedOutputDetails = normalizeBreakdown(outputDetails, true, true);
 
   if (
     inputTokens === undefined &&
     outputTokens === undefined &&
     reasoningTokens === undefined &&
     cachedTokens === undefined &&
+    cacheCreationTokens === undefined &&
+    inputAudioTokens === undefined &&
+    outputAudioTokens === undefined &&
+    inputImageTokens === undefined &&
+    outputImageTokens === undefined &&
+    acceptedPredictionTokens === undefined &&
+    rejectedPredictionTokens === undefined &&
     totalTokens === undefined
   ) {
     return null;
@@ -161,6 +271,15 @@ export function normalizeUsage(value: unknown): TokenUsage | null {
   if (outputTokens !== undefined) usage.outputTokens = outputTokens;
   if (reasoningTokens !== undefined) usage.reasoningTokens = reasoningTokens;
   if (cachedTokens !== undefined) usage.cachedTokens = cachedTokens;
+  if (cacheCreationTokens !== undefined) usage.cacheCreationTokens = cacheCreationTokens;
+  if (inputAudioTokens !== undefined) usage.inputAudioTokens = inputAudioTokens;
+  if (outputAudioTokens !== undefined) usage.outputAudioTokens = outputAudioTokens;
+  if (inputImageTokens !== undefined) usage.inputImageTokens = inputImageTokens;
+  if (outputImageTokens !== undefined) usage.outputImageTokens = outputImageTokens;
+  if (acceptedPredictionTokens !== undefined) usage.acceptedPredictionTokens = acceptedPredictionTokens;
+  if (rejectedPredictionTokens !== undefined) usage.rejectedPredictionTokens = rejectedPredictionTokens;
+  if (normalizedInputDetails) usage.inputDetails = normalizedInputDetails;
+  if (normalizedOutputDetails) usage.outputDetails = normalizedOutputDetails;
   if (totalTokens !== undefined) usage.totalTokens = totalTokens;
   return usage;
 }
@@ -171,6 +290,13 @@ function emptyTotals(): TokenTotals {
     outputTokens: 0,
     reasoningTokens: 0,
     cachedTokens: 0,
+    cacheCreationTokens: 0,
+    inputAudioTokens: 0,
+    outputAudioTokens: 0,
+    inputImageTokens: 0,
+    outputImageTokens: 0,
+    acceptedPredictionTokens: 0,
+    rejectedPredictionTokens: 0,
     totalTokens: 0,
     requestsWithUsage: 0
   };
@@ -183,6 +309,13 @@ function addUsage(totals: TokenTotals, usage: TokenUsage | null): void {
   totals.outputTokens += usage.outputTokens ?? 0;
   totals.reasoningTokens += usage.reasoningTokens ?? 0;
   totals.cachedTokens += usage.cachedTokens ?? 0;
+  totals.cacheCreationTokens += usage.cacheCreationTokens ?? 0;
+  totals.inputAudioTokens += usage.inputAudioTokens ?? 0;
+  totals.outputAudioTokens += usage.outputAudioTokens ?? 0;
+  totals.inputImageTokens += usage.inputImageTokens ?? 0;
+  totals.outputImageTokens += usage.outputImageTokens ?? 0;
+  totals.acceptedPredictionTokens += usage.acceptedPredictionTokens ?? 0;
+  totals.rejectedPredictionTokens += usage.rejectedPredictionTokens ?? 0;
   totals.totalTokens += usage.totalTokens ?? 0;
 }
 
@@ -499,6 +632,13 @@ export class MetricsStore {
           outputTokens: group.outputTokens,
           reasoningTokens: group.reasoningTokens,
           cachedTokens: group.cachedTokens,
+          cacheCreationTokens: group.cacheCreationTokens,
+          inputAudioTokens: group.inputAudioTokens,
+          outputAudioTokens: group.outputAudioTokens,
+          inputImageTokens: group.inputImageTokens,
+          outputImageTokens: group.outputImageTokens,
+          acceptedPredictionTokens: group.acceptedPredictionTokens,
+          rejectedPredictionTokens: group.rejectedPredictionTokens,
           totalTokens: group.totalTokens,
           requestsWithUsage: group.requestsWithUsage
         }

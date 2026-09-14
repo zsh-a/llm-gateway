@@ -25,11 +25,30 @@ export interface AuthStatus {
   providers: Record<string, AuthProviderStatus>;
 }
 
+export interface UsageBreakdown {
+  cachedTokens?: number;
+  audioTokens?: number;
+  imageTokens?: number;
+  textTokens?: number;
+  reasoningTokens?: number;
+  acceptedPredictionTokens?: number;
+  rejectedPredictionTokens?: number;
+}
+
 export interface Usage {
   inputTokens?: number;
   outputTokens?: number;
   reasoningTokens?: number;
   cachedTokens?: number;
+  cacheCreationTokens?: number;
+  inputAudioTokens?: number;
+  outputAudioTokens?: number;
+  inputImageTokens?: number;
+  outputImageTokens?: number;
+  acceptedPredictionTokens?: number;
+  rejectedPredictionTokens?: number;
+  inputDetails?: UsageBreakdown;
+  outputDetails?: UsageBreakdown;
   totalTokens?: number;
   requestsWithUsage?: number;
   [key: string]: unknown;
@@ -85,7 +104,10 @@ export interface RecentRequest {
   provider?: string;
   channelId?: string;
   model?: string;
+  reasoningEffort?: string;
   status?: "success" | "error" | "canceled";
+  finishReason?: string;
+  toolCalls?: number;
   usage?: Usage | null;
 }
 

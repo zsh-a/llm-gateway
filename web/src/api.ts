@@ -32,7 +32,7 @@ const emptySummary: MetricsSummary = {
   successRate: null,
   activeRequests: 0,
   latency: { averageMs: null, p50Ms: null, p95Ms: null, maxMs: null },
-  tokens: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cachedTokens: 0, totalTokens: 0, requestsWithUsage: 0 },
+  tokens: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cachedTokens: 0, cacheCreationTokens: 0, inputAudioTokens: 0, outputAudioTokens: 0, inputImageTokens: 0, outputImageTokens: 0, acceptedPredictionTokens: 0, rejectedPredictionTokens: 0, totalTokens: 0, requestsWithUsage: 0 },
   byProvider: [],
   byChannel: [],
   byModel: [],
