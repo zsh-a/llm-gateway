@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 
 import { getAuthStore, type AuthHeaders } from "./auth-store.js";
 import type { GatewayConfig } from "./config.js";
+import { getChannelStore, getChannels, type ChannelConfig } from "./channels.js";
 import {
   getProvider,
   getProviders,
@@ -38,6 +39,11 @@ interface ModelSnapshot {
 
 export interface ModelRoute {
   provider: ProviderAdapter;
+  channel: ChannelConfig;
+  candidates: Array<{
+    channel: ChannelConfig;
+    upstreamModel: string;
+  }>;
   model: ModelDescriptor;
   upstreamModel: string;
   publicModel: string;
@@ -330,17 +336,49 @@ class ModelCatalog {
       counts[model.id] = (counts[model.id] ?? 0) + 1;
     }
 
-    return rawModels.map((model) => {
+    const visible = rawModels.map((model) => {
       const publicId = counts[model.id] > 1
         ? `${model.providerId}/${model.id}`
         : model.id;
       return { ...model, publicId };
     });
+
+    const aliases: ModelDescriptor[] = [];
+    const aliasIds = new Set(visible.map((model) => model.publicId ?? model.id));
+    for (const channel of getChannels(this.config)) {
+      if (!channel.enabled) continue;
+      const provider = getProvider(channel.providerId);
+      if (!provider) continue;
+      for (const [publicId, upstreamModel] of Object.entries(channel.modelMappings)) {
+        if (publicId === "*" || aliasIds.has(publicId)) continue;
+        const source = visible.find((model) => (
+          model.providerId === provider.id && model.id === upstreamModel
+        ));
+        aliases.push({
+          ...(source ?? {
+            id: upstreamModel,
+            providerId: provider.id,
+            ownedBy: provider.name
+          }),
+          id: upstreamModel,
+          publicId,
+          providerId: provider.id
+        });
+        aliasIds.add(publicId);
+      }
+    }
+
+    return [...visible, ...aliases];
   }
 
   private async loadProvider(
     provider: ProviderAdapter
   ): Promise<ModelDescriptor[]> {
+    if (!getChannels(this.config).some((channel) => (
+      channel.enabled && channel.providerId === provider.id
+    ))) {
+      return [];
+    }
     const ownedBy = provider.name;
     const local = filterModels(
       readModelsFile(provider.modelFile, ownedBy),
@@ -422,14 +460,21 @@ export async function getModels(config: GatewayConfig): Promise<ModelDescriptor[
 }
 
 function routeFromModel(
+  config: GatewayConfig,
   model: ModelDescriptor,
   provider: ProviderAdapter
-): ModelRoute {
+): ModelRoute | null {
+  const publicModel = model.publicId ?? model.id;
+  const candidates = getChannelStore(config).selectCandidates(provider.id, publicModel, model.id);
+  if (candidates.length === 0) return null;
+  const selection = candidates[0];
   return {
     provider,
+    channel: selection.channel,
+    candidates,
     model,
-    upstreamModel: model.id,
-    publicModel: model.publicId ?? model.id
+    upstreamModel: selection.upstreamModel,
+    publicModel
   };
 }
 
@@ -442,7 +487,7 @@ export async function resolveModel(
   const exact = models.find((model) => model.publicId === requested);
   if (exact && exact.providerId) {
     const provider = getProvider(exact.providerId);
-    if (provider) return routeFromModel(exact, provider);
+    if (provider) return routeFromModel(config, exact, provider);
   }
 
   const separator = requested.indexOf("/");
@@ -450,15 +495,21 @@ export async function resolveModel(
     const provider = getProvider(requested.slice(0, separator));
     const upstreamModel = requested.slice(separator + 1).trim();
     if (provider && upstreamModel) {
+      const candidates = getChannelStore(config)
+        .selectCandidates(provider.id, requested, upstreamModel);
+      if (candidates.length === 0) return null;
+      const selection = candidates[0];
       return {
         provider,
+        channel: selection.channel,
+        candidates,
         model: {
           id: upstreamModel,
           providerId: provider.id,
           publicId: requested,
           ownedBy: provider.name
         },
-        upstreamModel,
+        upstreamModel: selection.upstreamModel,
         publicModel: requested
       };
     }
@@ -467,13 +518,18 @@ export async function resolveModel(
   const rawMatches = models.filter((model) => model.id === requested);
   if (rawMatches.length === 1 && rawMatches[0].providerId) {
     const provider = getProvider(rawMatches[0].providerId);
-    if (provider) return routeFromModel(rawMatches[0], provider);
+    if (provider) return routeFromModel(config, rawMatches[0], provider);
   }
 
   if (!requested && models.length > 0 && models[0].providerId) {
     const provider = getProvider(models[0].providerId);
-    if (provider) return routeFromModel(models[0], provider);
+    if (provider) return routeFromModel(config, models[0], provider);
   }
 
   return null;
+}
+
+export function clearModelCache(config: GatewayConfig): void {
+  if (defaultConfig !== config || !defaultCatalog) return;
+  defaultCatalog = null;
 }

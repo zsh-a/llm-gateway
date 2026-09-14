@@ -3,7 +3,7 @@
 一个用 TypeScript 编写、由 Perry 编译核心服务的统一 OpenAI 兼容网关。
 当前内置 MiMo 和 WorkBuddy 两个 Provider，客户端只需要配置一次网关地址，模型会自动路由到对应上游。
 
-认证流程与网关运行时完全分离：`npm run auth` 负责首次捕获并缓存认证；网关和桌面控制面板由同一个二进制提供 `serve`、`desktop` 两种模式。
+认证流程与网关运行时完全分离：`npm run auth` 负责首次捕获并缓存认证；网关和控制面板由同一个二进制提供 `serve`、`desktop` 两种模式，另保留 `native` 作为 Perry 原生 UI 兼容入口。
 
 ## 架构
 
@@ -18,7 +18,8 @@
       ▼
 同一个 Perry 原生二进制
   serve   → OpenAI Client → ModelCatalog → Provider → LLM 上游
-  desktop → 托管 serve 子进程 + Perry UI 控制面板
+  desktop → 托管 serve 子进程 + 嵌入式 Web 控制台
+  native  → 托管 serve 子进程 + Perry 原生控制面板（兼容）
 ```
 
 核心代码：
@@ -27,19 +28,26 @@
 src/config.ts       轻量网关配置
 src/provider.ts     Provider 注册表、默认上游和统一传输
 src/auth-store.ts   网关只读/失效认证缓存
+src/channels.ts     Channel 配置、模型映射、优先级和权重选择
+src/key-store.ts    虚拟 API Key、模型权限、RPM 与 Token 配额
 src/models.ts       多 Provider 模型聚合和自动路由
 src/sse.ts          基于 eventsource-parser 的 SSE/JSON 流解析器
 src/stream.ts       Provider chunk → StreamEvent 统一中间表示
+src/metrics.ts      请求生命周期、延迟和 Token 用量统计
 src/openai.ts       OpenAI 请求/响应适配
 src/responses.ts    Responses 输入/输出适配
 src/server.ts       OpenAI 兼容 HTTP 服务与启动生命周期
-src/dashboard.ts    Perry UI 原生桌面控制面板与启动生命周期
-src/main.ts         serve / desktop 模式入口
+src/web-ui.ts       Web 控制台嵌入入口
+web/src/            React + Tailwind + shadcn/ui 控制台源码
+src/dashboard.ts    可选的 Perry 原生控制面板兼容入口
+src/main.ts         serve / desktop / native 模式入口
 src/management.ts   doctor / models / export 管理命令
 scripts/auth.ts     一次性认证引导工具
+scripts/prepare-ui.mjs  Vite 构建并将 Web 资源内嵌到 Perry
 ```
 
-`serve` 模式只运行网关，不创建 UI；`desktop` 模式由同一个入口托管 Gateway 子进程和 Perry 原生控制面板。这样构建产物和启动方式统一，同时避开当前 Perry macOS UI 事件循环对 `node:http` 异步 accept 的限制。
+`serve` 模式只运行网关；`desktop` 模式由同一个入口托管 Gateway 子进程并打开同源 Web 控制台。控制台直接由 Gateway 提供，不需要额外的静态服务器、前端运行时或 CORS 配置；`native` 模式仅用于需要 Perry 原生窗口的场景。
+Web 控制台使用 Tailwind CSS v4 和 shadcn/ui 风格的本地组件，资源由 Vite 在构建阶段编译并打入二进制，运行时不依赖 CDN 或额外静态服务器。
 认证工具仍然独立，不会被网关或桌面模式自动启动。
 
 ## 安装与构建
@@ -150,11 +158,17 @@ npm run desktop
 # ./dist/llm-gateway desktop
 ```
 
-`desktop` 会由同一个二进制托管 Gateway 子进程并打开 Perry 原生窗口，查看网关、Provider、认证和模型状态，并发送真实测试请求。控制面板默认连接当前托管实例的 `http://127.0.0.1:3000`；如果配置了 `PROXY_API_KEY`，在窗口中输入同一个 Key 即可。也可以通过 `GATEWAY_URL` 指定其他网关地址。UI 使用系统 `curl` 异步访问网关，macOS 无需额外安装依赖。
+`desktop` 会由同一个二进制托管 Gateway 子进程并打开浏览器控制台：`http://127.0.0.1:3000/ui`。控制台按“概览 / Playground / 统计 / 渠道与 Key / 设置”分成独立页面：概览查看网关、Provider、认证和模型状态，Playground 发送真实测试请求，统计查看 24 小时用量；“渠道与 Key”页面在输入 `PROXY_ADMIN_KEY` 后维护 Channel（上游、认证引用、模型映射、优先级、权重和启停）以及虚拟 API Key（模型权限、RPM、TPM、Token 配额和撤销）。新 Key 的完整 secret 只在创建成功时显示一次。控制台默认连接当前托管实例；如果配置了 `PROXY_API_KEY` 或启用了虚拟 API Key，在设置页输入可用的 Key 即可。也可以通过 `GATEWAY_URL` 指定其他网关地址。页面使用同源 `fetch` 访问网关，不需要额外安装依赖。
+
+需要 Perry 原生窗口时可使用兼容模式：
+
+```bash
+./dist/llm-gateway native
+```
 
 网关不会启动 mitmproxy，也不会启动桌面客户端。之后可以关闭 MiMo、WorkBuddy 和 mitmweb。
 
-`desktop` 模式的生命周期由 UI 入口管理：关闭窗口或退出桌面进程会自动结束托管的 Gateway 子进程。需要让 Gateway 独立常驻时，请使用 `serve` 模式。
+`desktop` / `native` 模式的生命周期由入口进程管理：退出桌面进程会自动结束托管的 Gateway 子进程。需要让 Gateway 独立常驻时，请使用 `serve` 模式。
 
 客户端统一配置为：
 
@@ -247,10 +261,15 @@ curl http://127.0.0.1:3000/health/auth
 PORT=3000
 BIND_HOST=127.0.0.1
 PROXY_API_KEY=change-me
+PROXY_ADMIN_KEY=admin-change-me
 RUNTIME_DIR=./.runtime
 AUTH_CACHE_DIR=./.runtime/auth
 MODEL_CACHE_DIR=./.runtime/models
 MODEL_DISCOVERY=true
+METRICS_MAX_RECORDS=2000
+CHANNELS_FILE=./.runtime/channels.json
+API_KEYS_FILE=./.runtime/api-keys.json
+METRICS_FILE=./.runtime/metrics.json
 ```
 
 认证工具的 mitmproxy 和客户端参数见 [.env.example](./.env.example)，这些参数不会被网关进程使用。
@@ -260,11 +279,28 @@ MODEL_DISCOVERY=true
 ```text
 GET  /
 GET  /health
+GET  /ui
+GET  /ui/
 GET  /health/live
 GET  /health/ready
 GET  /health/auth
 GET  /.well-known/llm-gateway/capabilities
 GET  /v1/models
+GET  /metrics/summary
+GET  /metrics/timeseries
+GET  /metrics/requests
+GET  /metrics/models
+GET  /admin/channels
+POST /admin/channels
+DELETE /admin/channels/:id
+GET  /admin/keys
+POST /admin/keys
+PATCH /admin/keys/:id
+DELETE /admin/keys/:id
+GET  /admin/metrics/summary
+GET  /admin/metrics/timeseries
+GET  /admin/metrics/requests
+GET  /admin/metrics/models
 POST /v1/chat/completions
 POST /chat/completions
 POST /v1/responses
@@ -272,6 +308,40 @@ POST /responses
 ```
 
 网关始终以流式方式请求上游；客户端使用 `stream: false` 时由网关聚合为普通 JSON，同时保留工具调用、思维内容和 usage（若上游提供）。
+
+网关会保留最近 `METRICS_MAX_RECORDS` 条请求元数据，并默认持久化到 `METRICS_FILE`，用于控制面板统计请求数、成功率、延迟和 Token 用量。统计不保存 Prompt、Cookie 或完整响应；删除该文件或修改 `METRICS_FILE` 即可开始新的统计周期。Token 优先使用上游返回的 usage，未返回时显示为未知，不进行伪精确估算。请求在鉴权、参数校验、模型路由阶段失败时也会记录为 `gateway` 错误。
+
+## Channel 与虚拟 API Key
+
+默认会为每个内置 Provider 创建一个 Channel：
+
+```text
+.runtime/channels.json
+.runtime/auth/mimo.json
+.runtime/auth/workbuddy.json
+```
+
+Channel 可以配置独立认证缓存、上游地址、模型映射、优先级和权重。相同 Provider 的多个 Channel 会先按优先级选择，再按权重轮询；上游在首个响应块之前返回 429、5xx 或网络错误时，网关会自动尝试下一个 Channel。流式响应已经开始输出后不会切换上游。
+
+创建一个模型别名和备用渠道：
+
+```bash
+curl -X POST http://127.0.0.1:3000/admin/channels \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"mimo-secondary","name":"MiMo Secondary","providerId":"mimo","authRef":"mimo-secondary","priority":50,"weight":1,"modelMappings":{"fast-chat":"mimo-x-pro-preview"}}'
+
+npm run auth -- --provider mimo --channel mimo-secondary
+```
+
+创建虚拟 API Key。响应中的 `secret` 只返回一次；后续仅保存 Hash 和脱敏前缀：
+
+```bash
+curl -X POST http://127.0.0.1:3000/admin/keys \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"local-harness","allowedModels":["deepseek-v4-flash"],"rpmLimit":60,"tpmLimit":100000,"quotaTokens":1000000}'
+```
+
+管理接口使用 `PROXY_ADMIN_KEY` 保护；未配置管理员 Key 时，默认仅适合绑定 `127.0.0.1` 的本地管理。启用虚拟 Key 后，客户端使用返回的 `secret` 作为 `Authorization: Bearer <key>`。`PROXY_API_KEY` 仍可作为部署级固定 Key 使用。
 
 网关不会伪装未实现的协议能力：Chat Completions 当前明确限制 `n=1`，Responses 对 `background`、`conversation`、`include`、`max_tool_calls`、`prompt`、`service_tier` 和 `stream_options` 等未实现字段返回 400；不支持 Chat 的音频、图片模型也会在目录中标记，并拒绝被当作对话模型调用。
 

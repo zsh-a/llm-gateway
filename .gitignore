@@ -1,5 +1,6 @@
 dist/
 node_modules/
+src/web-bundle.ts
 cookie.txt
 .env
 .runtime/

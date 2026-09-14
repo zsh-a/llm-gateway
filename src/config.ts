@@ -20,6 +20,11 @@ export interface GatewayConfig {
   modelCacheTtlMs: number;
   modelCacheDir: string;
   defaultModel: string;
+  metricsMaxRecords: number;
+  channelsFile: string;
+  apiKeysFile: string;
+  metricsFile: string;
+  adminKey: string;
 }
 
 const VALID_EFFORTS: ReasoningEffort[] = [
@@ -93,6 +98,11 @@ export function loadConfig(): GatewayConfig {
     modelAllowlist: listEnv("MODEL_ALLOWLIST", []),
     modelCacheTtlMs: positiveInt("MODEL_CACHE_TTL_MS", 5 * 60 * 1000),
     modelCacheDir: env("MODEL_CACHE_DIR", `${runtimeDir}/models`),
-    defaultModel: env("DEFAULT_MODEL", "")
+    defaultModel: env("DEFAULT_MODEL", ""),
+    metricsMaxRecords: positiveInt("METRICS_MAX_RECORDS", 2000),
+    channelsFile: env("CHANNELS_FILE", `${runtimeDir}/channels.json`),
+    apiKeysFile: env("API_KEYS_FILE", `${runtimeDir}/api-keys.json`),
+    metricsFile: env("METRICS_FILE", `${runtimeDir}/metrics.json`),
+    adminKey: process.env.PROXY_ADMIN_KEY ?? ""
   };
 }

@@ -1,7 +1,7 @@
 {
   "name": "llm-gateway",
   "version": "1.0.0",
-  "description": "A native TypeScript OpenAI gateway with an optional Perry desktop control panel",
+  "description": "A TypeScript OpenAI-compatible gateway with an embedded browser control panel",
   "type": "module",
   "main": "src/main.ts",
   "bin": {
@@ -12,6 +12,8 @@
     "build:gateway": "node scripts/prepare-dist.mjs && node scripts/build-native.mjs src/main.ts dist/llm-gateway",
     "build:server": "npm run build:gateway",
     "build:auth": "node scripts/prepare-dist.mjs && tsc -p tsconfig.auth.json",
+    "build:web": "node scripts/prepare-ui.mjs",
+    "prepare:ui": "npm run build:web",
     "start": "./dist/llm-gateway serve",
     "launch": "npm run start",
     "dev": "npm run build && npm run start",
@@ -20,16 +22,30 @@
     "models": "./dist/llm-gateway models",
     "export:harness": "./dist/llm-gateway export deepseek-harness",
     "auth": "npm run build:auth && node dist/scripts/auth.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "npm run prepare:ui && tsc --noEmit && tsc -p web/tsconfig.json --noEmit"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.19.0"
   },
   "devDependencies": {
     "@perryts/perry": "0.5.1520",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^22.15.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.46.0",
     "openai": "^7.15.0",
-    "typescript": "^5.8.3"
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "shadcn": "^4.21.0",
+    "tailwind-merge": "^3.7.0",
+    "tailwindcss": "^4.3.3",
+    "tw-animate-css": "^1.4.0",
+    "typescript": "^5.8.3",
+    "vite": "^8.3.0"
   },
   "dependencies": {
     "eventsource-parser": "^3.1.1"

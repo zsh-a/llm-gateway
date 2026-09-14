@@ -38,7 +38,6 @@ import {
   widgetSetBorderColor,
   widgetSetBorderWidth,
   widgetSetHeight,
-  widgetSetTooltip,
   widgetSetWidth
 } from "perry/ui";
 import type { Widget } from "perry/ui";
@@ -61,6 +60,42 @@ interface ProviderStatus {
   ready?: boolean;
   source?: string | null;
   capturedAt?: number | null;
+}
+
+interface GatewayChannel {
+  id: string;
+  name: string;
+  providerId: string;
+  authRef: string;
+  upstreamUrl?: string;
+  enabled?: boolean;
+  priority?: number;
+  weight?: number;
+  modelMappings?: { [key: string]: string };
+}
+
+interface ManagedApiKey {
+  id: string;
+  name: string;
+  prefix: string;
+  enabled: boolean;
+  createdAt?: number;
+  lastUsedAt?: number | null;
+  allowedModels: string[];
+  rpmLimit?: number | null;
+  tpmLimit?: number | null;
+  quotaTokens?: number | null;
+  usedTokens: number;
+  remainingTokens?: number | null;
+}
+
+type DashboardPage = "overview" | "playground" | "metrics" | "management" | "settings";
+
+interface DashboardPageMeta {
+  label: string;
+  title: string;
+  subtitle: string;
+  route: string;
 }
 
 interface Color {
@@ -96,24 +131,48 @@ const layout = {
   windowWidth: 1120,
   windowHeight: 760,
   contentWidth: 1076,
-  sidebarWidth: 250,
-  workspaceWidth: 810,
-  modelWidth: 365,
-  testWidth: 429,
-  sidebarInnerWidth: 220,
-  modelInnerWidth: 335,
-  testInnerWidth: 399,
-  panelHeight: 540
+  contentInnerWidth: 1048,
+  modelWidth: 330,
+  testWidth: 730,
+  modelInnerWidth: 302,
+  testInnerWidth: 702,
+  modelPickerWidth: 420,
+  reasoningPickerWidth: 260,
+  providerCardWidth: 520,
+  adminPanelWidth: 518,
+  adminInnerWidth: 488,
+  panelHeight: 480
 };
 
 let gatewayKey = process.env.PROXY_API_KEY?.trim() || "";
+let adminKey = process.env.PROXY_ADMIN_KEY?.trim() || gatewayKey;
 let promptValue = "请用一句话介绍你自己。";
 let models: GatewayModel[] = [];
+let channels: GatewayChannel[] = [];
+let managedKeys: ManagedApiKey[] = [];
 let modelSearch = "";
 let selectedModelIndex = 0;
 let selectedReasoningEffort = "";
 let modelSelectionTimerPending = false;
 let pendingModelIndex: number | null = null;
+let metricsRefreshTimerPending = false;
+let navigationTimerPending = false;
+let pendingPage: DashboardPage | null = null;
+let activePage: DashboardPage = "overview";
+
+let channelIdValue = "";
+let channelNameValue = "";
+let channelProviderValue = "mimo";
+let channelAuthRefValue = "mimo";
+let channelUrlValue = "";
+let channelPriorityValue = "100";
+let channelWeightValue = "1";
+let channelMappingsValue = "";
+let keyNameValue = "";
+let keyModelsValue = "";
+let keyRpmValue = "";
+let keyTpmValue = "";
+let keyQuotaValue = "";
 
 let modelRows: Widget;
 let modelPickerHost: Widget;
@@ -124,6 +183,58 @@ let reasoningPicker: Widget | null = null;
 let globalStatus: Widget;
 let overviewStatus: Widget;
 let responseStatus: Widget;
+let metricsRows: Widget;
+let metricsStatus: Widget;
+let channelRows: Widget;
+let managedKeyRows: Widget;
+let adminStatus: Widget;
+let navRows: Widget;
+let pageHost: Widget;
+let pageTitle: Widget;
+let pageSubtitle: Widget;
+let pageRoute: Widget;
+let pageViews: { [key: string]: Widget } = {};
+
+const pageOrder: DashboardPage[] = [
+  "overview",
+  "playground",
+  "metrics",
+  "management",
+  "settings"
+];
+
+const pageMeta: { [key: string]: DashboardPageMeta } = {
+  overview: {
+    label: "概览",
+    title: "网关概览",
+    subtitle: "查看服务状态、Provider 认证和模型目录",
+    route: "GET /health · GET /v1/models"
+  },
+  playground: {
+    label: "Playground",
+    title: "模型请求工作台",
+    subtitle: "选择模型、调整推理强度，并发送一条真实的兼容请求",
+    route: "POST /v1/chat/completions"
+  },
+  metrics: {
+    label: "统计",
+    title: "流量与用量",
+    subtitle: "观察请求、Token、延迟和路由分布",
+    route: "GET /metrics/*"
+  },
+  management: {
+    label: "渠道与 Key",
+    title: "渠道与访问控制",
+    subtitle: "维护上游路由、模型映射和客户端访问凭据",
+    route: "GET /admin/*"
+  },
+  settings: {
+    label: "设置",
+    title: "连接设置",
+    subtitle: "配置调用密钥、管理员密钥和认证流程",
+    route: "LOCAL CONFIG"
+  }
+};
 
 function asRecord(value: unknown): { [key: string]: unknown } {
   return value !== null && typeof value === "object"
@@ -152,6 +263,82 @@ function formatTime(value: unknown): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function numberValue(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function formatCount(value: unknown): string {
+  const number = numberValue(value);
+  if (number === null) return "—";
+  if (number >= 1000000) return `${(number / 1000000).toFixed(2)}M`;
+  if (number >= 1000) return `${(number / 1000).toFixed(1)}K`;
+  return String(Math.round(number));
+}
+
+function formatPercent(value: unknown): string {
+  const number = numberValue(value);
+  return number === null ? "—" : `${number.toFixed(number % 1 === 0 ? 0 : 1)}%`;
+}
+
+function formatDuration(value: unknown): string {
+  const number = numberValue(value);
+  if (number === null) return "—";
+  if (number >= 1000) return `${(number / 1000).toFixed(1)}s`;
+  return `${Math.round(number)}ms`;
+}
+
+function usageNumber(value: unknown, ...fallbacks: unknown[]): number | null {
+  const values = [value, ...fallbacks];
+  for (const item of values) {
+    const number = numberValue(item);
+    if (number !== null) return number;
+  }
+  return null;
+}
+
+function responseUsage(value: unknown): void {
+  const usage = asRecord(value);
+  const inputDetails = asRecord(
+    usage.prompt_tokens_details ?? usage.input_tokens_details
+  );
+  const outputDetails = asRecord(
+    usage.completion_tokens_details ?? usage.output_tokens_details
+  );
+  setText(
+    "response-input-tokens",
+    formatCount(usageNumber(usage.input_tokens, usage.prompt_tokens, usage.inputTokens))
+  );
+  setText(
+    "response-output-tokens",
+    formatCount(usageNumber(usage.output_tokens, usage.completion_tokens, usage.outputTokens))
+  );
+  setText(
+    "response-reasoning-tokens",
+    formatCount(usageNumber(
+      usage.reasoning_tokens,
+      usage.reasoningTokens,
+      outputDetails.reasoning_tokens
+    ))
+  );
+  setText(
+    "response-total-tokens",
+    formatCount(usageNumber(usage.total_tokens, usage.totalTokens))
+  );
+  setText(
+    "response-cached-tokens",
+    formatCount(usageNumber(
+      usage.cached_tokens,
+      usage.cachedTokens,
+      inputDetails.cached_tokens
+    ))
+  );
+  const hasUsage = Object.keys(usage).length > 0;
+  setText("response-usage-note", hasUsage ? "上游已报告 usage" : "本次响应未提供 usage");
 }
 
 function color(widget: Widget, value: Color): void {
@@ -230,15 +417,13 @@ function primaryButton(title: string, onPress: () => void, width = 0): Widget {
   return widget;
 }
 
-function metric(title: string, valueId: string, foot: string): Widget {
-  const widget = HStack(8, [
-    label(title, 11, colors.muted),
-    Spacer(),
-    dynamicLabel("—", valueId, 13, colors.text, 90)
+function compactMetric(title: string, valueId: string, value = colors.text): Widget {
+  const widget = VStack(2, [
+    label(title, 9, colors.muted),
+    dynamicLabel("—", valueId, 13, value, 82)
   ]);
-  setPadding(widget, 6, 0, 6, 0);
-  stackSetAlignment(widget, 12);
-  if (foot) widgetSetTooltip(widget, foot);
+  stackSetAlignment(widget, 5);
+  widgetSetWidth(widget, 82);
   return widget;
 }
 
@@ -309,6 +494,66 @@ function modelsFrom(value: unknown): GatewayModel[] {
   return result;
 }
 
+function channelsFrom(value: unknown): GatewayChannel[] {
+  const data = asRecord(value).data;
+  if (!Array.isArray(data)) return [];
+  const result: GatewayChannel[] = [];
+  for (const item of data) {
+    const record = asRecord(item);
+    const id = stringValue(record.id);
+    const providerId = stringValue(record.providerId);
+    const authRef = stringValue(record.authRef);
+    if (!id || !providerId || !authRef) continue;
+    const mappings = asRecord(record.modelMappings);
+    const modelMappings: { [key: string]: string } = {};
+    for (const key of Object.keys(mappings)) {
+      const model = stringValue(mappings[key]);
+      if (model) modelMappings[key] = model;
+    }
+    result.push({
+      id,
+      name: stringValue(record.name) || id,
+      providerId,
+      authRef,
+      upstreamUrl: stringValue(record.upstreamUrl) || undefined,
+      enabled: record.enabled !== false,
+      priority: numberValue(record.priority) ?? 100,
+      weight: numberValue(record.weight) ?? 1,
+      modelMappings: Object.keys(modelMappings).length > 0 ? modelMappings : undefined
+    });
+  }
+  return result;
+}
+
+function managedKeysFrom(value: unknown): ManagedApiKey[] {
+  const data = asRecord(value).data;
+  if (!Array.isArray(data)) return [];
+  const result: ManagedApiKey[] = [];
+  for (const item of data) {
+    const record = asRecord(item);
+    const id = stringValue(record.id);
+    if (!id) continue;
+    const allowedModels = Array.isArray(record.allowedModels)
+      ? record.allowedModels.map(stringValue).filter(Boolean)
+      : [];
+    result.push({
+      id,
+      name: stringValue(record.name) || id,
+      prefix: stringValue(record.prefix) || "sk-gw-…",
+      enabled: record.enabled !== false,
+      createdAt: numberValue(record.createdAt) ?? undefined,
+      lastUsedAt: numberValue(record.lastUsedAt),
+      allowedModels,
+      rpmLimit: numberValue(record.rpmLimit),
+      tpmLimit: numberValue(record.tpmLimit),
+      quotaTokens: numberValue(record.quotaTokens),
+      usedTokens: numberValue(record.usedTokens) ?? 0,
+      remainingTokens: numberValue(record.remainingTokens)
+    });
+  }
+  return result;
+}
+
 interface CommandResponse {
   status: number;
   body: string;
@@ -317,7 +562,8 @@ interface CommandResponse {
 function requestText(
   path: string,
   method = "GET",
-  body = ""
+  body = "",
+  key = gatewayKey
 ): Promise<CommandResponse> {
   const args = [
     "--silent",
@@ -327,7 +573,7 @@ function requestText(
     "--max-time", "120",
     "--header", "Accept: application/json"
   ];
-  if (gatewayKey) args.push("--header", `Authorization: Bearer ${gatewayKey}`);
+  if (key) args.push("--header", `Authorization: Bearer ${key}`);
   if (body) {
     args.push("--header", "Content-Type: application/json", "--data-raw", body);
   }
@@ -369,9 +615,10 @@ function requestText(
 async function requestJson(
   path: string,
   method = "GET",
-  body = ""
+  body = "",
+  key = gatewayKey
 ): Promise<unknown> {
-  const response = await requestText(path, method, body);
+  const response = await requestText(path, method, body, key);
   const raw = response.body;
   let value: unknown = {};
   try {
@@ -465,7 +712,7 @@ function renderPicker(): void {
     pickerAddItem(modelPicker, `${model.name || model.id} · ${providerName(model.provider || "unknown")}`);
   }
   if (models.length > 0) pickerSetSelected(modelPicker, selectedModelIndex);
-  widgetSetWidth(modelPicker, layout.testInnerWidth);
+  widgetSetWidth(modelPicker, layout.modelPickerWidth);
   widgetAddChild(modelPickerHost, modelPicker);
 }
 
@@ -518,7 +765,7 @@ function renderReasoningPicker(): void {
   });
   for (const key of keys) pickerAddItem(reasoningPicker, effortLabel(key));
   pickerSetSelected(reasoningPicker, keys.indexOf(selectedReasoningEffort));
-  widgetSetWidth(reasoningPicker, layout.testInnerWidth);
+  widgetSetWidth(reasoningPicker, layout.reasoningPickerWidth);
   widgetAddChild(reasoningPickerHost, reasoningPicker);
   setText("selected-effort", effortLabel(selectedReasoningEffort));
 }
@@ -536,27 +783,387 @@ function renderProviders(statusValue: unknown): void {
   const ids = Object.keys(providers);
   widgetClearChildren(providerRows);
 
-  for (const id of ids) {
-    const status = asRecord(providers[id]) as ProviderStatus;
-    const ready = status.ready === true;
-    const statusColor = ready ? colors.green : colors.yellow;
-    const providerRow = HStack(8, [
-      VStack(2, [
-        label(providerName(id), 12, colors.text),
-        label(id, 10, colors.subtle)
-      ]),
-      Spacer(),
-      label(ready ? `已认证 · ${formatTime(status.capturedAt)}` : "待认证", 10, statusColor)
-    ]);
-    surface(providerRow, layout.sidebarInnerWidth, 44);
-    stackSetAlignment(providerRow, 12);
-    widgetAddChild(providerRows, providerRow);
+  for (let index = 0; index < ids.length; index += 2) {
+    const providerLine = HStack(8, []);
+    for (const id of ids.slice(index, index + 2)) {
+      const status = asRecord(providers[id]) as ProviderStatus;
+      const ready = status.ready === true;
+      const statusColor = ready ? colors.green : colors.yellow;
+      const providerRow = HStack(8, [
+        VStack(2, [
+          label(providerName(id), 12, colors.text),
+          label(id, 10, colors.subtle)
+        ]),
+        Spacer(),
+        label(ready ? `已认证 · ${formatTime(status.capturedAt)}` : "待认证", 10, statusColor)
+      ]);
+      surface(providerRow, layout.providerCardWidth, 44);
+      stackSetAlignment(providerRow, 12);
+      widgetAddChild(providerLine, providerRow);
+    }
+    if (ids.length - index === 1) widgetAddChild(providerLine, Spacer());
+    widgetAddChild(providerRows, providerLine);
   }
 
   if (ids.length === 0) {
     widgetAddChild(providerRows, label("暂时无法读取 Provider 状态。", 11, colors.subtle));
   }
   setText("metric-providers", String(ids.length || "—"));
+}
+
+function renderRecentMetrics(value: unknown): void {
+  widgetClearChildren(metricsRows);
+  const data = asRecord(value).data;
+  if (!Array.isArray(data) || data.length === 0) {
+    widgetAddChild(metricsRows, label("暂无请求记录", 11, colors.subtle));
+    return;
+  }
+
+  for (const item of data) {
+    const record = asRecord(item);
+    const usage = asRecord(record.usage);
+    const status = stringValue(record.status);
+    const statusColor = status === "success"
+      ? colors.green
+      : status === "canceled"
+        ? colors.yellow
+        : colors.red;
+    const statusText = status === "success"
+      ? "成功"
+      : status === "canceled"
+        ? "取消"
+        : "失败";
+    const model = stringValue(record.model) || "unknown";
+    const provider = providerName(stringValue(record.provider) || "unknown");
+    const startedAt = numberValue(record.startedAt);
+    const time = startedAt === null
+      ? "—"
+      : new Date(startedAt).toLocaleTimeString("zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit"
+      });
+    const tokens = usageNumber(usage.totalTokens, usage.total_tokens);
+    const row = HStack(8, [
+      VStack(2, [
+        label(`${provider} · ${model}`, 11, colors.text),
+        label(`${time}  ·  ${stringValue(record.protocol) || "—"}`, 9, colors.subtle)
+      ]),
+      Spacer(),
+      VStack(2, [
+        label(`${formatCount(tokens)} token`, 10, colors.cyan),
+        label(`${formatDuration(record.durationMs)}  ·  ${statusText}`, 9, statusColor)
+      ])
+    ]);
+    stackSetAlignment(row, 12);
+    surface(row, layout.contentInnerWidth, 44);
+    widgetAddChild(metricsRows, row);
+  }
+}
+
+function limitText(value: unknown, suffix = ""): string {
+  const number = numberValue(value);
+  return number === null ? "不限" : `${formatCount(number)}${suffix}`;
+}
+
+function parseNonNegativeInput(value: string, fallback: number): number | null {
+  const parsed = Number(value.trim());
+  if (!Number.isInteger(parsed) || parsed < 0) return fallback >= 0 ? fallback : null;
+  return parsed;
+}
+
+function parsePositiveInput(value: string): number | undefined {
+  const parsed = Number(value.trim());
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function parseMappings(value: string): { [key: string]: string } | undefined {
+  const raw = value.trim();
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("模型映射必须是合法 JSON 对象");
+  }
+  const record = asRecord(parsed);
+  const mappings: { [key: string]: string } = {};
+  for (const key of Object.keys(record)) {
+    const model = stringValue(record[key]);
+    if (key.trim() && model) mappings[key.trim()] = model;
+  }
+  if (Object.keys(mappings).length === 0) {
+    throw new Error("模型映射必须包含至少一个有效键值");
+  }
+  return mappings;
+}
+
+function renderChannels(): void {
+  widgetClearChildren(channelRows);
+  if (channels.length === 0) {
+    widgetAddChild(channelRows, label("暂无渠道配置", 11, colors.subtle));
+    return;
+  }
+
+  for (const channel of channels) {
+    const enabled = channel.enabled !== false;
+    const mappingCount = channel.modelMappings
+      ? Object.keys(channel.modelMappings).length
+      : 0;
+    const endpoint = channel.upstreamUrl ? "自定义上游" : "Provider 默认上游";
+    const info = VStack(2, [
+      label(`${channel.name} · ${providerName(channel.providerId)}`, 11, colors.text),
+      label(
+        `${channel.id}  ·  ${channel.authRef}  ·  P${channel.priority ?? 100} / W${channel.weight ?? 1}  ·  ${endpoint}${mappingCount > 0 ? `  ·  ${mappingCount} 个映射` : ""}`,
+        9,
+        colors.subtle
+      )
+    ]);
+    const actions = HStack(4, [
+      button(enabled ? "停用" : "启用", () => { void toggleChannel(channel); }, enabled ? colors.yellow : colors.green, 48),
+      button("删除", () => { void removeChannel(channel); }, colors.red, 48)
+    ]);
+    const row = HStack(7, [info, Spacer(), actions]);
+    stackSetAlignment(row, 12);
+    surface(row, layout.adminInnerWidth, 54);
+    widgetAddChild(channelRows, row);
+  }
+}
+
+function renderManagedKeys(): void {
+  widgetClearChildren(managedKeyRows);
+  if (managedKeys.length === 0) {
+    widgetAddChild(managedKeyRows, label("暂无虚拟 Key", 11, colors.subtle));
+    return;
+  }
+
+  for (const key of managedKeys) {
+    const status = key.enabled ? "启用" : "已撤销";
+    const statusColor = key.enabled ? colors.green : colors.red;
+    const quota = key.quotaTokens === null || key.quotaTokens === undefined
+      ? "配额不限"
+      : `剩余 ${formatCount(key.remainingTokens)} / ${formatCount(key.quotaTokens)}`;
+    const limits = `${limitText(key.rpmLimit, " RPM")}  ·  ${limitText(key.tpmLimit, " TPM")}`;
+    const info = VStack(2, [
+      label(`${key.name}  ·  ${key.prefix}…`, 11, colors.text),
+      label(`${quota}  ·  ${limits}  ·  已用 ${formatCount(key.usedTokens)} token`, 9, colors.subtle)
+    ]);
+    const action = key.enabled
+      ? button("撤销", () => { void revokeManagedKey(key); }, colors.red, 48)
+      : label(status, 10, statusColor);
+    const row = HStack(7, [info, Spacer(), action]);
+    stackSetAlignment(row, 12);
+    surface(row, layout.adminInnerWidth, 54);
+    widgetAddChild(managedKeyRows, row);
+  }
+}
+
+async function loadAdmin(): Promise<void> {
+  try {
+    const values = await Promise.all([
+      requestJson("/admin/channels", "GET", "", adminKey),
+      requestJson("/admin/keys", "GET", "", adminKey)
+    ]);
+    channels = channelsFrom(values[0]);
+    managedKeys = managedKeysFrom(values[1]);
+    renderChannels();
+    renderManagedKeys();
+    setText("admin-status", "管理已连接");
+    color(adminStatus, colors.green);
+  } catch (error) {
+    setText("admin-status", adminKey ? "管理员 Key 无效" : "只读模式");
+    color(adminStatus, colors.yellow);
+    if (!adminKey) {
+      channels = [];
+      managedKeys = [];
+      renderChannels();
+      renderManagedKeys();
+    }
+  }
+}
+
+async function saveChannel(): Promise<void> {
+  const id = channelIdValue.trim();
+  const providerId = channelProviderValue.trim();
+  const authRef = channelAuthRefValue.trim();
+  if (!id || !providerId || !authRef) {
+    showToast("渠道 ID、Provider ID、认证引用不能为空");
+    return;
+  }
+
+  let modelMappings: { [key: string]: string } | undefined;
+  try {
+    modelMappings = parseMappings(channelMappingsValue);
+  } catch (error) {
+    showToast(errorMessage(error));
+    return;
+  }
+
+  const priority = parseNonNegativeInput(channelPriorityValue, 100);
+  const weight = parsePositiveInput(channelWeightValue) ?? 1;
+  const body: { [key: string]: unknown } = {
+    id,
+    name: channelNameValue.trim() || id,
+    providerId,
+    authRef,
+    enabled: true,
+    priority,
+    weight
+  };
+  if (channelUrlValue.trim()) body.upstreamUrl = channelUrlValue.trim();
+  if (modelMappings) body.modelMappings = modelMappings;
+
+  try {
+    await requestJson("/admin/channels", "POST", JSON.stringify(body), adminKey);
+    showToast("渠道已保存，模型目录将自动刷新");
+    await loadDashboard();
+  } catch (error) {
+    showToast(`保存渠道失败：${errorMessage(error)}`);
+  }
+}
+
+async function toggleChannel(channel: GatewayChannel): Promise<void> {
+  const body = {
+    ...channel,
+    enabled: channel.enabled === false
+  };
+  try {
+    await requestJson("/admin/channels", "POST", JSON.stringify(body), adminKey);
+    showToast(body.enabled ? "渠道已启用" : "渠道已停用");
+    await loadDashboard();
+  } catch (error) {
+    showToast(`更新渠道失败：${errorMessage(error)}`);
+  }
+}
+
+async function removeChannel(channel: GatewayChannel): Promise<void> {
+  try {
+    await requestJson(`/admin/channels/${encodeURIComponent(channel.id)}`, "DELETE", "", adminKey);
+    showToast(`已删除渠道：${channel.name}`);
+    await loadDashboard();
+  } catch (error) {
+    showToast(`删除渠道失败：${errorMessage(error)}`);
+  }
+}
+
+async function createManagedKey(): Promise<void> {
+  const name = keyNameValue.trim();
+  if (!name) {
+    showToast("请填写 Key 名称");
+    return;
+  }
+  const allowedModels = keyModelsValue.split(",").map((item) => item.trim()).filter(Boolean);
+  const body: { [key: string]: unknown } = { name, allowedModels };
+  const rpmLimit = parsePositiveInput(keyRpmValue);
+  const tpmLimit = parsePositiveInput(keyTpmValue);
+  const quotaTokens = parsePositiveInput(keyQuotaValue);
+  if (rpmLimit !== undefined) body.rpmLimit = rpmLimit;
+  if (tpmLimit !== undefined) body.tpmLimit = tpmLimit;
+  if (quotaTokens !== undefined) body.quotaTokens = quotaTokens;
+
+  try {
+    const response = asRecord(await requestJson(
+      "/admin/keys",
+      "POST",
+      JSON.stringify(body),
+      adminKey
+    ));
+    const secret = stringValue(response.secret);
+    if (!secret) throw new Error("网关未返回新 Key");
+    setText("new-key-secret", secret);
+    showToast("虚拟 Key 已创建，请立即复制保存");
+    await loadAdmin();
+  } catch (error) {
+    showToast(`创建 Key 失败：${errorMessage(error)}`);
+  }
+}
+
+async function revokeManagedKey(key: ManagedApiKey): Promise<void> {
+  try {
+    await requestJson(`/admin/keys/${encodeURIComponent(key.id)}`, "DELETE", "", adminKey);
+    showToast(`已撤销 Key：${key.name}`);
+    await loadAdmin();
+  } catch (error) {
+    showToast(`撤销 Key 失败：${errorMessage(error)}`);
+  }
+}
+
+function renderMetrics(summaryValue: unknown, requestsValue: unknown): void {
+  const summary = asRecord(summaryValue);
+  const tokens = asRecord(summary.tokens);
+  const latency = asRecord(summary.latency);
+  const usageRequests = numberValue(tokens.requestsWithUsage) ?? 0;
+  setText("metric-requests", formatCount(summary.requests));
+  setText("metric-success", formatPercent(summary.successRate));
+  setText(
+    "metric-tokens",
+    usageRequests > 0 ? formatCount(tokens.totalTokens) : "—"
+  );
+  setText("metric-p95", formatDuration(latency.p95Ms));
+  setText("stats-requests", formatCount(summary.requests));
+  setText("stats-success", formatPercent(summary.successRate));
+  setText(
+    "stats-tokens",
+    usageRequests > 0 ? formatCount(tokens.totalTokens) : "—"
+  );
+  setText("stats-latency", formatDuration(latency.averageMs));
+  setText(
+    "stats-coverage",
+    summary.requests === undefined
+      ? "—"
+      : `${formatCount(usageRequests)} / ${formatCount(summary.requests)} 有 usage`
+  );
+  const byModel = Array.isArray(summary.byModel) ? summary.byModel : [];
+  const breakdown = byModel.slice(0, 3).map((item) => {
+    const group = asRecord(item);
+    return `${stringValue(group.key) || "unknown"} ${formatCount(group.requests)} 次`;
+  });
+  setText(
+    "stats-breakdown",
+    breakdown.length > 0 ? breakdown.join("  ·  ") : "暂无模型分布"
+  );
+  const byChannel = Array.isArray(summary.byChannel) ? summary.byChannel : [];
+  setText(
+    "stats-channel-breakdown",
+    byChannel.length > 0
+      ? byChannel.slice(0, 3).map((item) => {
+        const group = asRecord(item);
+        return `${stringValue(group.key) || "unknown"} ${formatCount(group.requests)} 次`;
+      }).join("  ·  ")
+      : "暂无渠道分布"
+  );
+  const byApiKey = Array.isArray(summary.byApiKey) ? summary.byApiKey : [];
+  setText(
+    "stats-key-breakdown",
+    byApiKey.length > 0
+      ? byApiKey.slice(0, 3).map((item) => {
+        const group = asRecord(item);
+        return `${stringValue(group.key) || "anonymous"} ${formatCount(group.requests)} 次`;
+      }).join("  ·  ")
+      : "暂无客户端分布"
+  );
+  setText("metrics-status", "24h");
+  color(metricsStatus, colors.cyan);
+  renderRecentMetrics(requestsValue);
+}
+
+function renderMetricsError(error: unknown): void {
+  setText("metric-requests", "—");
+  setText("metric-success", "—");
+  setText("metric-tokens", "—");
+  setText("metric-p95", "—");
+  setText("stats-requests", "—");
+  setText("stats-success", "—");
+  setText("stats-tokens", "—");
+  setText("stats-latency", "—");
+  setText("stats-coverage", errorMessage(error));
+  setText("stats-breakdown", "暂无模型分布");
+  setText("stats-channel-breakdown", "暂无渠道分布");
+  setText("stats-key-breakdown", "暂无客户端分布");
+  setText("metrics-status", "不可用");
+  color(metricsStatus, colors.red);
+  widgetClearChildren(metricsRows);
+  widgetAddChild(metricsRows, label(`无法读取统计：${errorMessage(error)}`, 11, colors.red));
 }
 
 async function loadDashboard(retry = 0): Promise<void> {
@@ -600,6 +1207,33 @@ async function loadDashboard(retry = 0): Promise<void> {
   selectedModelIndex = Math.min(selectedModelIndex, Math.max(0, models.length - 1));
   setText("metric-models", String(models.length || "—"));
   renderModels();
+
+  await loadMetrics();
+  await loadAdmin();
+  scheduleMetricsRefresh();
+}
+
+async function loadMetrics(): Promise<void> {
+  try {
+  const values = await Promise.all([
+      requestJson("/metrics/summary?window=24h"),
+      requestJson("/metrics/requests?window=24h&limit=3")
+    ]);
+    renderMetrics(values[0], values[1]);
+  } catch (error) {
+    renderMetricsError(error);
+  }
+}
+
+function scheduleMetricsRefresh(): void {
+  if (metricsRefreshTimerPending) return;
+  metricsRefreshTimerPending = true;
+  appSetTimer(10000, () => {
+    metricsRefreshTimerPending = false;
+    void loadMetrics();
+    void loadAdmin();
+    scheduleMetricsRefresh();
+  });
 }
 
 function contentText(value: unknown): string {
@@ -623,6 +1257,7 @@ async function sendChat(): Promise<void> {
   setText("response-error", "");
   setText("response-reasoning", "");
   setText("response-answer", "");
+  responseUsage(null);
   try {
     const body: { [key: string]: unknown } = {
       model: model.id,
@@ -643,6 +1278,7 @@ async function sendChat(): Promise<void> {
       "POST",
       JSON.stringify(body)
     ));
+    responseUsage(payload.usage);
     const choices = Array.isArray(payload.choices) ? payload.choices : [];
     const first = asRecord(choices[0]);
     const message = asRecord(first.message);
@@ -656,13 +1292,63 @@ async function sendChat(): Promise<void> {
     setText("response-reasoning", "");
     setText("response-error", errorMessage(error));
     setResponseState("失败", colors.red);
+  } finally {
+    void Promise.all([loadMetrics(), loadAdmin()]);
   }
 }
 
 function saveKey(): void {
   setText("key-state", gatewayKey ? "当前运行时已保存" : "未设置 API Key");
-  showToast(gatewayKey ? "API Key 已保存" : "API Key 已清除");
+  setText("admin-key-state", adminKey ? "已设置" : "未设置");
+  showToast(gatewayKey || adminKey ? "访问配置已保存" : "访问配置已清除");
   void loadDashboard();
+}
+
+function renderNavigation(): void {
+  widgetClearChildren(navRows);
+  for (const page of pageOrder) {
+    const meta = pageMeta[page];
+    const active = page === activePage;
+    const width = page === "management" ? 112 : page === "playground" ? 104 : 68;
+    const tab = button(meta.label, () => queuePage(page), active ? colors.background : colors.muted, width);
+    fill(tab, active ? colors.accent : colors.panelMuted);
+    setCornerRadius(tab, 8);
+    buttonSetTextColor(
+      tab,
+      active ? colors.background.r : colors.text.r,
+      active ? colors.background.g : colors.text.g,
+      active ? colors.background.b : colors.text.b,
+      1
+    );
+    widgetSetHeight(tab, 32);
+    widgetAddChild(navRows, tab);
+  }
+}
+
+function renderPage(): void {
+  const meta = pageMeta[activePage];
+  setText("page-title", meta.title);
+  setText("page-subtitle", meta.subtitle);
+  setText("page-route", meta.route);
+  widgetClearChildren(pageHost);
+  const view = pageViews[activePage];
+  if (view) widgetAddChild(pageHost, view);
+}
+
+function queuePage(page: DashboardPage): void {
+  if (page === activePage && pendingPage === null) return;
+  pendingPage = page;
+  if (navigationTimerPending) return;
+  navigationTimerPending = true;
+  appSetTimer(1, () => {
+    navigationTimerPending = false;
+    const nextPage = pendingPage;
+    pendingPage = null;
+    if (!nextPage || nextPage === activePage) return;
+    activePage = nextPage;
+    renderNavigation();
+    renderPage();
+  });
 }
 
 function buildUi(): Widget {
@@ -683,51 +1369,73 @@ function buildUi(): Widget {
   widgetSetWidth(header, layout.windowWidth);
   widgetSetHeight(header, 64);
 
-  const intro = HStack(16, [
-    VStack(3, [
-      label("CONTROL PLANE", 9, colors.cyan),
-      label("一处连接，统一调用。", 23, colors.text),
-      label("管理认证、模型目录，并通过一个 OpenAI 兼容入口连接多个 Provider。", 11, colors.muted)
-    ]),
-    Spacer(),
-    VStack(3, [
-      label("SERVICE", 9, colors.subtle),
-      label("OpenAI compatible", 11, colors.accent),
-      label("MiMo · WorkBuddy · more", 10, colors.muted)
-    ])
-  ]);
-  stackSetAlignment(intro, 12);
-  card(intro, layout.contentWidth);
-  stackSetAlignment(intro, 12);
-  widgetSetHeight(intro, 84);
-
   overviewStatus = dynamicLabel("● 检测中", "overview-status", 12, colors.muted, 120);
-  const overview = VStack(9, [
+  const summaryMetrics = HStack(9, [
+    compactMetric("Provider", "metric-providers", colors.text),
+    compactMetric("已认证", "metric-auth", colors.green),
+    compactMetric("模型", "metric-models", colors.accent),
+    compactMetric("24h 请求", "metric-requests", colors.text),
+    compactMetric("成功率", "metric-success", colors.green),
+    compactMetric("Token", "metric-tokens", colors.cyan),
+    compactMetric("P95 延迟", "metric-p95", colors.yellow)
+  ]);
+  stackSetAlignment(summaryMetrics, 12);
+  const summary = VStack(9, [
     HStack(8, [
       VStack(2, [
-        label("服务状态", 14, colors.text),
-        label("网关与上游连接", 10, colors.subtle)
+        label("GATEWAY", 9, colors.cyan),
+        label("统一模型入口", 16, colors.text),
+        label(gatewayUrl + "/v1", 9, colors.subtle)
       ]),
       Spacer(),
       overviewStatus
     ]),
     Divider(),
-    metric("Provider", "metric-providers", "已注册上游"),
-    metric("已认证", "metric-auth", "可直接调用"),
-    metric("模型", "metric-models", "自动发现目录")
+    summaryMetrics
   ]);
-  stackSetAlignment(overview, 5);
-  card(overview, layout.sidebarWidth);
-  widgetSetHeight(overview, 154);
+  stackSetAlignment(summary, 5);
+  card(summary, layout.contentWidth);
+  widgetSetHeight(summary, 126);
 
   providerRows = VStack(8, []);
   stackSetAlignment(providerRows, 5);
-  widgetSetWidth(providerRows, layout.sidebarInnerWidth);
+  widgetSetWidth(providerRows, layout.contentInnerWidth);
+
+  const key = SecureField("PROXY_API_KEY（可选）", (value) => {
+    gatewayKey = value.trim();
+  });
+  styleInput(key, 440);
+  if (gatewayKey) textfieldSetString(key, gatewayKey);
+  const adminInput = SecureField("PROXY_ADMIN_KEY（可选）", (value) => {
+    adminKey = value.trim();
+  });
+  styleInput(adminInput, 440);
+  if (adminKey) textfieldSetString(adminInput, adminKey);
+  const access = HStack(10, [
+    VStack(3, [
+      HStack(6, [
+        label("调用 Key", 9, colors.muted),
+        dynamicLabel(gatewayKey ? "已设置" : "未设置", "key-state", 9, colors.subtle, 70)
+      ]),
+      key
+    ]),
+    VStack(3, [
+      HStack(6, [
+        label("管理员 Key", 9, colors.muted),
+        dynamicLabel(adminKey ? "已设置" : "未设置", "admin-key-state", 9, colors.subtle, 70)
+      ]),
+      adminInput
+    ]),
+    Spacer(),
+    button("保存设置", saveKey, colors.cyan, 76)
+  ]);
+  stackSetAlignment(access, 12);
+
   const providerPanel = VStack(9, [
     HStack(8, [
       VStack(2, [
-        label("Providers", 14, colors.text),
-        label("认证状态", 10, colors.subtle)
+        label("Provider 状态", 15, colors.text),
+        label("已配置的上游认证", 10, colors.subtle)
       ]),
       Spacer(),
       label("/health/auth", 9, colors.subtle)
@@ -736,43 +1444,30 @@ function buildUi(): Widget {
     providerRows
   ]);
   stackSetAlignment(providerPanel, 5);
-  card(providerPanel, layout.sidebarWidth);
-  widgetSetHeight(providerPanel, 166);
+  card(providerPanel, layout.contentWidth);
+  widgetSetHeight(providerPanel, 168);
 
-  const key = SecureField("PROXY_API_KEY（可选）", (value) => {
-    gatewayKey = value.trim();
-  });
-  styleInput(key, layout.sidebarInnerWidth);
-  const keyPanel = VStack(8, [
+  const accessPanel = VStack(8, [
     HStack(8, [
       VStack(2, [
-        label("访问密钥", 14, colors.text),
-        label("保护本地网关", 10, colors.subtle)
+        label("访问凭据", 15, colors.text),
+        label("普通调用与管理接口使用不同权限", 10, colors.subtle)
       ]),
       Spacer(),
-      dynamicLabel(gatewayKey ? "已设置" : "未设置", "key-state", 10, colors.subtle, 70)
+      label("LOCAL CONFIG", 9, colors.subtle)
     ]),
-    key,
-    HStack(8, [
-      label("仅影响 Gateway API", 9, colors.subtle),
-      Spacer(),
-      button("保存", saveKey, colors.cyan, 58)
-    ])
+    access
   ]);
-  stackSetAlignment(keyPanel, 5);
-  card(keyPanel, layout.sidebarWidth);
-  widgetSetHeight(keyPanel, 148);
-
-  const sidebar = VStack(12, [overview, providerPanel, keyPanel]);
-  stackSetAlignment(sidebar, 5);
-  widgetSetWidth(sidebar, layout.sidebarWidth);
+  stackSetAlignment(accessPanel, 5);
+  card(accessPanel, layout.contentWidth);
+  widgetSetHeight(accessPanel, 118);
 
   modelRows = VStack(7, []);
   stackSetAlignment(modelRows, 5);
   widgetSetWidth(modelRows, layout.modelInnerWidth);
   const modelScroll = ScrollView();
   scrollviewSetChild(modelScroll, modelRows);
-  widgetSetHeight(modelScroll, 354);
+  widgetSetHeight(modelScroll, 338);
   widgetSetWidth(modelScroll, layout.modelInnerWidth);
   const search = TextField("搜索模型名称或 ID", (value) => {
     modelSearch = value.trim();
@@ -783,7 +1478,7 @@ function buildUi(): Widget {
     HStack(8, [
       VStack(2, [
         label("模型目录", 15, colors.text),
-        label("来自已认证 Provider", 10, colors.subtle)
+        label("点击模型加入请求", 10, colors.subtle)
       ]),
       Spacer(),
       dynamicLabel("—", "model-count", 12, colors.cyan, 48)
@@ -798,11 +1493,11 @@ function buildUi(): Widget {
 
   modelPickerHost = VStack(0, []);
   stackSetAlignment(modelPickerHost, 5);
-  widgetSetWidth(modelPickerHost, layout.testInnerWidth);
+  widgetSetWidth(modelPickerHost, layout.modelPickerWidth);
 
   reasoningPickerHost = VStack(0, []);
   stackSetAlignment(reasoningPickerHost, 5);
-  widgetSetWidth(reasoningPickerHost, layout.testInnerWidth);
+  widgetSetWidth(reasoningPickerHost, layout.reasoningPickerWidth);
 
   const prompt = TextField("输入一条消息，验证当前网关链路…", (value) => {
     promptValue = value;
@@ -812,89 +1507,360 @@ function buildUi(): Widget {
 
   responseStatus = dynamicLabel("准备就绪", "response-status", 11, colors.subtle, 76);
   const selectedModel = dynamicLabel("选择一个模型", "selected-model", 10, colors.accent, 190);
+  const modelControl = VStack(4, [
+    label("目标模型", 9, colors.muted),
+    modelPickerHost
+  ]);
+  const reasoningControl = VStack(4, [
+    HStack(6, [
+      label("Reasoning effort", 9, colors.muted),
+      Spacer(),
+      dynamicLabel("默认", "selected-effort", 9, colors.yellow, 60)
+    ]),
+    reasoningPickerHost
+  ]);
+  const controls = HStack(10, [modelControl, reasoningControl]);
+  stackSetAlignment(controls, 5);
   const reasoning = surface(
     VStack(4, [
       label("THINKING", 9, colors.yellow),
-      dynamicLabel("暂无思考内容", "response-reasoning", 10, colors.yellow, layout.testInnerWidth - 22)
+      dynamicLabel("暂无思考内容", "response-reasoning", 10, colors.yellow, 324)
     ]),
-    layout.testInnerWidth,
-    64
+    346,
+    132
   );
   const answer = surface(
     VStack(4, [
       label("ANSWER", 9, colors.cyan),
-      dynamicLabel("选择模型并发送消息，响应会显示在这里。", "response-answer", 12, colors.text, layout.testInnerWidth - 22)
+      dynamicLabel("选择模型并发送消息，响应会显示在这里。", "response-answer", 12, colors.text, 324)
+    ]),
+    346,
+    132
+  );
+  const usagePanel = surface(
+    VStack(5, [
+      HStack(8, [
+        label("TOKEN USAGE", 9, colors.cyan),
+        Spacer(),
+        dynamicLabel("本次响应未提供 usage", "response-usage-note", 9, colors.subtle, 180)
+      ]),
+      HStack(8, [
+        compactMetric("输入", "response-input-tokens", colors.text),
+        compactMetric("输出", "response-output-tokens", colors.text),
+        compactMetric("思考", "response-reasoning-tokens", colors.yellow),
+        compactMetric("总计", "response-total-tokens", colors.cyan)
+      ])
     ]),
     layout.testInnerWidth,
-    144
+    76
   );
   const testPanel = VStack(10, [
     HStack(8, [
       VStack(2, [
-        label("快速测试", 15, colors.text),
-        label("发送一条真实的兼容请求", 10, colors.subtle)
+        label("请求 Playground", 15, colors.text),
+        label("用真实请求验证模型与响应", 10, colors.subtle)
       ]),
       Spacer(),
       VStack(2, [selectedModel, responseStatus])
     ]),
-    label("目标模型", 10, colors.muted),
-    modelPickerHost,
-    HStack(8, [
-      label("Reasoning effort", 10, colors.muted),
-      Spacer(),
-      dynamicLabel("默认", "selected-effort", 10, colors.yellow, 60)
-    ]),
-    reasoningPickerHost,
-    label("Prompt", 10, colors.muted),
+    controls,
+    label("MESSAGE", 9, colors.cyan),
     prompt,
     HStack(10, [
       primaryButton("发送请求", () => { void sendChat(); }, 112),
       label("stream: false", 9, colors.subtle)
     ]),
-    reasoning,
-    answer,
+    HStack(10, [reasoning, answer]),
+    usagePanel,
     dynamicLabel("", "response-error", 10, colors.red, layout.testInnerWidth)
   ]);
   stackSetAlignment(testPanel, 5);
   card(testPanel, layout.testWidth);
-  widgetSetHeight(testPanel, layout.panelHeight);
+  widgetSetHeight(testPanel, 500);
 
-  const workspaceHeading = HStack(10, [
-    VStack(2, [
-      label("工作台", 15, colors.text),
-      label("选择模型并验证请求链路", 10, colors.subtle)
+  metricsRows = VStack(6, []);
+  stackSetAlignment(metricsRows, 5);
+  widgetSetWidth(metricsRows, layout.contentInnerWidth);
+  const metricsScroll = ScrollView();
+  scrollviewSetChild(metricsScroll, metricsRows);
+  widgetSetWidth(metricsScroll, layout.contentInnerWidth);
+  widgetSetHeight(metricsScroll, 116);
+  metricsStatus = dynamicLabel("—", "metrics-status", 10, colors.subtle, 72);
+  const breakdown = surface(
+    VStack(3, [
+      HStack(7, [
+        label("模型", 9, colors.muted),
+        dynamicLabel("暂无模型分布", "stats-breakdown", 9, colors.subtle, layout.contentInnerWidth - 40)
+      ]),
+      HStack(7, [
+        label("渠道", 9, colors.muted),
+        dynamicLabel("暂无渠道分布", "stats-channel-breakdown", 9, colors.subtle, layout.contentInnerWidth - 40)
+      ]),
+      HStack(7, [
+        label("客户端", 9, colors.muted),
+        dynamicLabel("暂无客户端分布", "stats-key-breakdown", 9, colors.subtle, layout.contentInnerWidth - 40)
+      ])
     ]),
+    layout.contentInnerWidth,
+    72
+  );
+  const statsPanel = VStack(9, [
+    HStack(8, [
+      VStack(2, [
+        label("流量概览", 15, colors.text),
+        label("最近 24 小时 · 不保存请求内容", 10, colors.subtle)
+      ]),
+      Spacer(),
+      metricsStatus
+    ]),
+    HStack(8, [
+      compactMetric("请求", "stats-requests", colors.text),
+      compactMetric("成功率", "stats-success", colors.green),
+      compactMetric("Token", "stats-tokens", colors.cyan),
+      compactMetric("平均延迟", "stats-latency", colors.yellow),
+      Spacer()
+    ]),
+    dynamicLabel("—", "stats-coverage", 9, colors.subtle, layout.contentInnerWidth),
+    breakdown,
+    HStack(8, [
+      label("最近请求", 9, colors.muted),
+      Spacer(),
+      label("仅保留元数据", 9, colors.subtle)
+    ]),
+    metricsScroll
+  ]);
+  stackSetAlignment(statsPanel, 5);
+  card(statsPanel, layout.contentWidth);
+  widgetSetHeight(statsPanel, 350);
+
+  const adminPanelWidth = layout.adminPanelWidth;
+  const adminInnerWidth = layout.adminInnerWidth;
+  channelRows = VStack(6, []);
+  stackSetAlignment(channelRows, 5);
+  widgetSetWidth(channelRows, adminInnerWidth);
+  const channelScroll = ScrollView();
+  scrollviewSetChild(channelScroll, channelRows);
+  widgetSetWidth(channelScroll, adminInnerWidth);
+  widgetSetHeight(channelScroll, 156);
+
+  const channelId = TextField("渠道 ID，例如 mimo-secondary", (value) => {
+    channelIdValue = value;
+  });
+  styleInput(channelId, 220);
+  const channelProvider = TextField("Provider ID", (value) => {
+    channelProviderValue = value;
+  });
+  styleInput(channelProvider, 110);
+  textfieldSetString(channelProvider, channelProviderValue);
+  const channelAuth = TextField("认证引用", (value) => {
+    channelAuthRefValue = value;
+  });
+  styleInput(channelAuth, 140);
+  textfieldSetString(channelAuth, channelAuthRefValue);
+  const channelName = TextField("显示名称（可选）", (value) => {
+    channelNameValue = value;
+  });
+  styleInput(channelName, 210);
+  const channelUrl = TextField("自定义上游 URL（可选）", (value) => {
+    channelUrlValue = value;
+  });
+  styleInput(channelUrl, 272);
+  const channelPriority = TextField("优先级", (value) => {
+    channelPriorityValue = value;
+  });
+  styleInput(channelPriority, 70);
+  textfieldSetString(channelPriority, channelPriorityValue);
+  const channelWeight = TextField("权重", (value) => {
+    channelWeightValue = value;
+  });
+  styleInput(channelWeight, 60);
+  textfieldSetString(channelWeight, channelWeightValue);
+  const channelMappings = TextField('模型映射 JSON，例如 {"别名":"真实 ID"}', (value) => {
+    channelMappingsValue = value;
+  });
+  styleInput(channelMappings, 346);
+  const channelAdminPanel = VStack(7, [
+    HStack(7, [
+      VStack(2, [
+        label("渠道路由", 14, colors.text),
+        label("Provider、认证与故障转移", 9, colors.subtle)
+      ]),
+      Spacer(),
+      label("CHANNELS", 9, colors.cyan)
+    ]),
+    Divider(),
+    HStack(6, [channelId, channelProvider, channelAuth]),
+    HStack(6, [channelName, channelUrl]),
+    HStack(6, [channelPriority, channelWeight, channelMappings]),
+    HStack(7, [
+      primaryButton("保存渠道", () => { void saveChannel(); }, 92),
+      label("同 ID 保存即更新", 9, colors.subtle)
+    ]),
+    label("已配置渠道", 9, colors.muted),
+    channelScroll
+  ]);
+  stackSetAlignment(channelAdminPanel, 5);
+  card(channelAdminPanel, adminPanelWidth);
+  widgetSetHeight(channelAdminPanel, 456);
+
+  managedKeyRows = VStack(6, []);
+  stackSetAlignment(managedKeyRows, 5);
+  widgetSetWidth(managedKeyRows, adminInnerWidth);
+  const managedKeyScroll = ScrollView();
+  scrollviewSetChild(managedKeyScroll, managedKeyRows);
+  widgetSetWidth(managedKeyScroll, adminInnerWidth);
+  widgetSetHeight(managedKeyScroll, 156);
+
+  const keyName = TextField("Key 名称，例如 cline-local", (value) => {
+    keyNameValue = value;
+  });
+  styleInput(keyName, 210);
+  const keyModels = TextField("允许模型（逗号分隔，留空=全部）", (value) => {
+    keyModelsValue = value;
+  });
+  styleInput(keyModels, 272);
+  const keyRpm = TextField("RPM", (value) => {
+    keyRpmValue = value;
+  });
+  styleInput(keyRpm, 58);
+  const keyTpm = TextField("TPM", (value) => {
+    keyTpmValue = value;
+  });
+  styleInput(keyTpm, 58);
+  const keyQuota = TextField("Token 配额", (value) => {
+    keyQuotaValue = value;
+  });
+  styleInput(keyQuota, 90);
+  const newKeySecret = surface(
+    VStack(3, [
+      label("新 Key（只显示一次）", 9, colors.yellow),
+      dynamicLabel("创建后在这里复制保存", "new-key-secret", 10, colors.text, adminInnerWidth - 22)
+    ]),
+    adminInnerWidth,
+    64
+  );
+  const keyAdminPanel = VStack(7, [
+    HStack(7, [
+      VStack(2, [
+        label("虚拟 API Key", 14, colors.text),
+        label("按客户端分配权限与额度", 9, colors.subtle)
+      ]),
+      Spacer(),
+      label("ACCESS", 9, colors.accent)
+    ]),
+    Divider(),
+    HStack(6, [keyName, keyModels]),
+    HStack(6, [keyRpm, keyTpm, keyQuota, Spacer(), primaryButton("创建 Key", () => { void createManagedKey(); }, 106)]),
+    newKeySecret,
+    label("已创建 Key", 9, colors.muted),
+    managedKeyScroll
+  ]);
+  stackSetAlignment(keyAdminPanel, 5);
+  card(keyAdminPanel, adminPanelWidth);
+  widgetSetHeight(keyAdminPanel, 456);
+
+  adminStatus = dynamicLabel("只读模式", "admin-status", 10, colors.subtle, 100);
+  const managementPanel = VStack(10, [
+    HStack(8, [
+      VStack(2, [
+        label("管理中心", 15, colors.text),
+        label("渠道路由与客户端 Key · 仅管理员可写", 10, colors.subtle)
+      ]),
+      Spacer(),
+      adminStatus
+    ]),
+    HStack(12, [channelAdminPanel, keyAdminPanel])
+  ]);
+  stackSetAlignment(managementPanel, 5);
+  card(managementPanel, layout.contentWidth);
+  widgetSetHeight(managementPanel, 540);
+
+  const playground = HStack(16, [modelPanel, testPanel]);
+  stackSetAlignment(playground, 3);
+  widgetSetWidth(playground, layout.contentWidth);
+
+  const overviewHint = surface(
+    HStack(10, [
+      VStack(2, [
+        label("快速开始", 12, colors.text),
+        label("进入 Playground 选择模型并发送一条测试请求", 10, colors.subtle)
+      ]),
+      Spacer(),
+      button("打开 Playground", () => queuePage("playground"), colors.cyan, 108)
+    ]),
+    layout.contentInnerWidth,
+    60
+  );
+  stackSetAlignment(overviewHint, 12);
+
+  const settingsInfo = VStack(5, [
+    label("认证与运行", 13, colors.text),
+    label("首次认证通过 npm run auth 独立完成，认证缓存与网关运行时分离。", 10, colors.subtle),
+    label("desktop 模式会托管 Gateway 子进程；serve 模式只运行 HTTP 服务。", 10, colors.subtle),
+    label("管理接口未配置 PROXY_ADMIN_KEY 时，仅建议在 127.0.0.1 本机使用。", 10, colors.yellow)
+  ]);
+  card(settingsInfo, layout.contentWidth);
+  widgetSetHeight(settingsInfo, 116);
+
+  const overviewPage = VStack(14, [summary, providerPanel, overviewHint]);
+  const playgroundPage = VStack(14, [playground]);
+  const metricsPage = VStack(14, [statsPanel]);
+  const managementPage = VStack(14, [managementPanel]);
+  const settingsPage = VStack(14, [accessPanel, settingsInfo]);
+  pageViews = {
+    overview: overviewPage,
+    playground: playgroundPage,
+    metrics: metricsPage,
+    management: managementPage,
+    settings: settingsPage
+  };
+  for (const page of Object.keys(pageViews)) {
+    widgetSetWidth(pageViews[page], layout.contentWidth);
+    stackSetAlignment(pageViews[page], 5);
+  }
+
+  pageTitle = dynamicLabel("网关概览", "page-title", 18, colors.text, 620);
+  pageSubtitle = dynamicLabel("查看服务状态、Provider 认证和模型目录", "page-subtitle", 10, colors.subtle, 620);
+  pageRoute = dynamicLabel("GET /health", "page-route", 9, colors.subtle, 220);
+  const pageHeader = HStack(10, [
+    VStack(2, [pageTitle, pageSubtitle]),
     Spacer(),
-    label("POST /v1/chat/completions", 9, colors.subtle)
+    pageRoute
   ]);
-  stackSetAlignment(workspaceHeading, 12);
+  stackSetAlignment(pageHeader, 12);
+  card(pageHeader, layout.contentWidth);
+  widgetSetHeight(pageHeader, 68);
 
-  const workspace = VStack(12, [
-    workspaceHeading,
-    HStack(16, [modelPanel, testPanel])
+  navRows = HStack(6, []);
+  stackSetAlignment(navRows, 12);
+  widgetSetWidth(navRows, 444);
+  renderNavigation();
+  const navigation = HStack(12, [
+    navRows,
+    Spacer(),
+    label("PERRY NATIVE UI", 9, colors.subtle)
   ]);
-  stackSetAlignment(workspace, 5);
-  widgetSetWidth(workspace, layout.workspaceWidth);
+  stackSetAlignment(navigation, 12);
+  setPadding(navigation, 8, 22, 8, 22);
+  fill(navigation, colors.panel);
+  widgetSetWidth(navigation, layout.windowWidth);
+  widgetSetHeight(navigation, 50);
 
-  const main = HStack(16, [sidebar, workspace]);
-  stackSetAlignment(main, 3);
-  widgetSetWidth(main, layout.contentWidth);
-
-  const content = VStack(16, [
-    intro,
-    main,
-    label("认证独立于网关运行 · 模型目录来自 /v1/models · 重新认证请运行 npm run auth", 10, colors.subtle)
-  ]);
-  stackSetAlignment(content, 5);
-  setPadding(content, 18, 22, 24, 22);
-  widgetSetWidth(content, layout.contentWidth);
+  pageHost = VStack(0, []);
+  stackSetAlignment(pageHost, 5);
+  widgetSetWidth(pageHost, layout.contentWidth);
+  renderPage();
+  const pageContent = VStack(12, [pageHeader, pageHost]);
+  stackSetAlignment(pageContent, 5);
+  setPadding(pageContent, 18, 22, 24, 22);
+  widgetSetWidth(pageContent, layout.contentWidth);
 
   const scroll = ScrollView();
-  scrollviewSetChild(scroll, content);
+  scrollviewSetChild(scroll, pageContent);
   widgetSetWidth(scroll, layout.windowWidth);
-  widgetSetHeight(scroll, layout.windowHeight - 64);
+  widgetSetHeight(scroll, layout.windowHeight - 114);
 
-  const root = VStack(0, [header, scroll]);
+  const root = VStack(0, [header, navigation, scroll]);
   stackSetAlignment(root, 5);
   fill(root, colors.background);
   widgetSetWidth(root, layout.windowWidth);

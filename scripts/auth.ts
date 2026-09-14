@@ -9,6 +9,7 @@ import {
   getAuthStore,
   type AuthHeaders
 } from "../src/auth-store.js";
+import { getChannelStore } from "../src/channels.js";
 import { loadConfig } from "../src/config.js";
 import { getProvider, getProviders, type ProviderAdapter } from "../src/provider.js";
 
@@ -46,6 +47,7 @@ interface BootstrapConfig {
 
 interface AuthOptions {
   providerIds: string[];
+  channelId: string;
   force: boolean;
   noClient: boolean;
 }
@@ -107,6 +109,7 @@ function bootstrapConfig(): BootstrapConfig {
 
 function parseOptions(args: string[]): AuthOptions {
   const providerIds: string[] = [];
+  let channelId = "";
   let force = false;
   let noClient = false;
 
@@ -120,6 +123,13 @@ function parseOptions(args: string[]): AuthOptions {
       noClient = true;
       continue;
     }
+    if (arg === "--channel") {
+      const value = args[index + 1];
+      if (!value) throw new Error("--channel 需要一个 Channel ID");
+      channelId = value.trim();
+      index += 1;
+      continue;
+    }
     if (arg === "--provider" || arg === "-p") {
       const value = args[index + 1];
       if (!value) throw new Error("--provider 需要一个 Provider ID");
@@ -128,10 +138,15 @@ function parseOptions(args: string[]): AuthOptions {
     }
   }
 
+  if (channelId && providerIds.length !== 1) {
+    throw new Error("--channel 必须和一个 --provider 一起使用");
+  }
+
   return {
     providerIds: providerIds.length > 0
       ? providerIds
       : getProviders().map((provider) => provider.id),
+    channelId,
     force,
     noClient
   };
@@ -143,12 +158,13 @@ function printHelp(): void {
     "  npm run auth                         依次认证所有已注册 Provider\n" +
     "  npm run auth -- --provider workbuddy 只认证 WorkBuddy\n" +
     "  npm run auth -- --provider mimo --force\n" +
+    "  npm run auth -- --provider mimo --channel mimo-secondary\n" +
     "  npm run auth -- --no-client           使用已手动启动的客户端\n\n" +
     "流程:\n" +
     "  1. 启动 mitmweb\n" +
     "  2. 启动对应桌面客户端并注入代理参数\n" +
     "  3. 等待成功的认证或模型请求\n" +
-    "  4. 将认证头保存到 .runtime/auth/<provider>.json\n" +
+    "  4. 将认证头保存到 .runtime/auth/<provider-or-channel>.json\n" +
     "  5. 退出桌面客户端和 mitmweb\n\n" +
     "认证完成后，网关只读取缓存，不依赖 mitmproxy 或桌面客户端。\n");
 }
@@ -488,8 +504,21 @@ async function main(): Promise<void> {
     providers.push(provider);
   }
 
+  if (options.channelId) {
+    const channel = getChannelStore(gatewayConfig).list().find((item) => (
+      item.id === options.channelId
+    ));
+    if (!channel) throw new Error("未知 Channel: " + options.channelId);
+    if (channel.providerId !== providers[0].id) {
+      throw new Error(
+        "Channel " + options.channelId + " 不属于 Provider " + providers[0].id
+      );
+    }
+  }
+
+  const authRef = options.channelId || "";
   const pendingProviders = providers.filter((provider) => (
-    options.force || !store.get(provider.id)
+    options.force || !store.get(authRef || provider.id)
   ));
   if (pendingProviders.length === 0) {
     for (const provider of providers) {
@@ -515,10 +544,10 @@ async function main(): Promise<void> {
     for (const provider of pendingProviders) {
       console.log("[" + provider.name + "] 请保持桌面客户端登录并等待模型请求...");
       const headers = await captureProvider(config, provider, options.noClient);
-      store.save(provider.id, headers);
+      store.save(authRef || provider.id, headers);
       console.log(
         "[" + provider.name + "] 认证已保存到 " +
-        gatewayConfig.authCacheDir + "/" + provider.id + ".json"
+        gatewayConfig.authCacheDir + "/" + (authRef || provider.id) + ".json"
       );
     }
   } finally {

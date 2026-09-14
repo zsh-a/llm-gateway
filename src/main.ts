@@ -1,5 +1,6 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { startDashboard } from "./dashboard.js";
+import { loadConfig } from "./config.js";
 import {
   exportDeepSeekHarness,
   printModels,
@@ -7,14 +8,15 @@ import {
 } from "./management.js";
 import { startGateway } from "./server.js";
 
-type GatewayMode = "serve" | "desktop" | "doctor" | "models" | "export";
+type GatewayMode = "serve" | "desktop" | "native" | "doctor" | "models" | "export";
 
 function printUsage(): void {
   console.log(`用法: llm-gateway <模式>
 
 模式:
   serve    仅启动 OpenAI 兼容网关（默认）
-  desktop  启动网关并打开 Perry 原生控制面板
+  desktop  启动网关并打开 Web 控制台
+  native   启动网关并打开 Perry 原生控制面板（兼容模式）
   doctor   检查配置、认证缓存和模型目录
   models   以 OpenAI /v1/models JSON 输出当前模型目录
   export   导出接入客户端所需的配置片段
@@ -22,6 +24,7 @@ function printUsage(): void {
 示例:
   llm-gateway serve
   llm-gateway desktop
+  llm-gateway native
   llm-gateway doctor
   llm-gateway models
   llm-gateway export deepseek-harness`);
@@ -30,6 +33,7 @@ function printUsage(): void {
 function resolveMode(argument: string | undefined): GatewayMode {
   if (!argument || argument === "serve") return "serve";
   if (argument === "desktop") return "desktop";
+  if (argument === "native") return "native";
   if (argument === "doctor") return "doctor";
   if (argument === "models") return "models";
   if (argument === "export") return "export";
@@ -43,8 +47,8 @@ function resolveMode(argument: string | undefined): GatewayMode {
   process.exit(2);
 }
 
-// Perry's macOS AppKit loop and node:http currently use different async pumps.
-// Keep the HTTP loop in a normal Perry process while this process owns the UI.
+// Keep the HTTP loop in a dedicated child process for both desktop launch modes.
+// Native mode still uses the Perry UI; Web mode only opens the browser console.
 function startManagedGateway(): ChildProcess {
   const child = spawn(process.execPath, ["serve"], {
     env: process.env,
@@ -65,8 +69,7 @@ function startManagedGateway(): ChildProcess {
   return child;
 }
 
-function runDesktopMode(): void {
-  const child = startManagedGateway();
+function attachGatewayLifecycle(child: ChildProcess): void {
   let shuttingDown = false;
 
   const stopGateway = (): void => {
@@ -84,8 +87,42 @@ function runDesktopMode(): void {
     stopGateway();
     process.exit(143);
   });
+}
 
-  console.log("桌面模式已启动：控制面板和 Gateway 由同一命令统一管理");
+function webUiUrl(): string {
+  const configured = process.env.GATEWAY_URL?.trim();
+  if (configured) return `${configured.replace(/\/$/, "")}/ui`;
+  const config = loadConfig();
+  const host = config.bindHost === "0.0.0.0" || config.bindHost === "::"
+    ? "127.0.0.1"
+    : config.bindHost;
+  return `http://${host}:${config.port}/ui`;
+}
+
+function openWebUi(): void {
+  const url = webUiUrl();
+  const command = process.platform === "darwin"
+    ? "open"
+    : process.platform === "win32"
+      ? "cmd"
+      : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  execFile(command, args, (error) => {
+    if (error) console.error(`无法打开 Web 控制台，请手动访问: ${url}`);
+  });
+}
+
+function runWebMode(): void {
+  const child = startManagedGateway();
+  attachGatewayLifecycle(child);
+  console.log("Web 模式已启动：控制台和 Gateway 由同一命令统一管理");
+  setTimeout(openWebUi, 500);
+}
+
+function runNativeMode(): void {
+  const child = startManagedGateway();
+  attachGatewayLifecycle(child);
+  console.log("Native 模式已启动：Perry 控制面板和 Gateway 由同一命令统一管理");
   startDashboard();
 }
 
@@ -96,7 +133,11 @@ async function runMode(): Promise<void> {
     return;
   }
   if (mode === "desktop") {
-    runDesktopMode();
+    runWebMode();
+    return;
+  }
+  if (mode === "native") {
+    runNativeMode();
     return;
   }
   if (mode === "doctor") {

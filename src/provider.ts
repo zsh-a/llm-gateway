@@ -62,8 +62,14 @@ export interface ProviderAdapter {
     request: NormalizedChatRequest,
     config: GatewayConfig,
     onChunk: (chunk: UpstreamChunk) => void,
-    externalSignal?: AbortSignal
+    externalSignal?: AbortSignal,
+    channel?: ProviderChannel
   ): Promise<void>;
+}
+
+export interface ProviderChannel {
+  id: string;
+  upstreamUrl?: string;
 }
 
 type RequestBodyBuilder = (
@@ -219,7 +225,8 @@ class OpenAICompatibleProvider implements ProviderAdapter {
     request: NormalizedChatRequest,
     config: GatewayConfig,
     onChunk: (chunk: UpstreamChunk) => void,
-    externalSignal?: AbortSignal
+    externalSignal?: AbortSignal,
+    channel?: ProviderChannel
   ): Promise<void> {
     const controller = new AbortController();
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -239,7 +246,7 @@ class OpenAICompatibleProvider implements ProviderAdapter {
     }
 
     try {
-      const response = await fetch(this.upstreamUrl, {
+      const response = await fetch(channel?.upstreamUrl ?? this.upstreamUrl, {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify(this.buildBody(request)),
