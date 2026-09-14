@@ -10,12 +10,10 @@
   "scripts": {
     "build": "npm run build:gateway && npm run build:auth",
     "build:gateway": "node scripts/prepare-dist.mjs && node scripts/build-native.mjs src/main.ts dist/llm-gateway",
-    "build:server": "npm run build:gateway",
     "build:auth": "node scripts/prepare-dist.mjs && tsc -p tsconfig.auth.json",
     "build:web": "node scripts/prepare-ui.mjs",
     "prepare:ui": "npm run build:web",
     "start": "./dist/llm-gateway serve",
-    "launch": "npm run start",
     "dev": "npm run build && npm run start",
     "desktop": "./dist/llm-gateway desktop",
     "doctor": "./dist/llm-gateway doctor",

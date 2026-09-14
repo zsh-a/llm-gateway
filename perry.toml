@@ -3,7 +3,7 @@
 
 [project]
 name = "llm-gateway"
-entry = "src/server.ts"
+entry = "src/main.ts"
 
 [build]
 out_dir = "dist"

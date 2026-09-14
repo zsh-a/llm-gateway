@@ -1,5 +1,4 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { startDashboard } from "./dashboard.js";
 import { loadConfig } from "./config.js";
 import {
   exportDeepSeekHarness,
@@ -8,7 +7,7 @@ import {
 } from "./management.js";
 import { startGateway } from "./server.js";
 
-type GatewayMode = "serve" | "desktop" | "native" | "doctor" | "models" | "export";
+type GatewayMode = "serve" | "desktop" | "doctor" | "models" | "export";
 
 function printUsage(): void {
   console.log(`用法: llm-gateway <模式>
@@ -16,7 +15,6 @@ function printUsage(): void {
 模式:
   serve    仅启动 OpenAI 兼容网关（默认）
   desktop  启动网关并打开 Web 控制台
-  native   启动网关并打开 Perry 原生控制面板（兼容模式）
   doctor   检查配置、认证缓存和模型目录
   models   以 OpenAI /v1/models JSON 输出当前模型目录
   export   导出接入客户端所需的配置片段
@@ -24,7 +22,6 @@ function printUsage(): void {
 示例:
   llm-gateway serve
   llm-gateway desktop
-  llm-gateway native
   llm-gateway doctor
   llm-gateway models
   llm-gateway export deepseek-harness`);
@@ -33,7 +30,6 @@ function printUsage(): void {
 function resolveMode(argument: string | undefined): GatewayMode {
   if (!argument || argument === "serve") return "serve";
   if (argument === "desktop") return "desktop";
-  if (argument === "native") return "native";
   if (argument === "doctor") return "doctor";
   if (argument === "models") return "models";
   if (argument === "export") return "export";
@@ -47,8 +43,7 @@ function resolveMode(argument: string | undefined): GatewayMode {
   process.exit(2);
 }
 
-// Keep the HTTP loop in a dedicated child process for both desktop launch modes.
-// Native mode still uses the Perry UI; Web mode only opens the browser console.
+// Keep the HTTP loop in a dedicated child process for the desktop launch mode.
 function startManagedGateway(): ChildProcess {
   const child = spawn(process.execPath, ["serve"], {
     env: process.env,
@@ -119,13 +114,6 @@ function runWebMode(): void {
   setTimeout(openWebUi, 500);
 }
 
-function runNativeMode(): void {
-  const child = startManagedGateway();
-  attachGatewayLifecycle(child);
-  console.log("Native 模式已启动：Perry 控制面板和 Gateway 由同一命令统一管理");
-  startDashboard();
-}
-
 async function runMode(): Promise<void> {
   const mode = resolveMode(process.argv[2]);
   if (mode === "serve") {
@@ -134,10 +122,6 @@ async function runMode(): Promise<void> {
   }
   if (mode === "desktop") {
     runWebMode();
-    return;
-  }
-  if (mode === "native") {
-    runNativeMode();
     return;
   }
   if (mode === "doctor") {

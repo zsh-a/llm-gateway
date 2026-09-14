@@ -6,10 +6,6 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "baseUrl": ".",
-    "paths": {
-      "perry/ui": [".perry/types/perry/ui/index.d.ts"]
-    },
     "lib": ["ES2022", "DOM"],
     "types": ["node"]
   },

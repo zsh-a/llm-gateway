@@ -3,7 +3,7 @@
 一个用 TypeScript 编写、由 Perry 编译核心服务的统一 OpenAI 兼容网关。
 当前内置 MiMo 和 WorkBuddy 两个 Provider，客户端只需要配置一次网关地址，模型会自动路由到对应上游。
 
-认证流程与网关运行时完全分离：`npm run auth` 负责首次捕获并缓存认证；网关和控制面板由同一个二进制提供 `serve`、`desktop` 两种模式，另保留 `native` 作为 Perry 原生 UI 兼容入口。
+认证流程与网关运行时完全分离：`npm run auth` 负责首次捕获并缓存认证；网关和 Web 控制面板由同一个二进制提供 `serve`、`desktop` 两种模式。
 
 ## 架构
 
@@ -16,10 +16,9 @@
   .runtime/auth/workbuddy.json
       │ 只读缓存
       ▼
-同一个 Perry 原生二进制
+同一个 Perry 编译二进制
   serve   → OpenAI Client → ModelCatalog → Provider → LLM 上游
   desktop → 托管 serve 子进程 + 嵌入式 Web 控制台
-  native  → 托管 serve 子进程 + Perry 原生控制面板（兼容）
 ```
 
 核心代码：
@@ -39,14 +38,13 @@ src/responses.ts    Responses 输入/输出适配
 src/server.ts       OpenAI 兼容 HTTP 服务与启动生命周期
 src/web-ui.ts       Web 控制台嵌入入口
 web/src/            React + Tailwind + shadcn/ui 控制台源码
-src/dashboard.ts    可选的 Perry 原生控制面板兼容入口
-src/main.ts         serve / desktop / native 模式入口
+src/main.ts         serve / desktop 模式入口
 src/management.ts   doctor / models / export 管理命令
 scripts/auth.ts     一次性认证引导工具
 scripts/prepare-ui.mjs  Vite 构建并将 Web 资源内嵌到 Perry
 ```
 
-`serve` 模式只运行网关；`desktop` 模式由同一个入口托管 Gateway 子进程并打开同源 Web 控制台。控制台直接由 Gateway 提供，不需要额外的静态服务器、前端运行时或 CORS 配置；`native` 模式仅用于需要 Perry 原生窗口的场景。
+`serve` 模式只运行网关；`desktop` 模式由同一个入口托管 Gateway 子进程并打开同源 Web 控制台。控制台直接由 Gateway 提供，不需要额外的静态服务器、前端运行时或 CORS 配置。
 Web 控制台使用 Tailwind CSS v4 和 shadcn/ui 风格的本地组件，资源由 Vite 在构建阶段编译并打入二进制，运行时不依赖 CDN 或额外静态服务器。
 认证工具仍然独立，不会被网关或桌面模式自动启动。
 
@@ -145,7 +143,7 @@ ls .runtime/auth
 认证完成后，后台或无图形环境运行 `serve` 模式：
 
 ```bash
-npm run launch
+npm run start
 # 等价于：
 # ./dist/llm-gateway serve
 ```
@@ -160,15 +158,9 @@ npm run desktop
 
 `desktop` 会由同一个二进制托管 Gateway 子进程并打开浏览器控制台：`http://127.0.0.1:3000/ui`。控制台按“概览 / Playground / 统计 / 渠道与 Key / 设置”分成独立页面：概览查看网关、Provider、认证和模型状态，Playground 发送真实测试请求，统计查看 24 小时用量；“渠道与 Key”页面在输入 `PROXY_ADMIN_KEY` 后维护 Channel（上游、认证引用、模型映射、优先级、权重和启停）以及虚拟 API Key（模型权限、RPM、TPM、Token 配额和撤销）。新 Key 的完整 secret 只在创建成功时显示一次。控制台默认连接当前托管实例；如果配置了 `PROXY_API_KEY` 或启用了虚拟 API Key，在设置页输入可用的 Key 即可。也可以通过 `GATEWAY_URL` 指定其他网关地址。页面使用同源 `fetch` 访问网关，不需要额外安装依赖。
 
-需要 Perry 原生窗口时可使用兼容模式：
-
-```bash
-./dist/llm-gateway native
-```
-
 网关不会启动 mitmproxy，也不会启动桌面客户端。之后可以关闭 MiMo、WorkBuddy 和 mitmweb。
 
-`desktop` / `native` 模式的生命周期由入口进程管理：退出桌面进程会自动结束托管的 Gateway 子进程。需要让 Gateway 独立常驻时，请使用 `serve` 模式。
+`desktop` 模式的生命周期由入口进程管理：退出桌面进程会自动结束托管的 Gateway 子进程。需要让 Gateway 独立常驻时，请使用 `serve` 模式。
 
 客户端统一配置为：
 
