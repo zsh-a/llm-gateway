@@ -8,6 +8,7 @@ import type {
   OpenAIResponseStreamEvent,
   ResponseRequestOptions
 } from "./types.js";
+import { responsesUsage } from "./usage.js";
 
 function asRecord(value: unknown): JsonRecord {
   return value !== null && typeof value === "object"
@@ -31,9 +32,17 @@ function serializedValue(value: unknown): string {
 
 function roleValue(value: unknown, fallback: string): string {
   const role = stringValue(value);
-  return ["system", "developer", "user", "assistant", "tool"].includes(role)
+  return ["system", "developer", "user", "assistant", "tool", "function"].includes(role)
     ? role
     : fallback;
+}
+
+function isFunctionCallType(type: string): boolean {
+  return type === "function_call" || type === "custom_tool_call";
+}
+
+function isFunctionCallOutputType(type: string): boolean {
+  return type === "function_call_output" || type === "custom_tool_call_output";
 }
 
 function chatContent(value: unknown): unknown {
@@ -98,7 +107,7 @@ function inputItemToMessage(
   const type = stringValue(item.type);
   if (type === "reasoning" || type === "item_reference") return null;
 
-  if (type === "function_call_output") {
+  if (isFunctionCallOutputType(type)) {
     const message: JsonRecord = {
       role: "tool",
       content: serializedValue(item.output ?? "")
@@ -108,14 +117,14 @@ function inputItemToMessage(
     return message;
   }
 
-  if (type === "function_call") {
+  if (isFunctionCallType(type)) {
     const callId = stringValue(item.call_id) || stringValue(item.id);
     const functionCall: JsonRecord = {
       id: callId,
       type: "function",
       function: {
         name: stringValue(item.name),
-        arguments: serializedValue(item.arguments ?? "{}")
+        arguments: serializedValue(item.arguments ?? item.input ?? "{}")
       }
     };
     return {
@@ -138,6 +147,10 @@ function inputItemToMessage(
         : stringValue(item.text)
     };
     if (item.name !== undefined) message.name = item.name;
+    if (item.tool_calls !== undefined) message.tool_calls = item.tool_calls;
+    if (item.function_call !== undefined) message.function_call = item.function_call;
+    if (item.tool_call_id !== undefined) message.tool_call_id = item.tool_call_id;
+    if (item.call_id !== undefined) message.call_id = item.call_id;
     return message;
   }
 
@@ -147,10 +160,37 @@ function inputItemToMessage(
 function inputMessages(value: unknown, fallbackRole: string): unknown[] {
   const values = Array.isArray(value) ? value : [value];
   const messages: unknown[] = [];
+  const pendingToolCalls: JsonRecord[] = [];
+
+  const flushToolCalls = (): void => {
+    if (pendingToolCalls.length === 0) return;
+    messages.push({
+      role: "assistant",
+      content: "",
+      tool_calls: pendingToolCalls.splice(0)
+    });
+  };
+
   for (const item of values) {
+    const type = stringValue(asRecord(item).type);
+    if (isFunctionCallType(type)) {
+      const message = inputItemToMessage(item, fallbackRole);
+      const toolCalls = message?.tool_calls;
+      if (Array.isArray(toolCalls)) {
+        pendingToolCalls.push(...toolCalls as JsonRecord[]);
+      }
+      continue;
+    }
+
+    // Responses represents parallel calls as consecutive function_call items.
+    // They must become one assistant message with multiple tool_calls before
+    // the canonical Chat history validator sees them.
+    flushToolCalls();
     const message = inputItemToMessage(item, fallbackRole);
     if (message) messages.push(message);
   }
+
+  flushToolCalls();
   return messages;
 }
 
@@ -309,15 +349,15 @@ export function normalizeResponseRequest(
   const response = responseRequestOptions(body);
   const messages: unknown[] = [];
 
+  if (body.instructions !== undefined) {
+    messages.push(...inputMessages(body.instructions, "system"));
+  }
   if (response.previousResponseId) {
     const previous = previousMessages(response.previousResponseId);
     if (!previous) {
       throw new Error("previous_response_id 不存在或已过期；网关只在当前进程内保存 Responses 会话");
     }
     messages.push(...previous);
-  }
-  if (body.instructions !== undefined) {
-    messages.push(...inputMessages(body.instructions, "system"));
   }
   if (body.input !== undefined) {
     messages.push(...inputMessages(body.input, "user"));
@@ -410,25 +450,6 @@ export function createResponseContext(
     reasoningOutputIndex: -1,
     functionOutputs: {}
   };
-}
-
-function responseUsage(value: JsonRecord | null): JsonRecord | null {
-  if (!value) return null;
-
-  const usage: JsonRecord = { ...value };
-  const inputTokens = usage.input_tokens ?? usage.prompt_tokens;
-  const outputTokens = usage.output_tokens ?? usage.completion_tokens;
-  const totalTokens = usage.total_tokens ??
-    (typeof inputTokens === "number" && typeof outputTokens === "number"
-      ? inputTokens + outputTokens
-      : undefined);
-
-  if (inputTokens !== undefined) usage.input_tokens = inputTokens;
-  if (outputTokens !== undefined) usage.output_tokens = outputTokens;
-  if (totalTokens !== undefined) usage.total_tokens = totalTokens;
-  delete usage.prompt_tokens;
-  delete usage.completion_tokens;
-  return usage;
 }
 
 function outputMessage(
@@ -625,7 +646,7 @@ export class ResponseAccumulator {
       status,
       outputItems(this, context),
       this.content,
-      responseUsage(this.usage)
+      responsesUsage(this.usage)
     );
     if (this.reasoning) result.reasoning_content = this.reasoning;
     return result;

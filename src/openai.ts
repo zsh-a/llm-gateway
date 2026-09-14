@@ -4,6 +4,7 @@ import {
   type StreamEvent,
   type StreamToolCall
 } from "./stream.js";
+import { normalizeToolHistory } from "./tool-history.js";
 import type {
   JsonRecord,
   ModelDescriptor,
@@ -77,7 +78,9 @@ export function normalizeChatRequest(
   const model = typeof body.model === "string" && body.model.trim()
     ? body.model.trim()
     : defaultModel;
-  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const messages = normalizeToolHistory(
+    Array.isArray(body.messages) ? body.messages : []
+  );
   const thinking = asRecord(body.thinking);
   const reasoning = asRecord(body.reasoning);
   const effortValue = body.reasoning_effort !== undefined
@@ -195,7 +198,7 @@ function toolCallDelta(event: Extract<StreamEvent, { type: "tool_call" }>): Json
     type: event.toolType ?? "function",
     function: functionValue
   };
-  if (event.id !== undefined) toolCall.id = event.id;
+  toolCall.id = event.id ?? event.callId ?? `call_${event.index}`;
   return toolCall;
 }
 
@@ -321,7 +324,7 @@ export function validateModelRequest(
 
 function chatToolCall(call: StreamToolCall): JsonRecord {
   return {
-    id: call.id ?? `call_${call.index}`,
+    id: call.id ?? call.callId ?? `call_${call.index}`,
     type: call.type || "function",
     function: {
       name: call.name,

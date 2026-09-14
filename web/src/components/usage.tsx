@@ -30,6 +30,13 @@ function tokenValue(value: number | undefined): string {
   return value === undefined ? "—" : formatNumber(value);
 }
 
+function maxTokenValue(...values: Array<number | undefined>): number | undefined {
+  const defined = values.filter((value): value is number => (
+    value !== undefined && Number.isFinite(value) && value >= 0
+  ));
+  return defined.length > 0 ? Math.max(...defined) : undefined;
+}
+
 function BreakdownCard({
   title,
   breakdown
@@ -71,9 +78,10 @@ export function UsageDetails({ usage }: { usage?: Usage | null }) {
     return <div className="rounded-xl border border-amber-400/20 bg-amber-400/5 px-3 py-2.5 text-xs text-amber-200">上游没有返回 usage，当前请求无法进行准确 Token 统计。</div>;
   }
 
+  const cachedTokens = maxTokenValue(usage.cachedTokens, usage.inputDetails?.cachedTokens);
   const inputDetails = {
     ...(usage.inputDetails ?? {}),
-    cachedTokens: usage.cachedTokens ?? usage.inputDetails?.cachedTokens,
+    cachedTokens,
     audioTokens: usage.inputAudioTokens ?? usage.inputDetails?.audioTokens,
     imageTokens: usage.inputImageTokens ?? usage.inputDetails?.imageTokens
   };
@@ -89,7 +97,7 @@ export function UsageDetails({ usage }: { usage?: Usage | null }) {
     ["总 Token", tokenValue(usage.totalTokens), "text-foreground"],
     ["输入", tokenValue(usage.inputTokens), "text-cyan-200"],
     ["输出", tokenValue(usage.outputTokens), "text-primary"],
-    ["缓存命中", tokenValue(usage.cachedTokens), "text-emerald-300"],
+    ["缓存命中", tokenValue(cachedTokens), "text-emerald-300"],
     ["推理", tokenValue(usage.reasoningTokens), "text-violet-200"],
     ["缓存写入", tokenValue(usage.cacheCreationTokens), "text-amber-200"]
   ];
@@ -204,4 +212,3 @@ export function RequestTable({ rows }: { rows: RecentRequest[] }) {
     </div>
   );
 }
-
