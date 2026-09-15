@@ -1,5 +1,8 @@
-import { createServer } from "node:http";
-import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import { serve, type ServerType } from "@hono/node-server";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
+import { cors } from "hono/cors";
+import { streamSSE, type SSEStreamingApi } from "hono/streaming";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 
 import { getAuthStore } from "./auth-store.js";
 import { getChannelStore, type ChannelConfig } from "./channels.js";
@@ -51,8 +54,81 @@ const authStore = getAuthStore(config);
 const apiKeys = new ApiKeyStore(config.apiKeysFile, config.apiKey);
 const metrics = new MetricsStore(config.metricsMaxRecords, config.metricsFile);
 
+interface GatewayVariables {
+  identity: ApiKeyIdentity;
+  admission: MetricAdmission | undefined;
+}
+
+type GatewayEnv = { Variables: GatewayVariables };
+type GatewayContext = Context<GatewayEnv>;
+
+class GatewayError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly type: string,
+    message: string
+  ) {
+    super(message);
+    this.name = "GatewayError";
+  }
+}
+
+function statusCode(status: number): ContentfulStatusCode {
+  return status as ContentfulStatusCode;
+}
+
+function sendJson(c: Context, status: number, body: unknown): Response {
+  return c.body(
+    JSON.stringify(body),
+    statusCode(status),
+    { "Content-Type": "application/json; charset=utf-8" }
+  );
+}
+
+function sendError(
+  c: Context,
+  status: number,
+  message: string,
+  type: string
+): Response {
+  return sendJson(c, status, errorResponse(message, type));
+}
+
+function sendWebUi(c: Context): Response {
+  return c.body(WEB_UI_HTML, 200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "same-origin"
+  });
+}
+
+function requestCredential(c: Context): string {
+  const authorization = c.req.header("authorization") ?? "";
+  if (authorization.toLowerCase().startsWith("bearer ")) {
+    return authorization.slice(7).trim();
+  }
+  return (c.req.header("x-api-key") ?? "").trim();
+}
+
+function authenticateRequest(c: Context): ApiKeyIdentity | null {
+  const credential = requestCredential(c);
+  if (!apiKeys.requiresAuthentication()) return apiKeys.anonymous();
+  return apiKeys.authenticate(credential);
+}
+
+function adminAuthorized(c: Context): boolean {
+  const adminKey = config.adminKey || config.apiKey;
+  return !adminKey || requestCredential(c) === adminKey;
+}
+
+function metricScope(identity: ApiKeyIdentity): string | undefined {
+  return identity.source === "managed" ? identity.keyId : undefined;
+}
+
 function beginMetric(
-  res: ServerResponse,
+  c: GatewayContext,
   protocol: "chat" | "responses",
   route: ModelRoute,
   request: NormalizedChatRequest,
@@ -68,7 +144,7 @@ function beginMetric(
       apiKeyId: identity.keyId
     }
   );
-  res.setHeader("X-Request-ID", handle.id);
+  c.header("X-Request-ID", handle.id);
   return handle;
 }
 
@@ -81,278 +157,68 @@ function finishMetric(
   apiKeys.recordUsage(identity, outcome.usage);
 }
 
-function setCors(req: IncomingMessage, res: ServerResponse): void {
-  const requestOrigin = req.headers.origin;
-  if (config.corsOrigin === "*") {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-  } else if (requestOrigin === config.corsOrigin) {
-    res.setHeader("Access-Control-Allow-Origin", config.corsOrigin);
-    res.setHeader("Vary", "Origin");
+interface MetricAccumulator {
+  usage: unknown;
+  finishReason: string;
+  toolCalls: unknown[];
+}
+
+function outcomeFor(
+  accumulator: MetricAccumulator,
+  status: MetricOutcome["status"],
+  errorType?: string
+): MetricOutcome {
+  return {
+    status,
+    errorType,
+    usage: accumulator.usage,
+    finishReason: accumulator.finishReason,
+    toolCalls: accumulator.toolCalls.filter(Boolean).length
+  };
+}
+
+async function readBody(c: Context, maxBytes: number): Promise<string> {
+  const contentLength = Number(c.req.header("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new GatewayError(413, "invalid_request_error", "请求体超过大小限制");
   }
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Authorization, Content-Type, X-API-Key"
-  );
-}
 
-function sendJson(
-  res: ServerResponse,
-  status: number,
-  body: unknown
-): void {
-  if (res.headersSent || res.destroyed) return;
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(body));
-}
-
-function sendWebUi(res: ServerResponse): void {
-  if (res.headersSent || res.destroyed) return;
-  res.writeHead(200, {
-    "Content-Type": "text/html; charset=utf-8",
-    "Cache-Control": "no-store",
-    "Content-Security-Policy": "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
-    "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "same-origin"
-  });
-  res.end(WEB_UI_HTML);
-}
-
-function sendError(
-  res: ServerResponse,
-  status: number,
-  message: string,
-  type: string
-): void {
-  sendJson(res, status, errorResponse(message, type));
-}
-
-function requestCredential(req: IncomingMessage): string {
-  const authorization = String(req.headers.authorization ?? "");
-  if (authorization.toLowerCase().startsWith("bearer ")) {
-    return authorization.slice(7).trim();
-  }
-  return String(req.headers["x-api-key"] ?? "").trim();
-}
-
-function authenticateRequest(req: IncomingMessage): ApiKeyIdentity | null {
-  const credential = requestCredential(req);
-  if (!apiKeys.requiresAuthentication()) return apiKeys.anonymous();
-  return apiKeys.authenticate(credential);
-}
-
-function adminAuthorized(req: IncomingMessage): boolean {
-  const adminKey = config.adminKey || config.apiKey;
-  return !adminKey || requestCredential(req) === adminKey;
-}
-
-function metricScope(identity: ApiKeyIdentity): string | undefined {
-  return identity.source === "managed" ? identity.keyId : undefined;
-}
-
-function readBody(
-  req: IncomingMessage,
-  maxBytes: number
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let raw = "";
-    let size = 0;
-    let settled = false;
-
-    const fail = (error: Error): void => {
-      if (settled) return;
-      settled = true;
-      reject(error);
-    };
-
-    req.on("data", (chunk) => {
-      if (settled) return;
-      const text = String(chunk);
-      size += text.length;
-      if (size > maxBytes) {
-        fail(new Error("请求体超过大小限制"));
-        req.destroy();
-        return;
-      }
-      raw += text;
-    });
-    req.on("end", () => {
-      if (settled) return;
-      settled = true;
-      resolve(raw);
-    });
-    req.on("error", fail);
-  });
-}
-
-async function readJsonRecord(
-  req: IncomingMessage,
-  res: ServerResponse
-): Promise<JsonRecord | null> {
-  let raw: string;
   try {
-    raw = await readBody(req, config.maxBodyBytes);
+    const raw = await c.req.text();
+    const size = new TextEncoder().encode(raw).byteLength;
+    if (size > maxBytes) {
+      throw new GatewayError(413, "invalid_request_error", "请求体超过大小限制");
+    }
+    return raw;
   } catch (error) {
+    if (error instanceof GatewayError) throw error;
     const message = error instanceof Error ? error.message : String(error);
-    sendError(res, message.includes("大小限制") ? 413 : 400, message, "invalid_request_error");
-    return null;
-  }
-  try {
-    const value: unknown = JSON.parse(raw || "{}");
-    if (value === null || typeof value !== "object" || Array.isArray(value)) {
-      throw new Error("请求体必须是 JSON 对象");
-    }
-    return value as JsonRecord;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "请求体不是合法 JSON";
-    sendError(res, 400, message, "invalid_request_error");
-    return null;
+    throw new GatewayError(400, "invalid_request_error", message);
   }
 }
 
-async function handleAdmin(
-  req: IncomingMessage,
-  res: ServerResponse,
-  url: URL
-): Promise<boolean> {
-  if (!url.pathname.startsWith("/admin/")) return false;
-  if (!adminAuthorized(req)) {
-    sendError(res, 401, "缺少或无效的管理员 API Key", "authentication_error");
-    return true;
+async function readJsonRecord(c: Context): Promise<JsonRecord> {
+  const raw = await readBody(c, config.maxBodyBytes);
+  let value: unknown;
+  try {
+    value = JSON.parse(raw || "{}");
+  } catch {
+    throw new GatewayError(400, "invalid_request_error", "请求体不是合法 JSON");
   }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new GatewayError(400, "invalid_request_error", "请求体必须是 JSON 对象");
+  }
+  return value as JsonRecord;
+}
 
-  if (req.method === "GET" && url.pathname === "/admin/metrics/summary") {
-    sendJson(res, 200, metrics.summary(parseDuration(
-      url.searchParams.get("window"),
-      24 * 60 * 60 * 1000
-    )));
-    return true;
-  }
-
-  if (req.method === "GET" && url.pathname === "/admin/metrics/timeseries") {
-    const windowMs = parseDuration(
-      url.searchParams.get("window"),
-      24 * 60 * 60 * 1000
-    );
-    const bucketValue = url.searchParams.get("bucket");
-    sendJson(res, 200, metrics.timeseries(
-      windowMs,
-      bucketValue ? parseDuration(bucketValue, 0) : undefined
-    ));
-    return true;
-  }
-
-  if (req.method === "GET" && url.pathname === "/admin/metrics/requests") {
-    const limitValue = Number(url.searchParams.get("limit"));
-    const statusValue = url.searchParams.get("status");
-    const status = statusValue === "success" ||
-      statusValue === "error" ||
-      statusValue === "canceled"
-      ? statusValue
-      : undefined;
-    sendJson(res, 200, metrics.recent({
-      windowMs: parseDuration(url.searchParams.get("window"), 24 * 60 * 60 * 1000),
-      limit: Number.isFinite(limitValue) ? limitValue : 50,
-      provider: url.searchParams.get("provider") || undefined,
-      model: url.searchParams.get("model") || undefined,
-      status
-    }));
-    return true;
-  }
-
-  if (req.method === "GET" && url.pathname === "/admin/metrics/models") {
-    sendJson(res, 200, metrics.models(parseDuration(
-      url.searchParams.get("window"),
-      24 * 60 * 60 * 1000
-    )));
-    return true;
-  }
-
-  const channels = getChannelStore(config);
-  if (req.method === "GET" && url.pathname === "/admin/channels") {
-    sendJson(res, 200, {
-      object: "llm-gateway.channels",
-      data: channels.list()
-    });
-    return true;
-  }
-
-  if (req.method === "POST" && url.pathname === "/admin/channels") {
-    const body = await readJsonRecord(req, res);
-    if (!body) return true;
-    try {
-      const channel = channels.upsert(body);
-      clearModelCache(config);
-      sendJson(res, 200, { object: "llm-gateway.channel", data: channel });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      sendError(res, 400, message, "invalid_request_error");
-    }
-    return true;
-  }
-
-  const channelMatch = url.pathname.match(/^\/admin\/channels\/([^/]+)$/);
-  if (req.method === "DELETE" && channelMatch) {
-    const removed = channels.remove(decodeURIComponent(channelMatch[1]));
-    if (!removed) {
-      sendError(res, 404, "渠道不存在", "invalid_request_error");
-      return true;
-    }
-    clearModelCache(config);
-    sendJson(res, 200, { object: "llm-gateway.channel.deleted", id: channelMatch[1] });
-    return true;
-  }
-
-  if (req.method === "GET" && url.pathname === "/admin/keys") {
-    sendJson(res, 200, {
-      object: "llm-gateway.api_keys",
-      data: apiKeys.list()
-    });
-    return true;
-  }
-
-  if (req.method === "POST" && url.pathname === "/admin/keys") {
-    const body = await readJsonRecord(req, res);
-    if (!body) return true;
-    try {
-      const created = apiKeys.create(body);
-      sendJson(res, 201, {
-        object: "llm-gateway.api_key",
-        data: created.record,
-        secret: created.secret,
-        warning: "secret 只在本次响应中返回，请立即保存"
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      sendError(res, 400, message, "invalid_request_error");
-    }
-    return true;
-  }
-
-  const keyMatch = url.pathname.match(/^\/admin\/keys\/([^/]+)$/);
-  if (req.method === "PATCH" && keyMatch) {
-    const body = await readJsonRecord(req, res);
-    if (!body) return true;
-    const updated = apiKeys.update(decodeURIComponent(keyMatch[1]), body);
-    if (!updated) {
-      sendError(res, 404, "API Key 不存在", "invalid_request_error");
-      return true;
-    }
-    sendJson(res, 200, { object: "llm-gateway.api_key", data: updated });
-    return true;
-  }
-  if (req.method === "DELETE" && keyMatch) {
-    const revoked = apiKeys.revoke(decodeURIComponent(keyMatch[1]));
-    if (!revoked) {
-      sendError(res, 404, "API Key 不存在", "invalid_request_error");
-      return true;
-    }
-    sendJson(res, 200, { object: "llm-gateway.api_key.revoked", id: keyMatch[1] });
-    return true;
-  }
-
-  sendError(res, 404, "管理接口不存在", "invalid_request_error");
-  return true;
+function asGatewayError(
+  error: unknown,
+  fallbackStatus: number,
+  fallbackType: string
+): GatewayError {
+  if (error instanceof GatewayError) return error;
+  const message = error instanceof Error ? error.message : String(error);
+  return new GatewayError(fallbackStatus, fallbackType, message);
 }
 
 function upstreamError(error: unknown): {
@@ -375,21 +241,6 @@ function upstreamError(error: unknown): {
   return { status: 502, message, type: "upstream_error" };
 }
 
-function writeStreamHeaders(res: ServerResponse): void {
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-    "X-Accel-Buffering": "no"
-  });
-}
-
-function writeResponseEvent(res: ServerResponse, value: Record<string, unknown>): void {
-  if (res.destroyed) return;
-  const type = typeof value.type === "string" ? value.type : "message";
-  res.write(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);
-}
-
 function retryableUpstreamFailure(error: unknown): boolean {
   if (!(error instanceof UpstreamError)) return true;
   return error.status === 401 || error.status === 403 ||
@@ -407,9 +258,8 @@ async function streamUpstream(
   let lastError: unknown = null;
   for (let index = 0; index < route.candidates.length; index += 1) {
     const candidate = route.candidates[index];
-    if (externalSignal?.aborted) {
-      throw new Error("请求已取消");
-    }
+    if (externalSignal?.aborted) throw new Error("请求已取消");
+
     const snapshot = authStore.get(candidate.channel.authRef);
     if (!snapshot) {
       lastError = new UpstreamError(
@@ -455,125 +305,131 @@ async function streamUpstream(
   throw lastError ?? new Error("没有可用的上游渠道");
 }
 
-async function handleStreaming(
-  res: ServerResponse,
-  route: ModelRoute,
-  request: NormalizedChatRequest,
-  identity: ApiKeyIdentity
-): Promise<void> {
-  const context = createStreamContext(route.publicModel);
-  const accumulator = new ChatAccumulator();
-  const metric = beginMetric(res, "chat", route, request, identity);
-  const includeUsage = includesUsage(request);
-  let headersSent = false;
-  let finishSeen = false;
-  let metricOutcome: MetricOutcome = {
-    status: "error",
-    errorType: "internal_error"
-  };
-  const clientAbort = new AbortController();
+class SseWriter {
+  private pending: Promise<void> = Promise.resolve();
 
-  res.on("close", () => {
-    if (!res.writableEnded) clientAbort.abort();
-  });
+  constructor(private readonly stream: SSEStreamingApi) {}
 
-  try {
-    await streamUpstream(
-      route,
-      request,
-      (chunk: UpstreamChunk) => {
-        if (res.destroyed) return;
-        if (!headersSent) {
-          writeStreamHeaders(res);
-          headersSent = true;
-        }
+  writeData(data: string, event?: string): void {
+    this.pending = this.pending
+      .then(() => this.stream.writeSSE(event ? { data, event } : { data }))
+      .catch(() => undefined);
+  }
 
-        const events = accumulator.add(chunk);
-        if (events.some((event) => event.type === "finish")) finishSeen = true;
-        const visibleEvents = includeUsage
-          ? events.filter((event) => event.type !== "usage")
-          : events;
-        for (const value of toOpenAIChunks(visibleEvents, context)) {
-          res.write(`data: ${JSON.stringify(value)}\n\n`);
-        }
-      },
-      clientAbort.signal,
-      (channel) => { metric.channelId = channel.id; }
-    );
+  writeJson(value: Record<string, unknown>, event?: string): void {
+    this.writeData(JSON.stringify(value), event);
+  }
 
-    if (res.destroyed) {
-      metricOutcome = {
-        status: "canceled",
-        errorType: "client_disconnect",
-        usage: accumulator.usage,
-        finishReason: accumulator.finishReason,
-        toolCalls: accumulator.toolCalls.filter((call) => Boolean(call)).length
-      };
-      return;
-    }
-    if (!headersSent) {
-      writeStreamHeaders(res);
-      headersSent = true;
-    }
-    if (!finishSeen) {
-      res.write(`data: ${JSON.stringify(finalOpenAIChunk(context, accumulator.finishReason))}\n\n`);
-    }
-    if (includeUsage) {
-      res.write(
-        `data: ${JSON.stringify(usageOpenAIChunk(context, accumulator.usage))}\n\n`
-      );
-    }
-    res.end("data: [DONE]\n\n");
-    metricOutcome = {
-      status: "success",
-      usage: accumulator.usage,
-      finishReason: accumulator.finishReason,
-      toolCalls: accumulator.toolCalls.filter((call) => Boolean(call)).length
-    };
-  } catch (error) {
-    if (res.destroyed) {
-      metricOutcome = {
-        status: "canceled",
-        errorType: "client_disconnect",
-        usage: accumulator.usage,
-        finishReason: accumulator.finishReason,
-        toolCalls: accumulator.toolCalls.filter((call) => Boolean(call)).length
-      };
-      return;
-    }
-    const failure = upstreamError(error);
-    metricOutcome = {
-      status: clientAbort.signal.aborted ? "canceled" : "error",
-      errorType: failure.type,
-      usage: accumulator.usage,
-      finishReason: accumulator.finishReason,
-      toolCalls: accumulator.toolCalls.filter((call) => Boolean(call)).length
-    };
-    if (failure.status === 401 || failure.status === 403) {
-      authStore.invalidate(route.channel.authRef);
-    }
-    if (!headersSent) {
-      sendError(res, failure.status, failure.message, failure.type);
-      return;
-    }
-    res.write(
-      `data: ${JSON.stringify(errorResponse(failure.message, failure.type))}\n\n`
-    );
-    res.end("data: [DONE]\n\n");
-  } finally {
-    finishMetric(metric, identity, metricOutcome);
+  flush(): Promise<void> {
+    return this.pending;
   }
 }
 
-async function handleNonStreaming(
-  res: ServerResponse,
+interface AbortLink {
+  signal: AbortSignal;
+  dispose: () => void;
+}
+
+function linkClientAbort(c: Context, stream: SSEStreamingApi): AbortLink {
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  c.req.raw.signal.addEventListener("abort", abort);
+  stream.onAbort(abort);
+  if (c.req.raw.signal.aborted) abort();
+  return {
+    signal: controller.signal,
+    dispose: () => c.req.raw.signal.removeEventListener("abort", abort)
+  };
+}
+
+function responseEventName(value: Record<string, unknown>): string {
+  return typeof value.type === "string" ? value.type : "message";
+}
+
+function handleChatStreaming(
+  c: GatewayContext,
   route: ModelRoute,
   request: NormalizedChatRequest,
   identity: ApiKeyIdentity
-): Promise<void> {
+): Response {
+  const context = createStreamContext(route.publicModel);
   const accumulator = new ChatAccumulator();
-  const metric = beginMetric(res, "chat", route, request, identity);
-  let metricOutcome: MetricOutcome = {
+  const metric = beginMetric(c, "chat", route, request, identity);
+  const includeUsage = includesUsage(request);
+  c.header("X-Accel-Buffering", "no");
+
+  return streamSSE(c, async (stream) => {
+    const writer = new SseWriter(stream);
+    const clientAbort = linkClientAbort(c, stream);
+    let finishSeen = false;
+    let outcome: MetricOutcome = {
+      status: "error",
+      errorType: "internal_error"
+    };
+    const aborted = (): boolean => stream.aborted || clientAbort.signal.aborted;
+
+    try {
+      await streamUpstream(
+        route,
+        request,
+        (chunk) => {
+          if (aborted()) return;
+          const events = accumulator.add(chunk);
+          if (events.some((event) => event.type === "finish")) finishSeen = true;
+          const visibleEvents = includeUsage
+            ? events.filter((event) => event.type !== "usage")
+            : events;
+          for (const value of toOpenAIChunks(visibleEvents, context)) {
+            writer.writeJson(value);
+          }
+        },
+        clientAbort.signal,
+        (channel) => { metric.channelId = channel.id; }
+      );
+
+      if (aborted()) {
+        outcome = outcomeFor(accumulator, "canceled", "client_disconnect");
+        return;
+      }
+      await writer.flush();
+      if (aborted()) {
+        outcome = outcomeFor(accumulator, "canceled", "client_disconnect");
+        return;
+      }
+      if (!finishSeen) writer.writeJson(finalOpenAIChunk(context, accumulator.finishReason));
+      if (includeUsage) writer.writeJson(usageOpenAIChunk(context, accumulator.usage));
+      writer.writeData("[DONE]");
+      await writer.flush();
+      outcome = outcomeFor(accumulator, "success");
+    } catch (error) {
+      if (aborted()) {
+        outcome = outcomeFor(accumulator, "canceled", "client_disconnect");
+        return;
+      }
+      const failure = upstreamError(error);
+      outcome = outcomeFor(accumulator, "error", failure.type);
+      if (failure.status === 401 || failure.status === 403) {
+        authStore.invalidate(route.channel.authRef);
+      }
+      writer.writeJson(errorResponse(failure.message, failure.type));
+      writer.writeData("[DONE]");
+      await writer.flush();
+    } finally {
+      clientAbort.dispose();
+      finishMetric(metric, identity, outcome);
+    }
+  });
+}
+
+async function handleChatNonStreaming(
+  c: GatewayContext,
+  route: ModelRoute,
+  request: NormalizedChatRequest,
+  identity: ApiKeyIdentity
+): Promise<Response> {
+  const accumulator = new ChatAccumulator();
+  const metric = beginMetric(c, "chat", route, request, identity);
+  let outcome: MetricOutcome = {
     status: "error",
     errorType: "internal_error"
   };
@@ -585,134 +441,100 @@ async function handleNonStreaming(
       undefined,
       (channel) => { metric.channelId = channel.id; }
     );
-    sendJson(res, 200, accumulator.response(route.publicModel));
-    metricOutcome = {
-      status: "success",
-      usage: accumulator.usage,
-      finishReason: accumulator.finishReason,
-      toolCalls: accumulator.toolCalls.filter((call) => Boolean(call)).length
-    };
+    outcome = outcomeFor(accumulator, "success");
+    return sendJson(c, 200, accumulator.response(route.publicModel));
   } catch (error) {
     const failure = upstreamError(error);
-    metricOutcome = {
-      status: "error",
-      errorType: failure.type,
-      usage: accumulator.usage,
-      finishReason: accumulator.finishReason,
-      toolCalls: accumulator.toolCalls.filter((call) => Boolean(call)).length
-    };
+    outcome = outcomeFor(accumulator, "error", failure.type);
     if (failure.status === 401 || failure.status === 403) {
       authStore.invalidate(route.channel.authRef);
     }
-    sendError(res, failure.status, failure.message, failure.type);
+    return sendError(c, failure.status, failure.message, failure.type);
   } finally {
-    finishMetric(metric, identity, metricOutcome);
+    finishMetric(metric, identity, outcome);
   }
 }
 
-async function handleResponseStreaming(
-  res: ServerResponse,
+function handleResponseStreaming(
+  c: GatewayContext,
   route: ModelRoute,
   request: NormalizedChatRequest,
   identity: ApiKeyIdentity
-): Promise<void> {
+): Response {
   const context = createResponseContext(route.publicModel, request.response);
   const accumulator = new ResponseAccumulator();
-  const metric = beginMetric(res, "responses", route, request, identity);
-  const clientAbort = new AbortController();
-  let headersSent = false;
-  let metricOutcome: MetricOutcome = {
-    status: "error",
-    errorType: "internal_error"
-  };
+  const metric = beginMetric(c, "responses", route, request, identity);
+  c.header("X-Accel-Buffering", "no");
 
-  res.on("close", () => {
-    if (!res.writableEnded) clientAbort.abort();
+  return streamSSE(c, async (stream) => {
+    const writer = new SseWriter(stream);
+    const clientAbort = linkClientAbort(c, stream);
+    let outcome: MetricOutcome = {
+      status: "error",
+      errorType: "internal_error"
+    };
+    const aborted = (): boolean => stream.aborted || clientAbort.signal.aborted;
+    const writeEvent = (value: Record<string, unknown>): void => {
+      writer.writeJson(value, responseEventName(value));
+    };
+
+    try {
+      writeEvent(responseCreated(context));
+      writeEvent(responseInProgress(context));
+      await writer.flush();
+
+      await streamUpstream(
+        route,
+        request,
+        (chunk) => {
+          if (aborted()) return;
+          for (const value of responseChunkEvents(chunk, context, accumulator)) {
+            writeEvent(value);
+          }
+        },
+        clientAbort.signal,
+        (channel) => { metric.channelId = channel.id; }
+      );
+
+      if (aborted()) {
+        outcome = outcomeFor(accumulator, "canceled", "client_disconnect");
+        return;
+      }
+      for (const value of responseFinishEvents(context, accumulator)) {
+        writeEvent(value);
+      }
+      rememberResponse(context, accumulator);
+      await writer.flush();
+      outcome = outcomeFor(accumulator, "success");
+    } catch (error) {
+      if (aborted()) {
+        outcome = outcomeFor(accumulator, "canceled", "client_disconnect");
+        return;
+      }
+      const failure = upstreamError(error);
+      outcome = outcomeFor(accumulator, "error", failure.type);
+      if (failure.status === 401 || failure.status === 403) {
+        authStore.invalidate(route.channel.authRef);
+      }
+      writeEvent(responseFailed(context, failure.message));
+      await writer.flush();
+    } finally {
+      clientAbort.dispose();
+      finishMetric(metric, identity, outcome);
+    }
   });
-
-  try {
-    writeStreamHeaders(res);
-    headersSent = true;
-    for (const value of [responseCreated(context), responseInProgress(context)]) {
-      writeResponseEvent(res, value);
-    }
-
-    await streamUpstream(
-      route,
-      request,
-      (chunk: UpstreamChunk) => {
-        for (const value of responseChunkEvents(chunk, context, accumulator)) {
-          writeResponseEvent(res, value);
-        }
-      },
-      clientAbort.signal,
-      (channel) => { metric.channelId = channel.id; }
-    );
-
-    if (res.destroyed) {
-      metricOutcome = {
-        status: "canceled",
-        errorType: "client_disconnect",
-        usage: accumulator.usage,
-        finishReason: accumulator.finishReason,
-        toolCalls: accumulator.toolCalls.filter((call) => Boolean(call)).length
-      };
-      return;
-    }
-    for (const value of responseFinishEvents(context, accumulator)) {
-      writeResponseEvent(res, value);
-    }
-    rememberResponse(context, accumulator);
-    res.end();
-    metricOutcome = {
-      status: "success",
-      usage: accumulator.usage,
-      finishReason: accumulator.finishReason,
-      toolCalls: accumulator.toolCalls.filter((call) => Boolean(call)).length
-    };
-  } catch (error) {
-    if (res.destroyed) {
-      metricOutcome = {
-        status: "canceled",
-        errorType: "client_disconnect",
-        usage: accumulator.usage,
-        finishReason: accumulator.finishReason,
-        toolCalls: accumulator.toolCalls.filter((call) => Boolean(call)).length
-      };
-      return;
-    }
-    const failure = upstreamError(error);
-    metricOutcome = {
-      status: clientAbort.signal.aborted ? "canceled" : "error",
-      errorType: failure.type,
-      usage: accumulator.usage,
-      finishReason: accumulator.finishReason,
-      toolCalls: accumulator.toolCalls.filter((call) => Boolean(call)).length
-    };
-    if (failure.status === 401 || failure.status === 403) {
-      authStore.invalidate(route.channel.authRef);
-    }
-    if (!headersSent) {
-      sendError(res, failure.status, failure.message, failure.type);
-      return;
-    }
-    writeResponseEvent(res, responseFailed(context, failure.message));
-    res.end();
-  } finally {
-    finishMetric(metric, identity, metricOutcome);
-  }
 }
 
 async function handleResponseNonStreaming(
-  res: ServerResponse,
+  c: GatewayContext,
   route: ModelRoute,
   request: NormalizedChatRequest,
   identity: ApiKeyIdentity
-): Promise<void> {
+): Promise<Response> {
   const context = createResponseContext(route.publicModel, request.response);
   const accumulator = new ResponseAccumulator();
-  const metric = beginMetric(res, "responses", route, request, identity);
-  let metricOutcome: MetricOutcome = {
+  const metric = beginMetric(c, "responses", route, request, identity);
+  let outcome: MetricOutcome = {
     status: "error",
     errorType: "internal_error"
   };
@@ -724,29 +546,19 @@ async function handleResponseNonStreaming(
       undefined,
       (channel) => { metric.channelId = channel.id; }
     );
-    sendJson(res, 200, accumulator.response(context));
+    const response = sendJson(c, 200, accumulator.response(context));
     rememberResponse(context, accumulator);
-    metricOutcome = {
-      status: "success",
-      usage: accumulator.usage,
-      finishReason: accumulator.finishReason,
-      toolCalls: accumulator.toolCalls.filter((call) => Boolean(call)).length
-    };
+    outcome = outcomeFor(accumulator, "success");
+    return response;
   } catch (error) {
     const failure = upstreamError(error);
-    metricOutcome = {
-      status: "error",
-      errorType: failure.type,
-      usage: accumulator.usage,
-      finishReason: accumulator.finishReason,
-      toolCalls: accumulator.toolCalls.filter((call) => Boolean(call)).length
-    };
+    outcome = outcomeFor(accumulator, "error", failure.type);
     if (failure.status === 401 || failure.status === 403) {
       authStore.invalidate(route.channel.authRef);
     }
-    sendError(res, failure.status, failure.message, failure.type);
+    return sendError(c, failure.status, failure.message, failure.type);
   } finally {
-    finishMetric(metric, identity, metricOutcome);
+    finishMetric(metric, identity, outcome);
   }
 }
 
@@ -764,42 +576,32 @@ type RequestNormalizer = (
 type RequestValidator = (request: NormalizedChatRequest) => string | null;
 
 async function prepareRequest(
-  req: IncomingMessage,
-  res: ServerResponse,
+  c: GatewayContext,
   normalize: RequestNormalizer,
   validate: RequestValidator,
   identity: ApiKeyIdentity,
-  admission?: MetricAdmission
-): Promise<PreparedRequest | null> {
+  admission: MetricAdmission | undefined
+): Promise<PreparedRequest | Response> {
   const reject = (
     status: number,
     message: string,
     type: string,
     model = "unknown"
-  ): null => {
+  ): Response => {
     metrics.finishAdmission(admission, model, {
       status: "error",
       errorType: type
     });
-    if (admission) res.setHeader("X-Request-ID", admission.id);
-    sendError(res, status, message, type);
-    return null;
+    if (admission) c.header("X-Request-ID", admission.id);
+    return sendError(c, status, message, type);
   };
 
-  let rawBody: string;
+  let parsed: JsonRecord;
   try {
-    rawBody = await readBody(req, config.maxBodyBytes);
+    parsed = await readJsonRecord(c);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const status = message.includes("大小限制") ? 413 : 400;
-    return reject(status, message, "invalid_request_error");
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawBody || "{}");
-  } catch {
-    return reject(400, "请求体不是合法 JSON", "invalid_request_error");
+    const failure = asGatewayError(error, 400, "invalid_request_error");
+    return reject(failure.status, failure.message, failure.type);
   }
 
   let request: NormalizedChatRequest;
@@ -859,7 +661,6 @@ async function prepareRequest(
   }
 
   metrics.acceptAdmission(admission);
-
   return {
     route,
     identity,
@@ -872,116 +673,219 @@ async function prepareRequest(
 }
 
 async function handleChat(
-  req: IncomingMessage,
-  res: ServerResponse,
+  c: GatewayContext,
   identity: ApiKeyIdentity,
-  admission?: MetricAdmission
-): Promise<void> {
+  admission: MetricAdmission | undefined
+): Promise<Response> {
   const prepared = await prepareRequest(
-    req,
-    res,
+    c,
     normalizeChatRequest,
     validateChatRequest,
     identity,
     admission
   );
-  if (!prepared) return;
-
-  if (prepared.request.stream) {
-    await handleStreaming(
-      res,
-      prepared.route,
-      prepared.request,
-      prepared.identity
-    );
-  } else {
-    await handleNonStreaming(
-      res,
-      prepared.route,
-      prepared.request,
-      prepared.identity
-    );
-  }
+  if (prepared instanceof Response) return prepared;
+  return prepared.request.stream
+    ? handleChatStreaming(c, prepared.route, prepared.request, prepared.identity)
+    : handleChatNonStreaming(c, prepared.route, prepared.request, prepared.identity);
 }
 
 async function handleResponses(
-  req: IncomingMessage,
-  res: ServerResponse,
+  c: GatewayContext,
   identity: ApiKeyIdentity,
-  admission?: MetricAdmission
-): Promise<void> {
+  admission: MetricAdmission | undefined
+): Promise<Response> {
   const prepared = await prepareRequest(
-    req,
-    res,
+    c,
     normalizeResponseRequest,
     validateResponseRequest,
     identity,
     admission
   );
-  if (!prepared) return;
-
-  if (prepared.request.stream) {
-    await handleResponseStreaming(
-      res,
-      prepared.route,
-      prepared.request,
-      prepared.identity
-    );
-  } else {
-    await handleResponseNonStreaming(
-      res,
-      prepared.route,
-      prepared.request,
-      prepared.identity
-    );
-  }
+  if (prepared instanceof Response) return prepared;
+  return prepared.request.stream
+    ? handleResponseStreaming(c, prepared.route, prepared.request, prepared.identity)
+    : handleResponseNonStreaming(c, prepared.route, prepared.request, prepared.identity);
 }
 
-async function route(
-  req: IncomingMessage,
-  res: ServerResponse
-): Promise<void> {
-  setCors(req, res);
+function admissionProtocol(
+  method: string,
+  path: string
+): "chat" | "responses" | null {
+  if (method !== "POST") return null;
+  if (path === "/v1/responses" || path === "/responses") return "responses";
+  if (path === "/v1/chat/completions" || path === "/chat/completions") {
+    return "chat";
+  }
+  return null;
+}
 
-  if (req.method === "OPTIONS") {
-    res.writeHead(204);
-    res.end();
+function requiresGatewayAuth(path: string): boolean {
+  return path.startsWith("/v1/") ||
+    path.startsWith("/chat/") ||
+    path.startsWith("/metrics/") ||
+    path === "/responses";
+}
+
+const authenticate: MiddlewareHandler<GatewayEnv> = async (c, next) => {
+  if (!requiresGatewayAuth(c.req.path)) {
+    await next();
     return;
   }
 
-  const url = new URL(
-    req.url ?? "/",
-    `http://${req.headers.host ?? "localhost"}`
-  );
-
-  if (
-    req.method === "GET" &&
-    (url.pathname === "/ui" || url.pathname === "/ui/" || url.pathname === "/ui/index.html")
-  ) {
-    sendWebUi(res);
-    return;
-  }
-
-  if (
-    req.method === "GET" &&
-    (url.pathname === "/" ||
-      url.pathname === "/health" ||
-      url.pathname === "/health/live")
-  ) {
-    sendJson(res, 200, {
-      status: "ok",
-      service: "llm-gateway",
-      mode: "live",
-      providers: getProviders().map((provider) => provider.id)
+  const protocol = admissionProtocol(c.req.method, c.req.path);
+  const admission = protocol ? metrics.beginAdmission(protocol) : undefined;
+  c.set("admission", admission);
+  const identity = authenticateRequest(c);
+  if (!identity) {
+    metrics.finishAdmission(admission, "unknown", {
+      status: "error",
+      errorType: "authentication_error"
     });
-    return;
+    if (admission) c.header("X-Request-ID", admission.id);
+    return sendError(c, 401, "缺少或无效的代理 API Key", "authentication_error");
   }
 
-  if (req.method === "GET" && url.pathname === "/health/ready") {
+  c.set("identity", identity);
+  if (admission) admission.apiKeyId = identity.keyId;
+  await next();
+};
+
+const authorizeAdmin: MiddlewareHandler<GatewayEnv> = async (c, next) => {
+  if (c.req.path !== "/admin" && !c.req.path.startsWith("/admin/")) {
+    await next();
+    return;
+  }
+  if (!adminAuthorized(c)) {
+    return sendError(c, 401, "缺少或无效的管理员 API Key", "authentication_error");
+  }
+  await next();
+};
+
+function identityOf(c: GatewayContext): ApiKeyIdentity {
+  return c.get("identity");
+}
+
+function admissionOf(c: GatewayContext): MetricAdmission | undefined {
+  return c.get("admission");
+}
+
+function registerAdminRoutes(app: Hono<GatewayEnv>): void {
+  app.get("/admin/metrics/summary", (c) => sendJson(c, 200, metrics.summary(
+    parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000)
+  )));
+
+  app.get("/admin/metrics/timeseries", (c) => {
+    const windowMs = parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000);
+    const bucket = c.req.query("bucket");
+    return sendJson(c, 200, metrics.timeseries(
+      windowMs,
+      bucket ? parseDuration(bucket, 0) : undefined
+    ));
+  });
+
+  app.get("/admin/metrics/requests", (c) => {
+    const statusValue = c.req.query("status");
+    const status = statusValue === "success" ||
+      statusValue === "error" ||
+      statusValue === "canceled"
+      ? statusValue
+      : undefined;
+    return sendJson(c, 200, metrics.recent({
+      windowMs: parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000),
+      limit: Number(c.req.query("limit")) || 50,
+      provider: c.req.query("provider") || undefined,
+      model: c.req.query("model") || undefined,
+      status
+    }));
+  });
+
+  app.get("/admin/metrics/models", (c) => sendJson(c, 200, metrics.models(
+    parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000)
+  )));
+
+  const channels = getChannelStore(config);
+  app.get("/admin/channels", (c) => sendJson(c, 200, {
+    object: "llm-gateway.channels",
+    data: channels.list()
+  }));
+
+  app.post("/admin/channels", async (c) => {
+    const body = await readJsonRecord(c);
+    try {
+      const channel = channels.upsert(body);
+      clearModelCache(config);
+      return sendJson(c, 200, { object: "llm-gateway.channel", data: channel });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return sendError(c, 400, message, "invalid_request_error");
+    }
+  });
+
+  app.delete("/admin/channels/:id", (c) => {
+    const id = c.req.param("id");
+    const removed = channels.remove(id);
+    if (!removed) return sendError(c, 404, "渠道不存在", "invalid_request_error");
+    clearModelCache(config);
+    return sendJson(c, 200, { object: "llm-gateway.channel.deleted", id });
+  });
+
+  app.get("/admin/keys", (c) => sendJson(c, 200, {
+    object: "llm-gateway.api_keys",
+    data: apiKeys.list()
+  }));
+
+  app.post("/admin/keys", async (c) => {
+    const body = await readJsonRecord(c);
+    try {
+      const created = apiKeys.create(body);
+      return sendJson(c, 201, {
+        object: "llm-gateway.api_key",
+        data: created.record,
+        secret: created.secret,
+        warning: "secret 只在本次响应中返回，请立即保存"
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return sendError(c, 400, message, "invalid_request_error");
+    }
+  });
+
+  app.patch("/admin/keys/:id", async (c) => {
+    const body = await readJsonRecord(c);
+    const id = c.req.param("id");
+    const updated = apiKeys.update(id, body);
+    if (!updated) return sendError(c, 404, "API Key 不存在", "invalid_request_error");
+    return sendJson(c, 200, { object: "llm-gateway.api_key", data: updated });
+  });
+
+  app.delete("/admin/keys/:id", (c) => {
+    const id = c.req.param("id");
+    const revoked = apiKeys.revoke(id);
+    if (!revoked) return sendError(c, 404, "API Key 不存在", "invalid_request_error");
+    return sendJson(c, 200, { object: "llm-gateway.api_key.revoked", id });
+  });
+
+  app.all("/admin/*", (c) => sendError(c, 404, "管理接口不存在", "invalid_request_error"));
+}
+
+function registerPublicRoutes(app: Hono<GatewayEnv>): void {
+  const live = (c: Context): Response => sendJson(c, 200, {
+    status: "ok",
+    service: "llm-gateway",
+    mode: "live",
+    providers: getProviders().map((provider) => provider.id)
+  });
+  for (const path of ["/", "/health", "/health/live"]) app.get(path, live);
+  for (const path of ["/ui", "/ui/", "/ui/index.html"]) {
+    app.get(path, (c) => sendWebUi(c));
+  }
+
+  app.get("/health/ready", async (c) => {
     const auth = authStore.status(getProviders().map((provider) => provider.id));
     const models = await getModels(config);
     const ready = auth.ready && models.length > 0;
-    sendJson(res, ready ? 200 : 503, {
+    return sendJson(c, ready ? 200 : 503, {
       status: ready ? "ok" : "not_ready",
       service: "llm-gateway",
       mode: "ready",
@@ -989,25 +893,18 @@ async function route(
       models: models.length,
       providers: auth.providers
     });
-    return;
-  }
+  });
 
-  if (req.method === "GET" && url.pathname === "/health/auth") {
-    sendJson(
-      res,
-      200,
-      authStore.status(getProviders().map((provider) => provider.id))
-    );
-    return;
-  }
+  app.get("/health/auth", (c) => sendJson(
+    c,
+    200,
+    authStore.status(getProviders().map((provider) => provider.id))
+  ));
 
-  if (
-    req.method === "GET" &&
-    url.pathname === "/.well-known/llm-gateway/capabilities"
-  ) {
+  app.get("/.well-known/llm-gateway/capabilities", async (c) => {
     const auth = authStore.status(getProviders().map((provider) => provider.id));
     const models = modelsResponse(await getModels(config));
-    sendJson(res, 200, {
+    return sendJson(c, 200, {
       object: "llm-gateway.capabilities",
       version: 1,
       service: "llm-gateway",
@@ -1037,151 +934,117 @@ async function route(
       })),
       models: models.data
     });
-    return;
-  }
+  });
 
-  if (await handleAdmin(req, res, url)) return;
+  app.get("/metrics/summary", (c) => {
+    const windowMs = parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000);
+    const scope = metricScope(identityOf(c));
+    return sendJson(c, 200, scope ? metrics.summary(windowMs, scope) : metrics.summary(windowMs));
+  });
 
-  const admissionProtocol = req.method === "POST" &&
-    (url.pathname === "/v1/responses" || url.pathname === "/responses")
-    ? "responses"
-    : req.method === "POST" &&
-      (url.pathname === "/v1/chat/completions" || url.pathname === "/chat/completions")
-      ? "chat"
-      : null;
-  const admission = admissionProtocol
-    ? metrics.beginAdmission(admissionProtocol)
-    : undefined;
-  const identity = authenticateRequest(req);
-  if (!identity) {
-    metrics.finishAdmission(admission, "unknown", {
-      status: "error",
-      errorType: "authentication_error"
-    });
-    if (admission) res.setHeader("X-Request-ID", admission.id);
-    sendError(res, 401, "缺少或无效的代理 API Key", "authentication_error");
-    return;
-  }
-  if (admission) admission.apiKeyId = identity.keyId;
-
-  if (req.method === "GET" && url.pathname === "/metrics/summary") {
-    const windowMs = parseDuration(
-      url.searchParams.get("window"),
-      24 * 60 * 60 * 1000
-    );
-    const scope = metricScope(identity);
-    sendJson(res, 200, scope ? metrics.summary(windowMs, scope) : metrics.summary(windowMs));
-    return;
-  }
-
-  if (req.method === "GET" && url.pathname === "/metrics/timeseries") {
-    const windowMs = parseDuration(
-      url.searchParams.get("window"),
-      24 * 60 * 60 * 1000
-    );
-    const bucketValue = url.searchParams.get("bucket");
+  app.get("/metrics/timeseries", (c) => {
+    const windowMs = parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000);
+    const bucketValue = c.req.query("bucket");
     const bucketMs = bucketValue ? parseDuration(bucketValue, 0) : undefined;
-    const scope = metricScope(identity);
+    const scope = metricScope(identityOf(c));
     const value = scope
       ? metrics.timeseries(windowMs, bucketMs, scope)
       : bucketMs === undefined
         ? metrics.timeseries(windowMs)
         : metrics.timeseries(windowMs, bucketMs);
-    sendJson(res, 200, value);
-    return;
-  }
+    return sendJson(c, 200, value);
+  });
 
-  if (req.method === "GET" && url.pathname === "/metrics/requests") {
-    const windowMs = parseDuration(
-      url.searchParams.get("window"),
-      24 * 60 * 60 * 1000
-    );
-    const limitValue = Number(url.searchParams.get("limit"));
-    const statusValue = url.searchParams.get("status");
+  app.get("/metrics/requests", (c) => {
+    const statusValue = c.req.query("status");
     const status = statusValue === "success" ||
       statusValue === "error" ||
       statusValue === "canceled"
       ? statusValue
       : undefined;
-    sendJson(res, 200, metrics.recent({
-      windowMs,
-      limit: Number.isFinite(limitValue) ? limitValue : 50,
-      provider: url.searchParams.get("provider") || undefined,
-      model: url.searchParams.get("model") || undefined,
+    return sendJson(c, 200, metrics.recent({
+      windowMs: parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000),
+      limit: Number(c.req.query("limit")) || 50,
+      provider: c.req.query("provider") || undefined,
+      model: c.req.query("model") || undefined,
       status,
-      apiKeyId: metricScope(identity)
+      apiKeyId: metricScope(identityOf(c))
     }));
-    return;
-  }
+  });
 
-  if (req.method === "GET" && url.pathname === "/metrics/models") {
-    const windowMs = parseDuration(
-      url.searchParams.get("window"),
-      24 * 60 * 60 * 1000
-    );
-    const scope = metricScope(identity);
-    sendJson(res, 200, scope ? metrics.models(windowMs, scope) : metrics.models(windowMs));
-    return;
-  }
+  app.get("/metrics/models", (c) => {
+    const windowMs = parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000);
+    const scope = metricScope(identityOf(c));
+    return sendJson(c, 200, scope ? metrics.models(windowMs, scope) : metrics.models(windowMs));
+  });
 
-  if (req.method === "GET" && url.pathname === "/v1/models") {
-    sendJson(res, 200, modelsResponse(await getModels(config)));
-    return;
-  }
+  app.get("/v1/models", async (c) => sendJson(
+    c,
+    200,
+    modelsResponse(await getModels(config))
+  ));
 
-  if (
-    req.method === "POST" &&
-    (url.pathname === "/v1/responses" || url.pathname === "/responses")
-  ) {
-    await handleResponses(req, res, identity, admission);
-    return;
+  for (const path of ["/v1/responses", "/responses"]) {
+    app.post(path, (c) => handleResponses(c, identityOf(c), admissionOf(c)));
   }
-
-  if (
-    req.method === "POST" &&
-    (url.pathname === "/v1/chat/completions" ||
-      url.pathname === "/chat/completions")
-  ) {
-    await handleChat(req, res, identity, admission);
-    return;
+  for (const path of ["/v1/chat/completions", "/chat/completions"]) {
+    app.post(path, (c) => handleChat(c, identityOf(c), admissionOf(c)));
   }
-
-  sendError(res, 404, "Not found", "invalid_request_error");
 }
 
-let gatewayServer: Server | null = null;
+export function createGatewayApp(): Hono<GatewayEnv> {
+  const app = new Hono<GatewayEnv>();
+  app.use("*", cors({
+    origin: config.corsOrigin,
+    allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allowHeaders: ["Authorization", "Content-Type", "X-API-Key"],
+    exposeHeaders: ["X-Request-ID"]
+  }));
+  app.options("*", (c) => c.body(null, 204));
+  app.use("*", authenticate);
+  app.use("*", authorizeAdmin);
 
-export function startGateway(): Server {
+  registerAdminRoutes(app);
+  registerPublicRoutes(app);
+
+  app.onError((error, c) => {
+    const failure = asGatewayError(error, 500, "internal_error");
+    return sendError(c, failure.status, failure.message, failure.type);
+  });
+  app.notFound((c) => sendError(c, 404, "Not found", "invalid_request_error"));
+  return app;
+}
+
+let gatewayServer: ServerType | null = null;
+
+export function startGateway(): ServerType {
   if (gatewayServer) return gatewayServer;
 
-  gatewayServer = createServer((req, res) => {
-    void route(req, res).catch((error) => {
-      if (res.headersSent || res.destroyed) {
-        if (!res.writableEnded) res.end();
-        return;
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      sendError(res, 500, message, "internal_error");
-    });
-  });
+  const app = createGatewayApp();
+  const server = serve(
+    {
+      fetch: app.fetch,
+      hostname: config.bindHost,
+      port: config.port
+    },
+    () => {
+      console.log(
+        `LLM Gateway 已启动: http://${config.bindHost}:${config.port}`
+      );
+      console.log(
+        `- 兼容接口: http://${config.bindHost}:${config.port}/v1/chat/completions`
+      );
+      console.log(
+        `- Responses 接口: http://${config.bindHost}:${config.port}/v1/responses`
+      );
+      console.log(`- 模型列表: http://${config.bindHost}:${config.port}/v1/models`);
+      console.log(`- Web 控制台: http://${config.bindHost}:${config.port}/ui`);
+    }
+  );
 
-  gatewayServer.on("error", (error) => {
+  server.on("error", (error) => {
     console.error("LLM Gateway 服务错误:", error.message);
   });
-
-  gatewayServer.listen(config.port, config.bindHost, () => {
-    console.log(
-      `LLM Gateway 已启动: http://${config.bindHost}:${config.port}`
-    );
-    console.log(
-      `- 兼容接口: http://${config.bindHost}:${config.port}/v1/chat/completions`
-    );
-    console.log(
-      `- Responses 接口: http://${config.bindHost}:${config.port}/v1/responses`
-    );
-    console.log(`- 模型列表: http://${config.bindHost}:${config.port}/v1/models`);
-    console.log(`- Web 控制台: http://${config.bindHost}:${config.port}/ui`);
-  });
-
-  return gatewayServer;
+  gatewayServer = server;
+  return server;
 }

@@ -46,6 +46,8 @@
     "vite": "^8.3.0"
   },
   "dependencies": {
-    "eventsource-parser": "^3.1.1"
+    "@hono/node-server": "^2.1.1",
+    "eventsource-parser": "^3.1.1",
+    "hono": "^4.13.7"
   }
 }
