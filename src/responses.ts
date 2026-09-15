@@ -260,18 +260,48 @@ function responseFormat(value: unknown): unknown {
 }
 
 interface StoredResponse {
-  messages: JsonRecord[];
+  model: string;
+  messages: unknown[];
+  options: JsonRecord;
+  response: ResponseRequestOptions;
 }
 
 const responseHistory = new Map<string, StoredResponse>();
 const MAX_RESPONSE_HISTORY = 128;
 
-function previousMessages(id: string): JsonRecord[] | null {
+function copyValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(copyValue);
+  if (value !== null && typeof value === "object") {
+    const result: JsonRecord = {};
+    for (const [key, nested] of Object.entries(value)) {
+      result[key] = copyValue(nested);
+    }
+    return result;
+  }
+  return value;
+}
+
+function previousResponse(id: string): StoredResponse | null {
   const stored = responseHistory.get(id);
   if (!stored) return null;
   responseHistory.delete(id);
   responseHistory.set(id, stored);
-  return stored.messages.map((message) => ({ ...message }));
+  return {
+    model: stored.model,
+    messages: stored.messages.map(copyValue),
+    options: copyValue(stored.options) as JsonRecord,
+    response: copyValue(stored.response) as ResponseRequestOptions
+  };
+}
+
+function mergeResponseOptions(
+  inherited: ResponseRequestOptions | undefined,
+  current: ResponseRequestOptions
+): ResponseRequestOptions {
+  return {
+    ...(inherited ? copyValue(inherited) as ResponseRequestOptions : {}),
+    ...current
+  };
 }
 
 function responseRequestOptions(body: JsonRecord): ResponseRequestOptions {
@@ -346,46 +376,55 @@ export function normalizeResponseRequest(
   defaultModel = ""
 ): NormalizedChatRequest {
   const body = asRecord(value);
-  const response = responseRequestOptions(body);
+  const responseOverrides = responseRequestOptions(body);
+  const previous = responseOverrides.previousResponseId
+    ? previousResponse(responseOverrides.previousResponseId)
+    : null;
+  const response = mergeResponseOptions(previous?.response, responseOverrides);
   const messages: unknown[] = [];
 
   if (body.instructions !== undefined) {
     messages.push(...inputMessages(body.instructions, "system"));
   }
-  if (response.previousResponseId) {
-    const previous = previousMessages(response.previousResponseId);
+  if (responseOverrides.previousResponseId) {
     if (!previous) {
       throw new Error("previous_response_id 不存在或已过期；网关只在当前进程内保存 Responses 会话");
     }
-    messages.push(...previous);
+    messages.push(...previous.messages);
   }
   if (body.input !== undefined) {
     messages.push(...inputMessages(body.input, "user"));
   }
 
+  const inherited: JsonRecord = previous
+    ? { model: previous.model, ...previous.options }
+    : {};
   const normalized: JsonRecord = {
+    ...inherited,
     ...body,
     messages
   };
 
-  const reasoning = asRecord(body.reasoning);
+  const reasoning = asRecord(normalized.reasoning);
   if (reasoning.effort !== undefined) {
     normalized.reasoning_effort = reasoning.effort;
   }
   if (
-    body.max_output_tokens !== undefined &&
-    body.max_completion_tokens === undefined &&
-    body.max_tokens === undefined
+    normalized.max_output_tokens !== undefined &&
+    normalized.max_completion_tokens === undefined &&
+    normalized.max_tokens === undefined
   ) {
-    normalized.max_completion_tokens = body.max_output_tokens;
+    normalized.max_completion_tokens = normalized.max_output_tokens;
   }
-  if (body.tools !== undefined) normalized.tools = responseTools(body.tools);
-  if (body.tool_choice !== undefined) {
-    normalized.tool_choice = responseToolChoice(body.tool_choice);
+  if (normalized.tools !== undefined) {
+    normalized.tools = responseTools(normalized.tools);
+  }
+  if (normalized.tool_choice !== undefined) {
+    normalized.tool_choice = responseToolChoice(normalized.tool_choice);
   }
 
-  if (body.text !== undefined && body.text !== null) {
-    const text = asRecord(body.text);
+  if (normalized.text !== undefined && normalized.text !== null) {
+    const text = asRecord(normalized.text);
     const format = responseFormat(text.format);
     if (format !== undefined) normalized.response_format = format;
   }
@@ -625,6 +664,10 @@ export class ResponseAccumulator {
 
   get finishReason(): string {
     return this.chat.finishReason;
+  }
+
+  get finishSeen(): boolean {
+    return this.chat.finishSeen;
   }
 
   get usage(): JsonRecord | null {
@@ -978,11 +1021,18 @@ export function responseFailed(
 
 export function rememberResponse(
   context: ResponseContext,
+  request: NormalizedChatRequest,
   accumulator: ResponseAccumulator
 ): void {
   responseHistory.delete(context.id);
   responseHistory.set(context.id, {
-    messages: [accumulator.assistantMessage()]
+    model: context.model,
+    messages: [
+      ...request.messages.map(copyValue),
+      copyValue(accumulator.assistantMessage())
+    ],
+    options: copyValue(request.options) as JsonRecord,
+    response: copyValue(request.response ?? {}) as ResponseRequestOptions
   });
   while (responseHistory.size > MAX_RESPONSE_HISTORY) {
     const first = responseHistory.keys().next().value;

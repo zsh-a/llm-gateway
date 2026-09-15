@@ -43,6 +43,21 @@ export class UpstreamError extends Error {
   }
 }
 
+export class UpstreamStreamError extends Error {
+  public readonly status = 502;
+
+  constructor(message = "上游 SSE 在收到终止事件前关闭") {
+    super(message);
+    this.name = "UpstreamStreamError";
+  }
+}
+
+export interface UpstreamStreamResult {
+  eventCount: number;
+  sawDone: boolean;
+  sawFinish: boolean;
+}
+
 export interface ProviderAdapter {
   readonly id: ProviderId;
   readonly name: string;
@@ -64,7 +79,7 @@ export interface ProviderAdapter {
     onChunk: (chunk: UpstreamChunk) => void,
     externalSignal?: AbortSignal,
     channel?: ProviderChannel
-  ): Promise<void>;
+  ): Promise<UpstreamStreamResult>;
 }
 
 export interface ProviderChannel {
@@ -227,7 +242,7 @@ class OpenAICompatibleProvider implements ProviderAdapter {
     onChunk: (chunk: UpstreamChunk) => void,
     externalSignal?: AbortSignal,
     channel?: ProviderChannel
-  ): Promise<void> {
+  ): Promise<UpstreamStreamResult> {
     const controller = new AbortController();
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     let removeAbortListener: (() => void) | undefined;
@@ -257,7 +272,23 @@ class OpenAICompatibleProvider implements ProviderAdapter {
         throw new UpstreamError(response.status, await response.text().catch(() => ""));
       }
 
-      await consumeSseJson<UpstreamChunk>(response, onChunk);
+      let sawFinish = false;
+      const result = await consumeSseJson<UpstreamChunk>(response, (chunk) => {
+        if (chunk.choices?.some((choice) => (
+          typeof choice.finish_reason === "string" && choice.finish_reason.length > 0
+        ))) {
+          sawFinish = true;
+        }
+        onChunk(chunk);
+      });
+
+      if (!result.sawDone && !sawFinish) {
+        throw new UpstreamStreamError(
+          `上游 SSE 在收到终止事件前关闭（已收到 ${result.eventCount} 个事件）`
+        );
+      }
+
+      return { ...result, sawFinish };
     } finally {
       if (timeoutId !== undefined) clearTimeout(timeoutId);
       if (removeAbortListener) removeAbortListener();

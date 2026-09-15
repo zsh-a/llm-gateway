@@ -2,6 +2,11 @@ import { createParser } from "eventsource-parser";
 
 export type SseDataHandler<T> = (value: T) => void;
 
+export interface SseConsumeResult {
+  eventCount: number;
+  sawDone: boolean;
+}
+
 function errorMessage(value: Error | null): string {
   return value ? value.message : "unknown error";
 }
@@ -14,11 +19,13 @@ function errorMessage(value: Error | null): string {
 export async function consumeSseJson<T>(
   response: Response,
   onData: SseDataHandler<T>
-): Promise<void> {
+): Promise<SseConsumeResult> {
   if (!response.body) throw new Error("上游响应没有可读取的 body");
 
   let parserError: Error | null = null;
   let dataError: Error | null = null;
+  let eventCount = 0;
+  let sawDone = false;
   const parser = createParser({
     maxBufferSize: 8 * 1024 * 1024,
     onError: (error) => {
@@ -26,7 +33,12 @@ export async function consumeSseJson<T>(
     },
     onEvent: (event) => {
       const payload = event.data.trim();
-      if (!payload || payload === "[DONE]") return;
+      if (!payload) return;
+      if (payload === "[DONE]") {
+        sawDone = true;
+        return;
+      }
+      eventCount += 1;
 
       try {
         onData(JSON.parse(payload) as T);
@@ -55,4 +67,6 @@ export async function consumeSseJson<T>(
 
   if (dataError) throw new Error("上游 SSE JSON 无效: " + errorMessage(dataError));
   if (parserError) throw new Error("上游 SSE 格式无效: " + errorMessage(parserError));
+
+  return { eventCount, sawDone };
 }

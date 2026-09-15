@@ -44,6 +44,8 @@ import {
 import {
   getProviders,
   UpstreamError,
+  UpstreamStreamError,
+  type UpstreamStreamResult,
   type UpstreamChunk
 } from "./provider.js";
 import type { JsonRecord, NormalizedChatRequest } from "./types.js";
@@ -160,6 +162,7 @@ function finishMetric(
 interface MetricAccumulator {
   usage: unknown;
   finishReason: string;
+  finishSeen: boolean;
   toolCalls: unknown[];
 }
 
@@ -172,7 +175,7 @@ function outcomeFor(
     status,
     errorType,
     usage: accumulator.usage,
-    finishReason: accumulator.finishReason,
+    finishReason: accumulator.finishSeen ? accumulator.finishReason : undefined,
     toolCalls: accumulator.toolCalls.filter(Boolean).length
   };
 }
@@ -226,6 +229,13 @@ function upstreamError(error: unknown): {
   message: string;
   type: string;
 } {
+  if (error instanceof UpstreamStreamError) {
+    return {
+      status: error.status,
+      message: error.message,
+      type: "upstream_stream_incomplete"
+    };
+  }
   if (error instanceof UpstreamError) {
     return {
       status: error.status,
@@ -254,7 +264,7 @@ async function streamUpstream(
   onChunk: (chunk: UpstreamChunk) => void,
   externalSignal: AbortSignal | undefined,
   onChannel: (channel: ChannelConfig) => void
-): Promise<ChannelConfig> {
+): Promise<{ channel: ChannelConfig; stream: UpstreamStreamResult }> {
   let lastError: unknown = null;
   for (let index = 0; index < route.candidates.length; index += 1) {
     const candidate = route.candidates[index];
@@ -272,7 +282,7 @@ async function streamUpstream(
     let emitted = false;
     onChannel(candidate.channel);
     try {
-      await route.provider.streamChat(
+      const stream = await route.provider.streamChat(
         snapshot.headers,
         { ...request, model: candidate.upstreamModel },
         config,
@@ -283,7 +293,10 @@ async function streamUpstream(
         externalSignal,
         candidate.channel
       );
-      return candidate.channel;
+      if (!stream.sawDone && !stream.sawFinish) {
+        throw new UpstreamStreamError();
+      }
+      return { channel: candidate.channel, stream };
     } catch (error) {
       lastError = error;
       if (
@@ -503,7 +516,7 @@ function handleResponseStreaming(
       for (const value of responseFinishEvents(context, accumulator)) {
         writeEvent(value);
       }
-      rememberResponse(context, accumulator);
+      rememberResponse(context, request, accumulator);
       await writer.flush();
       outcome = outcomeFor(accumulator, "success");
     } catch (error) {
@@ -547,7 +560,7 @@ async function handleResponseNonStreaming(
       (channel) => { metric.channelId = channel.id; }
     );
     const response = sendJson(c, 200, accumulator.response(context));
-    rememberResponse(context, accumulator);
+    rememberResponse(context, request, accumulator);
     outcome = outcomeFor(accumulator, "success");
     return response;
   } catch (error) {
