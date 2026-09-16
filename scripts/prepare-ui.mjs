@@ -1,13 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const projectRoot = resolve(process.cwd());
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const webRoot = resolve(projectRoot, "web");
-const outputDir = resolve(projectRoot, "dist/web");
-const bundleDir = resolve(projectRoot, ".generated");
-const bundleFile = resolve(bundleDir, "web-bundle.ts");
+const outputDir = resolve(projectRoot, ".build/web");
+const bundleDir = resolve(projectRoot, ".build/generated");
+const bundleFile = resolve(bundleDir, "web-bundle.generated.ts");
 
 function serialize(value) {
   return JSON.stringify(value)

@@ -11,7 +11,7 @@ export default defineConfig({
   root: webRoot,
   plugins: [react(), tailwindcss()],
   build: {
-    outDir: resolve(projectRoot, "dist/web"),
+    outDir: resolve(projectRoot, ".build/web"),
     emptyOutDir: true,
     assetsDir: "assets",
     cssCodeSplit: false,

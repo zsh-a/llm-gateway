@@ -43,9 +43,11 @@ src/web-ui.ts       Web 控制台嵌入入口
 web/src/            React + Tailwind + shadcn/ui 控制台源码
 src/main.ts         serve / desktop 模式入口
 src/management.ts   doctor / models / export 管理命令
-scripts/auth.ts     一次性认证引导工具
+scripts/auth.ts         一次性认证引导工具
+scripts/clean.mjs       清理构建、测试和临时产物
 scripts/prepare-ui.mjs  Vite 构建并将 Web 资源内嵌到 Perry
-tests/              Node 原生回归测试（编译后使用 node:test）
+tests/                  Node 原生回归测试（编译后使用 node:test）
+.build/                 构建阶段临时目录（不发布、不提交）
 ```
 
 `serve` 模式只运行网关；`desktop` 模式由同一个入口托管 Gateway 子进程并打开同源 Web 控制台。控制台直接由 Gateway 提供，不需要额外的静态服务器、前端运行时或 CORS 配置。
@@ -75,7 +77,7 @@ npm run build
 
 ```text
 dist/llm-gateway
-dist/scripts/auth.js
+dist/auth/scripts/auth.js
 ```
 
 常用管理命令：

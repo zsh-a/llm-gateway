@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
   statSync
@@ -93,10 +94,13 @@ if (!entry || !output) {
 const workspace = findWorkspace();
 if (!workspace) failWithoutWorkspace();
 
+const outputPath = resolve(projectRoot, output);
+mkdirSync(dirname(outputPath), { recursive: true });
+
 console.log(`Perry workspace: ${workspace}`);
 const result = spawnSync(
   "perry",
-  ["compile", entry, "-o", output],
+  ["compile", entry, "-o", outputPath],
   {
     cwd: projectRoot,
     env: { ...process.env, PERRY_WORKSPACE_ROOT: workspace },

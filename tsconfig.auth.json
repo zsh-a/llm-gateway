@@ -4,7 +4,7 @@
     "noEmit": false,
     "noEmitOnError": true,
     "rootDir": ".",
-    "outDir": "dist",
+    "outDir": "dist/auth",
     "declaration": false,
     "sourceMap": false
   },

@@ -1,6 +1,7 @@
 dist/
+.build/
+.generated/
 node_modules/
-.generated/web-bundle.ts
 .test-dist/
 cookie.txt
 .env
