@@ -8,7 +8,6 @@ export interface GatewayModel {
   capabilities?: Record<string, boolean>;
   reasoning?: boolean;
   reasoningEfforts?: Record<string, string | null>;
-  reasoning_efforts?: Record<string, string | null>;
   defaultReasoningEffort?: string;
   maxTokens?: number;
   max_output_tokens?: number;

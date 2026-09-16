@@ -25,6 +25,8 @@
 
 ```text
 src/config.ts       轻量网关配置
+src/deps.ts         GatewayDeps 组合根，集中构造网关服务
+src/json.ts         JSON 边界的统一运行时窄化工具
 src/provider.ts     Provider 注册表、默认上游和统一传输
 src/auth-store.ts   网关只读/失效认证缓存
 src/channels.ts     Channel 配置、模型映射、优先级和权重选择
@@ -32,7 +34,7 @@ src/key-store.ts    虚拟 API Key、模型权限、RPM 与 Token 配额
 src/models.ts       多 Provider 模型聚合和自动路由
 src/sse.ts          基于 eventsource-parser 的 SSE/JSON 流解析器
 src/stream.ts       Provider chunk → StreamEvent 统一中间表示
-src/tool-history.ts 工具调用历史规范化、旧格式转换和链路校验
+src/tool-history.ts 工具调用历史规范化和链路校验
 src/metrics.ts      请求生命周期、延迟和 Token 用量统计
 src/openai.ts       OpenAI 请求/响应适配
 src/responses.ts    Responses 输入/输出适配
@@ -43,6 +45,7 @@ src/main.ts         serve / desktop 模式入口
 src/management.ts   doctor / models / export 管理命令
 scripts/auth.ts     一次性认证引导工具
 scripts/prepare-ui.mjs  Vite 构建并将 Web 资源内嵌到 Perry
+tests/              Node 原生回归测试（编译后使用 node:test）
 ```
 
 `serve` 模式只运行网关；`desktop` 模式由同一个入口托管 Gateway 子进程并打开同源 Web 控制台。控制台直接由 Gateway 提供，不需要额外的静态服务器、前端运行时或 CORS 配置。
@@ -54,6 +57,7 @@ Web 控制台使用 Tailwind CSS v4 和 shadcn/ui 风格的本地组件，资源
 ```bash
 npm install
 npm run typecheck
+npm test
 npm run build
 ```
 
@@ -258,6 +262,7 @@ PROXY_ADMIN_KEY=admin-change-me
 RUNTIME_DIR=./.runtime
 AUTH_CACHE_DIR=./.runtime/auth
 MODEL_CACHE_DIR=./.runtime/models
+WORKBUDDY_MODEL_FILE= # 可选：覆盖 WorkBuddy 本地模型目录文件
 MODEL_DISCOVERY=true
 METRICS_MAX_RECORDS=2000
 CHANNELS_FILE=./.runtime/channels.json
@@ -295,10 +300,10 @@ GET  /admin/metrics/timeseries
 GET  /admin/metrics/requests
 GET  /admin/metrics/models
 POST /v1/chat/completions
-POST /chat/completions
 POST /v1/responses
-POST /responses
 ```
+
+公开协议路由统一使用 `/v1` 前缀，不保留无前缀别名。
 
 网关始终以流式方式请求上游；客户端使用 `stream: false` 时由网关聚合为普通 JSON，同时保留工具调用、思维内容和 usage（若上游提供）。
 
@@ -338,11 +343,11 @@ curl -X POST http://127.0.0.1:3000/admin/keys \
 
 网关不会伪装未实现的协议能力：Chat Completions 当前明确限制 `n=1`，Responses 对 `background`、`conversation`、`include`、`max_tool_calls`、`prompt`、`service_tier` 和 `stream_options` 等未实现字段返回 400；不支持 Chat 的音频、图片模型也会在目录中标记，并拒绝被当作对话模型调用。
 
-Chat Completions 流式请求支持标准 `stream_options.include_usage`：网关会在 `[DONE]` 前输出 `choices: []` 的最终 usage chunk，并完整合并现代 `tool_calls`（包括 `index`、函数名和分片 `function.arguments`）。旧式 `function_call` 会在统一内部流事件层转换为现代工具调用格式。
+Chat Completions 流式请求支持标准 `stream_options.include_usage`：网关会在 `[DONE]` 前输出 `choices: []` 的最终 usage chunk，并完整合并 `tool_calls`（包括 `index`、函数名和分片 `function.arguments`）。
 
-工具调用历史在转发前会统一为现代 `tool_calls` / `tool` 消息，并校验每个工具调用是否有且只有一个匹配的 `tool_call_id` 结果；缺失、重复、孤立或 ID 不匹配的历史会由网关直接返回 400，不再交给上游返回模糊错误。旧式 `function_call` / `function` 历史会在安全可映射时自动转换。
+工具调用历史在转发前会统一为 `tool_calls` / `tool` 消息，并校验每个工具调用是否有且只有一个匹配的 `tool_call_id` 结果；缺失、重复、孤立或 ID 不匹配的历史会由网关直接返回 400，不再交给上游返回模糊错误。Chat 请求只接受这套标准工具消息格式。
 
-Responses API 会将 `input`、`instructions` 和 Responses 风格的 function tools 适配为上游所需的 Chat Completions 请求，并返回兼容的 `response` 对象。`stream: true` 时输出标准 Responses SSE 事件，包含 `response.reasoning_text.delta/done`、文本、拒答和函数调用的增量/完成事件（如 `response.function_call_arguments.delta/done`）。`text.format` 会转换为上游的结构化输出参数；`previous_response_id` 支持当前网关进程内的轻量会话链，网关重启后会按无状态服务返回 400，而不是静默丢弃。
+Responses API 会将 `input`、`instructions` 和 Responses 风格的 function tools 适配为上游所需的 Chat Completions 请求，并返回标准 `response` 对象。`stream: true` 时输出标准 Responses SSE 事件，包含 `response.reasoning_text.delta/done`、文本、拒答和函数调用的增量/完成事件（如 `response.function_call_arguments.delta/done`）。`text.format` 会转换为上游的结构化输出参数；`previous_response_id` 支持当前网关进程内的轻量会话链，网关重启后会按无状态服务返回 400，而不是静默丢弃。
 
 调用示例：
 

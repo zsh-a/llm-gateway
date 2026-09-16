@@ -20,7 +20,8 @@
     "models": "./dist/llm-gateway models",
     "export:harness": "./dist/llm-gateway export deepseek-harness",
     "auth": "npm run build:auth && node dist/scripts/auth.js",
-    "typecheck": "npm run prepare:ui && tsc --noEmit && tsc -p web/tsconfig.json --noEmit"
+    "test": "tsc -p tsconfig.test.json && node --test .test-dist/tests/*.test.js",
+    "typecheck": "tsc --noEmit && tsc -p web/tsconfig.json --noEmit"
   },
   "engines": {
     "node": ">=20.19.0"

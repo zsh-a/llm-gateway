@@ -1,4 +1,5 @@
 import { normalizeEffort } from "./config.js";
+import { asRecord } from "./json.js";
 import {
   StreamAccumulator,
   type StreamEvent,
@@ -17,12 +18,6 @@ export interface StreamContext {
   id: string;
   created: number;
   model: string;
-}
-
-function asRecord(value: unknown): JsonRecord {
-  return value !== null && typeof value === "object"
-    ? value as JsonRecord
-    : {};
 }
 
 function asBoolean(value: unknown): boolean {
@@ -70,10 +65,11 @@ export function normalizeChatRequest(
   defaultModel = ""
 ): NormalizedChatRequest {
   const body = asRecord(value);
-  for (const key of ["reasoning_effort", "reasoningEffort"]) {
-    if (body[key] !== undefined && typeof body[key] !== "string") {
-      throw new Error(`${key} 必须是字符串`);
-    }
+  if (body.reasoningEffort !== undefined) {
+    throw new Error("请求仅支持 reasoning_effort");
+  }
+  if (body.reasoning_effort !== undefined && typeof body.reasoning_effort !== "string") {
+    throw new Error("reasoning_effort 必须是字符串");
   }
   const model = typeof body.model === "string" && body.model.trim()
     ? body.model.trim()
@@ -85,10 +81,8 @@ export function normalizeChatRequest(
   const reasoning = asRecord(body.reasoning);
   const effortValue = body.reasoning_effort !== undefined
     ? body.reasoning_effort
-    : body.reasoningEffort !== undefined
-      ? body.reasoningEffort
-      : reasoning.effort !== undefined
-        ? reasoning.effort
+    : reasoning.effort !== undefined
+      ? reasoning.effort
     : body.thinking === false || thinking.type === "disabled"
       ? "none"
       : body.thinking === true
@@ -102,7 +96,6 @@ export function normalizeChatRequest(
     effort: normalizeEffort(effortValue),
     reasoningEffortExplicit:
       body.reasoning_effort !== undefined ||
-      body.reasoningEffort !== undefined ||
       body.reasoning !== undefined ||
       body.thinking !== undefined,
     options: requestOptions(body)

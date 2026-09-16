@@ -1,8 +1,7 @@
 import { existsSync } from "node:fs";
 
-import { getAuthStore } from "./auth-store.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
-import { getModels } from "./models.js";
+import { createGatewayDeps, type GatewayDeps } from "./deps.js";
 import { modelsResponse } from "./openai.js";
 import { getProviders } from "./provider.js";
 import type { ModelDescriptor, ReasoningEfforts } from "./types.js";
@@ -85,25 +84,31 @@ function harnessConfig(models: ModelDescriptor[], config: GatewayConfig): string
   return lines.join("\n") + "\n";
 }
 
-export async function printModels(): Promise<void> {
-  const config = loadConfig();
-  const models = await getModels(config);
+export async function printModels(
+  config: GatewayConfig = loadConfig(),
+  deps: GatewayDeps = createGatewayDeps(config)
+): Promise<void> {
+  const models = await deps.catalog.get();
   console.log(JSON.stringify(modelsResponse(models), null, 2));
 }
 
-export async function exportDeepSeekHarness(): Promise<void> {
-  const config = loadConfig();
-  const models = (await getModels(config)).filter(
+export async function exportDeepSeekHarness(
+  config: GatewayConfig = loadConfig(),
+  deps: GatewayDeps = createGatewayDeps(config)
+): Promise<void> {
+  const models = (await deps.catalog.get()).filter(
     (model) => model.capabilities?.chat !== false
   );
   process.stdout.write(harnessConfig(models, config));
 }
 
-export async function runDoctor(): Promise<number> {
-  const config = loadConfig();
+export async function runDoctor(
+  config: GatewayConfig = loadConfig(),
+  deps: GatewayDeps = createGatewayDeps(config)
+): Promise<number> {
   const providers = getProviders();
-  const auth = getAuthStore(config).status(providers.map((provider) => provider.id));
-  const models = await getModels(config);
+  const auth = deps.authStore.status(providers.map((provider) => provider.id));
+  const models = await deps.catalog.get();
   const endpoint = formatEndpoint(config);
   const issues: string[] = [];
 

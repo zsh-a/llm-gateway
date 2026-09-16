@@ -1,4 +1,5 @@
 import { ChatAccumulator, normalizeChatRequest } from "./openai.js";
+import { asRecord, asString, asTrimmedString, serializedValue } from "./json.js";
 import type { UpstreamChunk } from "./provider.js";
 import type { StreamEvent, StreamToolCall } from "./stream.js";
 import type {
@@ -10,29 +11,9 @@ import type {
 } from "./types.js";
 import { responsesUsage } from "./usage.js";
 
-function asRecord(value: unknown): JsonRecord {
-  return value !== null && typeof value === "object"
-    ? value as JsonRecord
-    : {};
-}
-
-function stringValue(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function serializedValue(value: unknown): string {
-  if (typeof value === "string") return value;
-  try {
-    const result = JSON.stringify(value);
-    return result === undefined ? String(value) : result;
-  } catch {
-    return String(value);
-  }
-}
-
 function roleValue(value: unknown, fallback: string): string {
-  const role = stringValue(value);
-  return ["system", "developer", "user", "assistant", "tool", "function"].includes(role)
+  const role = asTrimmedString(value) ?? "";
+  return ["system", "developer", "user", "assistant"].includes(role)
     ? role
     : fallback;
 }
@@ -57,7 +38,7 @@ function chatContent(value: unknown): unknown {
   let textOnly = true;
   for (const item of value) {
     const record = asRecord(item);
-    const type = stringValue(record.type);
+    const type = asTrimmedString(record.type) ?? "";
 
     if (type === "input_text" || type === "output_text" || type === "text") {
       const text = typeof record.text === "string" ? record.text : "";
@@ -66,7 +47,7 @@ function chatContent(value: unknown): unknown {
     }
 
     if (type === "input_image") {
-      const imageUrl = stringValue(record.image_url);
+      const imageUrl = asTrimmedString(record.image_url) ?? "";
       if (imageUrl) {
         const image: JsonRecord = { url: imageUrl };
         if (record.detail !== undefined) image.detail = record.detail;
@@ -77,7 +58,7 @@ function chatContent(value: unknown): unknown {
     }
 
     if (type === "input_file") {
-      const fileId = stringValue(record.file_id);
+      const fileId = asTrimmedString(record.file_id) ?? "";
       parts.push("[file input" + (fileId ? ": " + fileId : "") + "]");
       continue;
     }
@@ -104,7 +85,7 @@ function inputItemToMessage(
   }
 
   const item = asRecord(value);
-  const type = stringValue(item.type);
+  const type = asTrimmedString(item.type) ?? "";
   if (type === "reasoning" || type === "item_reference") return null;
 
   if (isFunctionCallOutputType(type)) {
@@ -112,18 +93,20 @@ function inputItemToMessage(
       role: "tool",
       content: serializedValue(item.output ?? "")
     };
-    const callId = stringValue(item.call_id) || stringValue(item.id);
-    if (callId) message.tool_call_id = callId;
+    const callId = asTrimmedString(item.call_id);
+    if (!callId) throw new Error("Responses function_call_output 缺少 call_id");
+    message.tool_call_id = callId;
     return message;
   }
 
   if (isFunctionCallType(type)) {
-    const callId = stringValue(item.call_id) || stringValue(item.id);
+    const callId = asTrimmedString(item.call_id);
+    if (!callId) throw new Error("Responses function_call 缺少 call_id");
     const functionCall: JsonRecord = {
       id: callId,
       type: "function",
       function: {
-        name: stringValue(item.name),
+        name: asTrimmedString(item.name) ?? "",
         arguments: serializedValue(item.arguments ?? item.input ?? "{}")
       }
     };
@@ -140,26 +123,32 @@ function inputItemToMessage(
     item.content !== undefined ||
     item.text !== undefined
   ) {
+    if (item.role === "tool") {
+      throw new Error("Responses 工具结果必须使用 function_call_output");
+    }
+    if (
+      item.tool_calls !== undefined ||
+      item.function_call !== undefined ||
+      item.tool_call_id !== undefined ||
+      item.call_id !== undefined
+    ) {
+      throw new Error("Responses message 不接受 Chat 工具字段");
+    }
     const message: JsonRecord = {
       role: roleValue(item.role, fallbackRole),
       content: item.content !== undefined
         ? chatContent(item.content)
-        : stringValue(item.text)
+        : asString(item.text) ?? ""
     };
-    if (item.name !== undefined) message.name = item.name;
-    if (item.tool_calls !== undefined) message.tool_calls = item.tool_calls;
-    if (item.function_call !== undefined) message.function_call = item.function_call;
-    if (item.tool_call_id !== undefined) message.tool_call_id = item.tool_call_id;
-    if (item.call_id !== undefined) message.call_id = item.call_id;
     return message;
   }
 
   return null;
 }
 
-function inputMessages(value: unknown, fallbackRole: string): unknown[] {
+function inputMessages(value: unknown, fallbackRole: string): JsonRecord[] {
   const values = Array.isArray(value) ? value : [value];
-  const messages: unknown[] = [];
+  const messages: JsonRecord[] = [];
   const pendingToolCalls: JsonRecord[] = [];
 
   const flushToolCalls = (): void => {
@@ -172,7 +161,7 @@ function inputMessages(value: unknown, fallbackRole: string): unknown[] {
   };
 
   for (const item of values) {
-    const type = stringValue(asRecord(item).type);
+    const type = asTrimmedString(asRecord(item).type) ?? "";
     if (isFunctionCallType(type)) {
       const message = inputItemToMessage(item, fallbackRole);
       const toolCalls = message?.tool_calls;
@@ -200,15 +189,15 @@ function responseTools(value: unknown): unknown {
   return value.map((item) => {
     const tool = asRecord(item);
     if (
-      stringValue(tool.type) !== "function" ||
+      (asTrimmedString(tool.type) ?? "") !== "function" ||
       tool.function !== undefined ||
-      !stringValue(tool.name)
+      !asTrimmedString(tool.name)
     ) {
       return item;
     }
 
     const functionValue: JsonRecord = {
-      name: stringValue(tool.name),
+      name: asTrimmedString(tool.name) ?? "",
       description: tool.description,
       parameters: tool.parameters ?? {}
     };
@@ -223,13 +212,13 @@ function responseToolChoice(value: unknown): unknown {
   }
   const choice = asRecord(value);
   if (
-    stringValue(choice.type) === "function" &&
+    (asTrimmedString(choice.type) ?? "") === "function" &&
     choice.function === undefined &&
-    stringValue(choice.name)
+    asTrimmedString(choice.name)
   ) {
     return {
       type: "function",
-      function: { name: stringValue(choice.name) }
+      function: { name: asTrimmedString(choice.name) }
     };
   }
   return value;
@@ -238,12 +227,12 @@ function responseToolChoice(value: unknown): unknown {
 function responseFormat(value: unknown): unknown {
   if (value === undefined || value === null) return undefined;
   const format = asRecord(value);
-  const type = stringValue(format.type);
+  const type = asTrimmedString(format.type) ?? "";
 
   if (type === "text") return undefined;
   if (type === "json_object") return { type: "json_object" };
   if (type === "json_schema") {
-    const name = stringValue(format.name);
+    const name = asTrimmedString(format.name) ?? "";
     if (!name || format.schema === undefined) {
       throw new Error("text.format=json_schema 必须包含 name 和 schema");
     }
@@ -261,7 +250,7 @@ function responseFormat(value: unknown): unknown {
 
 interface StoredResponse {
   model: string;
-  messages: unknown[];
+  messages: JsonRecord[];
   options: JsonRecord;
   response: ResponseRequestOptions;
 }
@@ -281,6 +270,10 @@ function copyValue(value: unknown): unknown {
   return value;
 }
 
+function copyRecord(value: JsonRecord): JsonRecord {
+  return copyValue(value) as JsonRecord;
+}
+
 function previousResponse(id: string): StoredResponse | null {
   const stored = responseHistory.get(id);
   if (!stored) return null;
@@ -288,7 +281,7 @@ function previousResponse(id: string): StoredResponse | null {
   responseHistory.set(id, stored);
   return {
     model: stored.model,
-    messages: stored.messages.map(copyValue),
+    messages: stored.messages.map(copyRecord),
     options: copyValue(stored.options) as JsonRecord,
     response: copyValue(stored.response) as ResponseRequestOptions
   };
@@ -332,7 +325,7 @@ function responseRequestOptions(body: JsonRecord): ResponseRequestOptions {
   if (body.previous_response_id === null) {
     options.previousResponseId = null;
   } else if (body.previous_response_id !== undefined) {
-    const id = stringValue(body.previous_response_id);
+    const id = asTrimmedString(body.previous_response_id) ?? "";
     if (!id) throw new Error("previous_response_id 必须是非空字符串或 null");
     options.previousResponseId = id;
   }
@@ -381,7 +374,7 @@ export function normalizeResponseRequest(
     ? previousResponse(responseOverrides.previousResponseId)
     : null;
   const response = mergeResponseOptions(previous?.response, responseOverrides);
-  const messages: unknown[] = [];
+  const messages: JsonRecord[] = [];
 
   if (body.instructions !== undefined) {
     messages.push(...inputMessages(body.instructions, "system"));
@@ -1028,8 +1021,8 @@ export function rememberResponse(
   responseHistory.set(context.id, {
     model: context.model,
     messages: [
-      ...request.messages.map(copyValue),
-      copyValue(accumulator.assistantMessage())
+      ...request.messages.map(copyRecord),
+      copyRecord(accumulator.assistantMessage())
     ],
     options: copyValue(request.options) as JsonRecord,
     response: copyValue(request.response ?? {}) as ResponseRequestOptions

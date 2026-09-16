@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { dirname } from "node:path";
+import { asNumber, asPositiveInt, asTrimmedString } from "./json.js";
 
 export interface ApiKeyIdentity {
   keyId: string;
@@ -65,18 +66,9 @@ interface CreateApiKeyInput {
   quotaTokens?: unknown;
 }
 
-function stringValue(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function positiveInt(value: unknown): number | null {
-  const number = typeof value === "number" ? value : Number(value);
-  return Number.isInteger(number) && number > 0 ? number : null;
-}
-
 function timestampValue(value: unknown): number | null {
-  const number = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(number) && number > 0 ? number : null;
+  const number = asNumber(value);
+  return number !== undefined && number > 0 ? number : null;
 }
 
 function modelList(value: unknown): string[] {
@@ -94,23 +86,23 @@ function hashSecret(secret: string): string {
 function normalizeStoredKey(value: unknown): StoredApiKey | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as { [key: string]: unknown };
-  const id = stringValue(record.id);
-  const hash = stringValue(record.hash);
+  const id = asTrimmedString(record.id) ?? "";
+  const hash = asTrimmedString(record.hash) ?? "";
   if (!id || !hash) return null;
-  const quotaTokens = positiveInt(record.quotaTokens ?? record.quota_tokens);
-  const usedTokens = positiveInt(record.usedTokens ?? record.used_tokens) ?? 0;
-  const createdAt = timestampValue(record.createdAt ?? record.created_at) ?? Date.now();
+  const quotaTokens = asPositiveInt(record.quotaTokens) ?? null;
+  const usedTokens = asPositiveInt(record.usedTokens) ?? 0;
+  const createdAt = timestampValue(record.createdAt) ?? Date.now();
   return {
     id,
-    name: stringValue(record.name) || id,
-    prefix: stringValue(record.prefix) || "sk-gw-",
+    name: asTrimmedString(record.name) || id,
+    prefix: asTrimmedString(record.prefix) || "sk-gw-",
     hash,
     enabled: record.enabled !== false,
     createdAt,
-    expiresAt: timestampValue(record.expiresAt ?? record.expires_at),
-    allowedModels: modelList(record.allowedModels ?? record.allowed_models),
-    rpmLimit: positiveInt(record.rpmLimit ?? record.rpm_limit),
-    tpmLimit: positiveInt(record.tpmLimit ?? record.tpm_limit),
+    expiresAt: timestampValue(record.expiresAt),
+    allowedModels: modelList(record.allowedModels),
+    rpmLimit: asPositiveInt(record.rpmLimit) ?? null,
+    tpmLimit: asPositiveInt(record.tpmLimit) ?? null,
     quotaTokens,
     usedTokens,
   };
@@ -258,16 +250,16 @@ export class ApiKeyStore {
     const secret = `sk-gw-${randomBytes(24).toString("base64url")}`;
     const key: StoredApiKey = {
       id: `key_${randomBytes(8).toString("hex")}`,
-      name: stringValue(input.name) || "未命名 Key",
+      name: asTrimmedString(input.name) || "未命名 Key",
       prefix: secret.slice(0, 15),
       hash: hashSecret(secret),
       enabled: true,
       createdAt: now,
       expiresAt: timestampValue(input.expiresAt),
       allowedModels: modelList(input.allowedModels),
-      rpmLimit: positiveInt(input.rpmLimit),
-      tpmLimit: positiveInt(input.tpmLimit),
-      quotaTokens: positiveInt(input.quotaTokens),
+      rpmLimit: asPositiveInt(input.rpmLimit) ?? null,
+      tpmLimit: asPositiveInt(input.tpmLimit) ?? null,
+      quotaTokens: asPositiveInt(input.quotaTokens) ?? null,
       usedTokens: 0
     };
     this.keys!.push(key);
@@ -288,14 +280,20 @@ export class ApiKeyStore {
     this.ensureLoaded();
     const key = this.keys!.find((item) => item.id === id);
     if (!key) return null;
-    if (input.name !== undefined) key.name = stringValue(input.name) || key.name;
+    if (input.name !== undefined) key.name = asTrimmedString(input.name) || key.name;
     if (input.enabled !== undefined && typeof input.enabled === "boolean") {
       key.enabled = input.enabled;
     }
     if (input.allowedModels !== undefined) key.allowedModels = modelList(input.allowedModels);
-    if (input.rpmLimit !== undefined) key.rpmLimit = positiveInt(input.rpmLimit);
-    if (input.tpmLimit !== undefined) key.tpmLimit = positiveInt(input.tpmLimit);
-    if (input.quotaTokens !== undefined) key.quotaTokens = positiveInt(input.quotaTokens);
+    if (input.rpmLimit !== undefined) {
+      key.rpmLimit = asPositiveInt(input.rpmLimit) ?? null;
+    }
+    if (input.tpmLimit !== undefined) {
+      key.tpmLimit = asPositiveInt(input.tpmLimit) ?? null;
+    }
+    if (input.quotaTokens !== undefined) {
+      key.quotaTokens = asPositiveInt(input.quotaTokens) ?? null;
+    }
     if (input.expiresAt !== undefined) key.expiresAt = timestampValue(input.expiresAt);
     this.persist();
     return this.publicKey(key);

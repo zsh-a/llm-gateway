@@ -1,5 +1,6 @@
 export type ReasoningEffort =
   | "none"
+  | "minimal"
   | "low"
   | "medium"
   | "high"
@@ -19,6 +20,7 @@ export interface GatewayConfig {
   modelAllowlist: string[];
   modelCacheTtlMs: number;
   modelCacheDir: string;
+  modelFiles?: { [providerId: string]: string };
   defaultModel: string;
   metricsMaxRecords: number;
   channelsFile: string;
@@ -29,24 +31,13 @@ export interface GatewayConfig {
 
 const VALID_EFFORTS: ReasoningEffort[] = [
   "none",
+  "minimal",
   "low",
   "medium",
   "high",
   "xhigh",
   "max"
 ];
-
-const EFFORT_ALIASES: { [key: string]: ReasoningEffort } = {
-  minimal: "low",
-  ultra: "max",
-  "无": "none",
-  "低": "low",
-  "中": "medium",
-  "高": "high",
-  "超高": "xhigh",
-  "极高": "max",
-  "最大": "max"
-};
 
 function env(name: string, fallback: string): string {
   const value = process.env[name];
@@ -78,12 +69,12 @@ export function normalizeEffort(
     return normalized as ReasoningEffort;
   }
 
-  return EFFORT_ALIASES[normalized] ?? EFFORT_ALIASES[value.trim()] ?? fallback;
+  return fallback;
 }
 
 export function loadConfig(): GatewayConfig {
   const runtimeDir = env("RUNTIME_DIR", `${process.cwd()}/.runtime`);
-  return {
+  const config: GatewayConfig = {
     port: positiveInt("PORT", 3000),
     bindHost: env("BIND_HOST", "127.0.0.1"),
     requestTimeoutMs: positiveInt("REQUEST_TIMEOUT_MS", 180000),
@@ -98,6 +89,14 @@ export function loadConfig(): GatewayConfig {
     modelAllowlist: listEnv("MODEL_ALLOWLIST", []),
     modelCacheTtlMs: positiveInt("MODEL_CACHE_TTL_MS", 5 * 60 * 1000),
     modelCacheDir: env("MODEL_CACHE_DIR", `${runtimeDir}/models`),
+    modelFiles: {
+      workbuddy: env(
+        "WORKBUDDY_MODEL_FILE",
+        process.platform === "darwin"
+          ? "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/product.json"
+          : ""
+      )
+    },
     defaultModel: env("DEFAULT_MODEL", ""),
     metricsMaxRecords: positiveInt("METRICS_MAX_RECORDS", 2000),
     channelsFile: env("CHANNELS_FILE", `${runtimeDir}/channels.json`),
@@ -105,4 +104,19 @@ export function loadConfig(): GatewayConfig {
     metricsFile: env("METRICS_FILE", `${runtimeDir}/metrics.json`),
     adminKey: process.env.PROXY_ADMIN_KEY ?? ""
   };
+
+  // Desktop mode resolves configuration in the parent process. Reusing that
+  // snapshot keeps the child from silently switching runtime directories when
+  // its environment or working directory differs.
+  const resolved = process.env.LLM_GATEWAY_RESOLVED_CONFIG;
+  if (!resolved) return config;
+  try {
+    const value: unknown = JSON.parse(resolved);
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      return { ...config, ...value as Partial<GatewayConfig> };
+    }
+  } catch {
+    // Fall back to normal environment parsing if the snapshot is malformed.
+  }
+  return config;
 }

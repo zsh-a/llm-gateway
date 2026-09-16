@@ -1,4 +1,5 @@
 import type { JsonRecord } from "./types.js";
+import { asRecord, asTrimmedString, serializedValue } from "./json.js";
 
 interface PendingToolCall {
   id: string;
@@ -10,26 +11,6 @@ interface NormalizedAssistant {
   calls: PendingToolCall[];
 }
 
-function asRecord(value: unknown): JsonRecord {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as JsonRecord
-    : {};
-}
-
-function stringValue(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function serializedValue(value: unknown): string {
-  if (typeof value === "string") return value;
-  try {
-    const result = JSON.stringify(value);
-    return result === undefined ? String(value) : result;
-  } catch {
-    return String(value);
-  }
-}
-
 function invalid(message: string): never {
   throw new Error("工具调用历史无效: " + message);
 }
@@ -37,8 +18,7 @@ function invalid(message: string): never {
 function normalizeToolCall(
   value: unknown,
   messageIndex: number,
-  callIndex: number,
-  fallbackId?: string
+  callIndex: number
 ): JsonRecord {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     invalid(`messages[${messageIndex}].tool_calls[${callIndex}] 必须是对象`);
@@ -46,8 +26,11 @@ function normalizeToolCall(
 
   const call = asRecord(value);
   const functionValue = asRecord(call.function);
-  const id = stringValue(call.id) || stringValue(call.call_id) || fallbackId;
-  const name = stringValue(functionValue.name);
+  if (call.call_id !== undefined) {
+    invalid(`messages[${messageIndex}].tool_calls[${callIndex}] 只支持 id`);
+  }
+  const id = asTrimmedString(call.id);
+  const name = asTrimmedString(functionValue.name) ?? "";
   if (!id) {
     invalid(`messages[${messageIndex}].tool_calls[${callIndex}] 缺少 id`);
   }
@@ -56,9 +39,8 @@ function normalizeToolCall(
   }
 
   const normalized: JsonRecord = { ...call };
-  delete normalized.call_id;
   normalized.id = id;
-  normalized.type = stringValue(call.type) || "function";
+  normalized.type = asTrimmedString(call.type) || "function";
   normalized.function = {
     ...functionValue,
     name,
@@ -72,10 +54,8 @@ function normalizeAssistant(
   messageIndex: number
 ): NormalizedAssistant {
   const modernCalls = message.tool_calls;
-  const legacyCall = message.function_call;
-
-  if (modernCalls !== undefined && legacyCall !== undefined && legacyCall !== null) {
-    invalid(`messages[${messageIndex}] 同时包含 tool_calls 和 function_call`);
+  if (message.function_call !== undefined) {
+    invalid(`messages[${messageIndex}] assistant 消息只支持 tool_calls`);
   }
 
   if (modernCalls !== undefined) {
@@ -88,44 +68,17 @@ function normalizeAssistant(
     ));
     const ids = new Set<string>();
     const pending = calls.map((call) => {
-      const id = stringValue(call.id);
+      const id = asTrimmedString(call.id) ?? "";
       const functionValue = asRecord(call.function);
       if (ids.has(id)) {
         invalid(`messages[${messageIndex}] 重复的 tool_call id: ${id}`);
       }
       ids.add(id);
-      return { id, name: stringValue(functionValue.name) };
+      return { id, name: asTrimmedString(functionValue.name) ?? "" };
     });
     return {
       message: { ...message, tool_calls: calls },
       calls: pending
-    };
-  }
-
-  if (legacyCall !== undefined && legacyCall !== null) {
-    const legacy = asRecord(legacyCall);
-    const name = stringValue(legacy.name);
-    if (!name) invalid(`messages[${messageIndex}].function_call 缺少 name`);
-    const id = `legacy_call_${messageIndex}`;
-    const call = normalizeToolCall(
-      {
-        id,
-        type: "function",
-        function: {
-          name,
-          arguments: legacy.arguments ?? {}
-        }
-      },
-      messageIndex,
-      0,
-      id
-    );
-    const normalized = { ...message };
-    delete normalized.function_call;
-    normalized.tool_calls = [call];
-    return {
-      message: normalized,
-      calls: [{ id, name }]
     };
   }
 
@@ -145,30 +98,15 @@ function normalizeToolResult(
     invalid(`messages[${messageIndex}] 存在孤立的工具结果`);
   }
 
-  const role = stringValue(message.role);
+  const role = asTrimmedString(message.role) ?? "";
   if (role === "function") {
-    const name = stringValue(message.name);
-    const matches = name
-      ? pending.filter((call) => call.name === name)
-      : pending;
-    if (matches.length !== 1) {
-      invalid(
-        `messages[${messageIndex}] 无法匹配旧式 function 结果` +
-        (name ? `: ${name}` : "")
-      );
-    }
-
-    const call = matches[0];
-    const normalized: JsonRecord = {
-      ...message,
-      role: "tool",
-      tool_call_id: call.id
-    };
-    delete normalized.name;
-    return { message: normalized, call };
+    invalid(`messages[${messageIndex}] 工具结果必须使用 role=tool`);
   }
 
-  const id = stringValue(message.tool_call_id) || stringValue(message.call_id);
+  if (message.call_id !== undefined) {
+    invalid(`messages[${messageIndex}] 工具结果只支持 tool_call_id`);
+  }
+  const id = asTrimmedString(message.tool_call_id);
   if (!id) {
     invalid(`messages[${messageIndex}] 工具结果缺少 tool_call_id`);
   }
@@ -185,7 +123,6 @@ function normalizeToolResult(
     role: "tool",
     tool_call_id: id
   };
-  delete normalized.call_id;
   return { message: normalized, call };
 }
 
@@ -206,8 +143,8 @@ function requireToolResults(
  * every assistant tool call has exactly one matching result before another
  * conversation message is accepted.
  */
-export function normalizeToolHistory(messages: unknown[]): unknown[] {
-  const normalized: unknown[] = [];
+export function normalizeToolHistory(messages: unknown[]): JsonRecord[] {
+  const normalized: JsonRecord[] = [];
   let pending: PendingToolCall[] = [];
 
   for (let index = 0; index < messages.length; index += 1) {
@@ -217,7 +154,7 @@ export function normalizeToolHistory(messages: unknown[]): unknown[] {
     }
 
     const message = asRecord(value);
-    const role = stringValue(message.role);
+    const role = asTrimmedString(message.role) ?? "";
 
     if (role === "assistant") {
       requireToolResults(index, pending);
@@ -227,7 +164,11 @@ export function normalizeToolHistory(messages: unknown[]): unknown[] {
       continue;
     }
 
-    if (role === "tool" || role === "function") {
+    if (role === "function") {
+      invalid(`messages[${index}] 工具结果必须使用 role=tool`);
+    }
+
+    if (role === "tool") {
       const result = normalizeToolResult(message, index, pending);
       normalized.push(result.message);
       pending = pending.filter((call) => call.id !== result.call.id);
@@ -235,7 +176,7 @@ export function normalizeToolHistory(messages: unknown[]): unknown[] {
     }
 
     requireToolResults(index, pending);
-    normalized.push(value);
+    normalized.push(message);
   }
 
   requireToolResults(messages.length, pending);

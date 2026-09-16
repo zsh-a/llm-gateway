@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { loadConfig } from "./config.js";
+import { loadConfig, type GatewayConfig } from "./config.js";
 import {
   exportDeepSeekHarness,
   printModels,
@@ -44,9 +44,13 @@ function resolveMode(argument: string | undefined): GatewayMode {
 }
 
 // Keep the HTTP loop in a dedicated child process for the desktop launch mode.
-function startManagedGateway(): ChildProcess {
+function startManagedGateway(config: GatewayConfig): ChildProcess {
   const child = spawn(process.execPath, ["serve"], {
-    env: process.env,
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      LLM_GATEWAY_RESOLVED_CONFIG: JSON.stringify(config)
+    },
     stdio: "inherit"
   });
 
@@ -84,18 +88,17 @@ function attachGatewayLifecycle(child: ChildProcess): void {
   });
 }
 
-function webUiUrl(): string {
+function webUiUrl(config: GatewayConfig): string {
   const configured = process.env.GATEWAY_URL?.trim();
   if (configured) return `${configured.replace(/\/$/, "")}/ui`;
-  const config = loadConfig();
   const host = config.bindHost === "0.0.0.0" || config.bindHost === "::"
     ? "127.0.0.1"
     : config.bindHost;
   return `http://${host}:${config.port}/ui`;
 }
 
-function openWebUi(): void {
-  const url = webUiUrl();
+function openWebUi(config: GatewayConfig): void {
+  const url = webUiUrl(config);
   const command = process.platform === "darwin"
     ? "open"
     : process.platform === "win32"
@@ -108,10 +111,11 @@ function openWebUi(): void {
 }
 
 function runWebMode(): void {
-  const child = startManagedGateway();
+  const config = loadConfig();
+  const child = startManagedGateway(config);
   attachGatewayLifecycle(child);
   console.log("Web 模式已启动：控制台和 Gateway 由同一命令统一管理");
-  setTimeout(openWebUi, 500);
+  setTimeout(() => openWebUi(config), 500);
 }
 
 async function runMode(): Promise<void> {

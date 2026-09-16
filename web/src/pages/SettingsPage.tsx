@@ -76,7 +76,7 @@ export function SettingsPage({
           <CardContent><div className="flex items-center justify-between rounded-xl border border-border/70 bg-muted/15 p-3.5"><div className="flex items-center gap-3"><div className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary">{theme === "dark" ? <Moon className="size-4" /> : <Sun className="size-4" />}</div><div><div className="text-sm font-medium">{theme === "dark" ? "深色模式" : "浅色模式"}</div><div className="text-[11px] text-muted-foreground">Tailwind design tokens</div></div></div><Button variant="outline" onClick={onTheme}>{theme === "dark" ? "切换浅色" : "切换深色"}</Button></div></CardContent>
         </Card>
         <Card>
-          <CardHeader><CardTitle>运行时信息</CardTitle><CardDescription>当前控制台和兼容接口地址</CardDescription></CardHeader>
+          <CardHeader><CardTitle>运行时信息</CardTitle><CardDescription>当前控制台和 API 地址</CardDescription></CardHeader>
           <CardContent className="space-y-3 text-xs"><InfoRow label="控制台" value={location.origin + "/ui"} /><InfoRow label="Chat Completions" value={location.origin + "/v1/chat/completions"} /><InfoRow label="Responses" value={location.origin + "/v1/responses"} /><InfoRow label="Models" value={location.origin + "/v1/models"} /></CardContent>
           <CardFooter className="border-t border-border/60 pt-4 text-[11px] text-muted-foreground"><Server className="mr-1.5 size-3.5" />首次认证独立完成，Gateway 只消费认证缓存。</CardFooter>
         </Card>
@@ -84,4 +84,3 @@ export function SettingsPage({
     </div>
   );
 }
-

@@ -1,5 +1,6 @@
 import type { AuthHeaders } from "./auth-store.js";
 import type { GatewayConfig } from "./config.js";
+import { asRecord } from "./json.js";
 import { consumeSseJson } from "./sse.js";
 import type {
   JsonRecord,
@@ -7,7 +8,7 @@ import type {
   NormalizedChatRequest
 } from "./types.js";
 
-export type ProviderId = "mimo" | "workbuddy";
+export type ProviderId = string;
 
 export interface UpstreamDelta {
   role?: string;
@@ -16,7 +17,6 @@ export interface UpstreamDelta {
   reasoning?: string;
   thinking?: string;
   tool_calls?: unknown;
-  function_call?: unknown;
   refusal?: string | null;
 }
 
@@ -91,17 +91,28 @@ type RequestBodyBuilder = (
   request: NormalizedChatRequest
 ) => JsonRecord;
 
-function asRecord(value: unknown): JsonRecord {
-  return value !== null && typeof value === "object"
-    ? value as JsonRecord
-    : {};
+interface OpenAICompatibleProviderOptions {
+  id: ProviderId;
+  name: string;
+  defaultModel: string;
+  upstreamUrl: string;
+  modelListUrl: string;
+  modelFile: string;
+  fallbackModelIds: string[];
+  authHosts: string[];
+  authPaths: string[];
+  authMethods: string[];
+  captureHeaders: string[];
+  clientCandidates: string[];
+  buildBody: RequestBodyBuilder;
+  describeModel?: (model: ModelDescriptor) => ModelDescriptor;
 }
 
-function upstreamMessages(messages: unknown[]): unknown[] {
+function upstreamMessages(messages: JsonRecord[]): JsonRecord[] {
   return messages.map((value) => {
     const message = asRecord(value);
     if (message.role !== "developer") return value;
-    // DeepSeek/WorkBuddy-compatible endpoints generally accept `system` but
+    // DeepSeek/WorkBuddy endpoints generally accept `system` but
     // reject the OpenAI reasoning-model `developer` role. Harness uses the
     // latter for system prompts once reasoning is enabled, so normalize it at
     // this single provider boundary.
@@ -161,6 +172,7 @@ function workbuddyRequestBody(request: NormalizedChatRequest): JsonRecord {
 
 const MIMO_REASONING_EFFORTS = {
   off: null,
+  minimal: "low",
   low: "low",
   medium: "medium",
   high: "high",
@@ -218,22 +230,37 @@ function workbuddyModelDescriptor(model: ModelDescriptor): ModelDescriptor {
 }
 
 class OpenAICompatibleProvider implements ProviderAdapter {
-  constructor(
-    public readonly id: ProviderId,
-    public readonly name: string,
-    public readonly defaultModel: string,
-    public readonly upstreamUrl: string,
-    public readonly modelListUrl: string,
-    public readonly modelFile: string,
-    public readonly fallbackModelIds: string[],
-    public readonly authHosts: string[],
-    public readonly authPaths: string[],
-    public readonly authMethods: string[],
-    public readonly captureHeaders: string[],
-    public readonly clientCandidates: string[],
-    private readonly buildBody: RequestBodyBuilder,
-    public readonly describeModel?: (model: ModelDescriptor) => ModelDescriptor
-  ) {}
+  public readonly id: ProviderId;
+  public readonly name: string;
+  public readonly defaultModel: string;
+  public readonly upstreamUrl: string;
+  public readonly modelListUrl: string;
+  public readonly modelFile: string;
+  public readonly fallbackModelIds: string[];
+  public readonly authHosts: string[];
+  public readonly authPaths: string[];
+  public readonly authMethods: string[];
+  public readonly captureHeaders: string[];
+  public readonly clientCandidates: string[];
+  public readonly describeModel?: (model: ModelDescriptor) => ModelDescriptor;
+  private readonly buildBody: RequestBodyBuilder;
+
+  constructor(options: OpenAICompatibleProviderOptions) {
+    this.id = options.id;
+    this.name = options.name;
+    this.defaultModel = options.defaultModel;
+    this.upstreamUrl = options.upstreamUrl;
+    this.modelListUrl = options.modelListUrl;
+    this.modelFile = options.modelFile;
+    this.fallbackModelIds = options.fallbackModelIds;
+    this.authHosts = options.authHosts;
+    this.authPaths = options.authPaths;
+    this.authMethods = options.authMethods;
+    this.captureHeaders = options.captureHeaders;
+    this.clientCandidates = options.clientCandidates;
+    this.buildBody = options.buildBody;
+    this.describeModel = options.describeModel;
+  }
 
   async streamChat(
     authHeaders: AuthHeaders,
@@ -296,12 +323,6 @@ class OpenAICompatibleProvider implements ProviderAdapter {
   }
 }
 
-function workbuddyModelFile(): string {
-  return process.platform === "darwin"
-    ? "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/product.json"
-    : "";
-}
-
 function macApplicationBinaries(
   application: string,
   executables: string[]
@@ -319,38 +340,38 @@ function macApplicationBinaries(
 }
 
 const providers: ProviderAdapter[] = [
-  new OpenAICompatibleProvider(
-    "mimo",
-    "MiMo",
-    "mimo-x-pro-preview",
-    "https://mimo-server-cn.xiaomimimo.com/api/route/chat/completions",
-    "https://mimo-server-cn.xiaomimimo.com/api/model/list",
-    "",
-    ["mimo-x-pro-preview", "mimo-pro", "mimo-flash"],
-    ["mimo-server-cn.xiaomimimo.com"],
-    ["/api/route/chat/completions"],
-    ["POST"],
-    ["cookie", "authorization", "x-*"],
-    macApplicationBinaries("Xiaomi MiMo", ["Xiaomi MiMo", "Electron"]),
-    mimoRequestBody,
-    mimoModelDescriptor
-  ),
-  new OpenAICompatibleProvider(
-    "workbuddy",
-    "WorkBuddy",
-    "default",
-    "https://copilot.tencent.com/v2/chat/completions",
-    "",
-    workbuddyModelFile(),
-    ["default"],
-    ["copilot.tencent.com"],
-    ["/v3/config", "/v2/report", "/v2/chat/completions"],
-    ["GET", "POST"],
-    ["cookie", "authorization", "x-*"],
-    macApplicationBinaries("WorkBuddy", ["Electron", "WorkBuddy"]),
-    workbuddyRequestBody,
-    workbuddyModelDescriptor
-  )
+  new OpenAICompatibleProvider({
+    id: "mimo",
+    name: "MiMo",
+    defaultModel: "mimo-x-pro-preview",
+    upstreamUrl: "https://mimo-server-cn.xiaomimimo.com/api/route/chat/completions",
+    modelListUrl: "https://mimo-server-cn.xiaomimimo.com/api/model/list",
+    modelFile: "",
+    fallbackModelIds: ["mimo-x-pro-preview", "mimo-pro", "mimo-flash"],
+    authHosts: ["mimo-server-cn.xiaomimimo.com"],
+    authPaths: ["/api/route/chat/completions"],
+    authMethods: ["POST"],
+    captureHeaders: ["cookie", "authorization", "x-*"],
+    clientCandidates: macApplicationBinaries("Xiaomi MiMo", ["Xiaomi MiMo", "Electron"]),
+    buildBody: mimoRequestBody,
+    describeModel: mimoModelDescriptor
+  }),
+  new OpenAICompatibleProvider({
+    id: "workbuddy",
+    name: "WorkBuddy",
+    defaultModel: "default",
+    upstreamUrl: "https://copilot.tencent.com/v2/chat/completions",
+    modelListUrl: "",
+    modelFile: "",
+    fallbackModelIds: ["default"],
+    authHosts: ["copilot.tencent.com"],
+    authPaths: ["/v3/config", "/v2/report", "/v2/chat/completions"],
+    authMethods: ["GET", "POST"],
+    captureHeaders: ["cookie", "authorization", "x-*"],
+    clientCandidates: macApplicationBinaries("WorkBuddy", ["Electron", "WorkBuddy"]),
+    buildBody: workbuddyRequestBody,
+    describeModel: workbuddyModelDescriptor
+  })
 ];
 
 const providerMap: { [key: string]: ProviderAdapter } = {};

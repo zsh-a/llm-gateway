@@ -1,4 +1,5 @@
 import type { UpstreamChunk } from "./provider.js";
+import { asRecord, asString, serializedValue } from "./json.js";
 import type { JsonRecord } from "./types.js";
 
 export interface StreamToolCall {
@@ -27,26 +28,6 @@ export type StreamEvent =
   | { type: "finish"; reason: string }
   | { type: "usage"; usage: JsonRecord };
 
-function asRecord(value: unknown): JsonRecord {
-  return value !== null && typeof value === "object"
-    ? value as JsonRecord
-    : {};
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-function serializedValue(value: unknown): string {
-  if (typeof value === "string") return value;
-  try {
-    const result = JSON.stringify(value);
-    return result === undefined ? String(value) : result;
-  } catch {
-    return String(value);
-  }
-}
-
 function indexValue(value: unknown, fallback: number): number {
   const index = Number(value);
   return Number.isInteger(index) && index >= 0 ? index : fallback;
@@ -67,10 +48,10 @@ function toolCallEvents(value: unknown): StreamEvent[] {
     return {
       type: "tool_call",
       index: indexValue(incoming.index, itemIndex),
-      id: stringValue(incoming.id),
-      callId: stringValue(incoming.call_id),
-      toolType: stringValue(incoming.type),
-      name: stringValue(functionValue.name),
+      id: asString(incoming.id),
+      callId: asString(incoming.call_id),
+      toolType: asString(incoming.type),
+      name: asString(functionValue.name),
       arguments: argumentsValue
     };
   });
@@ -96,9 +77,6 @@ export function toStreamEvents(chunk: UpstreamChunk): StreamEvent[] {
 
   if (delta?.tool_calls !== undefined && delta.tool_calls !== null) {
     events.push(...toolCallEvents(delta.tool_calls));
-  } else if (delta?.function_call !== undefined && delta.function_call !== null) {
-    // Older providers still emit function_call. Normalize it to modern tool calls.
-    events.push(...toolCallEvents({ index: 0, type: "function", function: delta.function_call }));
   }
 
   if (choice?.finish_reason) {

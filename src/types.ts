@@ -53,7 +53,7 @@ export interface ResponseRequestOptions {
 export interface NormalizedChatRequest {
   model: string;
   modelDescriptor?: ModelDescriptor;
-  messages: unknown[];
+  messages: JsonRecord[];
   stream: boolean;
   effort: ReasoningEffort;
   reasoningEffortExplicit: boolean;

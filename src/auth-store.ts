@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
-import type { GatewayConfig } from "./config.js";
+import { asRecord } from "./json.js";
 
 export interface AuthHeaders {
   [key: string]: string;
@@ -38,12 +38,6 @@ interface StoredAuth {
   version: 1;
   headers: AuthHeaders;
   capturedAt: number;
-}
-
-function asRecord(value: unknown): { [key: string]: unknown } {
-  return value !== null && typeof value === "object"
-    ? value as { [key: string]: unknown }
-    : {};
 }
 
 function headerEntries(value: unknown): Array<[string, string]> {
@@ -184,15 +178,4 @@ export class AuthStore {
 
     return { ready, providers };
   }
-}
-
-let defaultStore: AuthStore | null = null;
-let defaultConfig: GatewayConfig | null = null;
-
-export function getAuthStore(config: GatewayConfig): AuthStore {
-  if (!defaultStore || defaultConfig !== config) {
-    defaultConfig = config;
-    defaultStore = new AuthStore(config.authCacheDir);
-  }
-  return defaultStore;
 }

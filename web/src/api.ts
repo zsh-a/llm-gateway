@@ -129,7 +129,7 @@ export class GatewayApi {
 
   private reasoningOptions(model: GatewayModel, effort?: string): Record<string, unknown> {
     if (!effort) return {};
-    const levels = model.reasoningEfforts ?? model.reasoning_efforts ?? {};
+    const levels = model.reasoningEfforts ?? {};
     const upstreamEffort = levels[effort];
     if (upstreamEffort === null || effort === "off") {
       return { thinking: { type: "disabled" } };
@@ -208,9 +208,8 @@ export class GatewayApi {
       let payload: {
         choices?: Array<{
           delta?: {
-            content?: string | Array<{ text?: string; content?: string }> | null;
+            content?: string | Array<{ text?: string }> | null;
             reasoning_content?: string;
-            reasoning?: string;
           };
           finish_reason?: string | null;
         }>;
@@ -224,9 +223,9 @@ export class GatewayApi {
       const choice = payload.choices?.[0];
       const delta = choice?.delta;
       const content = Array.isArray(delta?.content)
-        ? delta.content.map((part) => part.text ?? part.content ?? "").join("")
+        ? delta.content.map((part) => part.text ?? "").join("")
         : delta?.content ?? "";
-      const reasoning = delta?.reasoning_content ?? delta?.reasoning ?? "";
+      const reasoning = delta?.reasoning_content ?? "";
       if (content || reasoning || payload.usage || choice?.finish_reason) {
         onUpdate({
           content: content || undefined,

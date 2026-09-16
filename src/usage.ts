@@ -1,4 +1,5 @@
 import type { JsonRecord } from "./types.js";
+import { asNonNegativeNumber, asRecord } from "./json.js";
 
 export interface TokenBreakdown {
   cachedTokens?: number;
@@ -27,22 +28,9 @@ export interface TokenUsage {
   totalTokens?: number;
 }
 
-function asRecord(value: unknown): JsonRecord {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as JsonRecord
-    : {};
-}
-
-function numberValue(value: unknown): number | undefined {
-  if (value === null || value === undefined || value === "") return undefined;
-  if (typeof value !== "number" && typeof value !== "string") return undefined;
-  const number = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(number) && number >= 0 ? number : undefined;
-}
-
 function firstNumber(record: JsonRecord, keys: readonly string[]): number | undefined {
   for (const key of keys) {
-    const value = numberValue(record[key]);
+    const value = asNonNegativeNumber(record[key]);
     if (value !== undefined) return value;
   }
   return undefined;
@@ -60,7 +48,7 @@ function maxNumberFrom(records: JsonRecord[], keys: readonly string[]): number |
   let maximum: number | undefined;
   for (const record of records) {
     for (const key of keys) {
-      const value = numberValue(record[key]);
+      const value = asNonNegativeNumber(record[key]);
       if (value === undefined) continue;
       maximum = maximum === undefined ? value : Math.max(maximum, value);
     }

@@ -9,9 +9,15 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { getAuthStore, type AuthHeaders } from "./auth-store.js";
+import { type AuthHeaders, type AuthStore } from "./auth-store.js";
 import type { GatewayConfig } from "./config.js";
-import { getChannelStore, getChannels, type ChannelConfig } from "./channels.js";
+import { type ChannelConfig, type ChannelStore } from "./channels.js";
+import {
+  asBool,
+  asRecord,
+  asPositiveNumber,
+  asTrimmedString
+} from "./json.js";
 import {
   getProvider,
   getProviders,
@@ -49,26 +55,6 @@ export interface ModelRoute {
   publicModel: string;
 }
 
-function asRecord(value: unknown): JsonRecord {
-  return value !== null && typeof value === "object"
-    ? value as JsonRecord
-    : {};
-}
-
-function stringValue(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function numberValue(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value > 0
-    ? value
-    : undefined;
-}
-
-function booleanValue(value: unknown): boolean | undefined {
-  return typeof value === "boolean" ? value : undefined;
-}
-
 function reasoningEffortsValue(value: unknown): ReasoningEfforts | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
@@ -85,6 +71,7 @@ function reasoningEffortsValue(value: unknown): ReasoningEfforts | undefined {
 
 const GENERIC_REASONING_EFFORTS: ReasoningEfforts = {
   off: null,
+  minimal: "minimal",
   low: "low",
   medium: "medium",
   high: "high",
@@ -94,6 +81,7 @@ const GENERIC_REASONING_EFFORTS: ReasoningEfforts = {
 
 const DEEPSEEK_V4_REASONING_EFFORTS: ReasoningEfforts = {
   off: null,
+  minimal: "low",
   low: "low",
   medium: "high",
   high: "high",
@@ -106,7 +94,7 @@ function modelId(value: unknown): string {
 
   const record = asRecord(value);
   for (const key of ["id", "modelName", "model"]) {
-    const id = stringValue(record[key]);
+    const id = asTrimmedString(record[key]) ?? "";
     if (id) return id;
   }
   return "";
@@ -123,17 +111,17 @@ function modelDescriptor(
   const record = asRecord(value);
   const recordCapabilities = asRecord(record.capabilities);
   const capabilities: ModelCapabilities = {};
-  const toolCalling = booleanValue(
+  const toolCalling = asBool(
     record.supportsToolCall ?? record.supportsToolCalls ?? record.tool_calling ??
       recordCapabilities.toolCalling ?? recordCapabilities.tool_calling
   );
-  const images = booleanValue(
+  const images = asBool(
     record.supportsImages ?? record.supportsVision ?? record.vision ??
       recordCapabilities.images ?? recordCapabilities.vision
   );
   const rawReasoning = record.supportsReasoning ?? record.reasoning ??
     record.thinking ?? recordCapabilities.reasoning ?? recordCapabilities.thinking;
-  const reasoning = booleanValue(
+  const reasoning = asBool(
     rawReasoning
   );
   const nestedReasoning = asRecord(record.reasoning);
@@ -154,10 +142,10 @@ function modelDescriptor(
   if (reasoningEnabled !== undefined) capabilities.reasoning = reasoningEnabled;
   if (Object.keys(capabilities).length > 0) capabilities.chat = true;
 
-  const name = stringValue(
+  const name = asTrimmedString(
     record.displayName ?? record.label ?? record.name ?? record.title
   );
-  const ownedBy = stringValue(
+  const ownedBy = asTrimmedString(
     record.owned_by ?? record.ownedBy ?? record.vendor ?? record.provider
   ) || defaultOwnedBy;
   const descriptor: ModelDescriptor = { id, ownedBy };
@@ -172,7 +160,7 @@ function modelDescriptor(
       : { ...GENERIC_REASONING_EFFORTS };
   }
 
-  const defaultReasoningEffort = stringValue(
+  const defaultReasoningEffort = asTrimmedString(
     record.defaultReasoningEffort ?? record.default_reasoning_effort ??
       nestedReasoning.defaultEffort ?? nestedReasoning.default_effort ??
       nestedReasoning.effort
@@ -181,10 +169,10 @@ function modelDescriptor(
     descriptor.defaultReasoningEffort = defaultReasoningEffort;
   }
 
-  const maxInputTokens = numberValue(
+  const maxInputTokens = asPositiveNumber(
     record.maxInputTokens ?? record.max_input_tokens ?? record.contextWindow
   );
-  const maxOutputTokens = numberValue(
+  const maxOutputTokens = asPositiveNumber(
     record.maxOutputTokens ?? record.max_output_tokens ?? record.maxTokens
   );
   if (maxInputTokens !== undefined) descriptor.maxInputTokens = maxInputTokens;
@@ -299,11 +287,23 @@ function writeCachedModels(file: string, models: ModelDescriptor[]): void {
   }
 }
 
-class ModelCatalog {
-  private memory: { models: ModelDescriptor[]; loadedAt: number } | null = null;
-  private loading: Promise<ModelDescriptor[]> | null = null;
+export interface ModelCatalogDeps {
+  authStore: AuthStore;
+  channels: ChannelStore;
+}
 
-  constructor(private readonly config: GatewayConfig) {}
+export class ModelCatalog {
+  private memory: { models: ModelDescriptor[]; loadedAt: number } | null = null;
+  private loading: {
+    generation: number;
+    promise: Promise<ModelDescriptor[]>;
+  } | null = null;
+  private generation = 0;
+
+  constructor(
+    private readonly config: GatewayConfig,
+    private readonly deps: ModelCatalogDeps
+  ) {}
 
   async get(): Promise<ModelDescriptor[]> {
     if (
@@ -313,20 +313,28 @@ class ModelCatalog {
       return this.memory.models;
     }
 
-    if (this.loading) return this.loading;
-    this.loading = this.load();
+    if (this.loading && this.loading.generation === this.generation) {
+      return this.loading.promise;
+    }
+
+    const generation = this.generation;
+    const promise = this.load();
+    this.loading = { generation, promise };
     try {
-      const models = await this.loading;
-      this.memory = { models, loadedAt: Date.now() };
+      const models = await promise;
+      if (generation === this.generation) {
+        this.memory = { models, loadedAt: Date.now() };
+      }
       return models;
     } finally {
-      this.loading = null;
+      if (this.loading?.promise === promise) this.loading = null;
     }
   }
 
   private async load(): Promise<ModelDescriptor[]> {
+    const channels = this.deps.channels.list();
     const providerModels = await Promise.all(
-      getProviders().map((provider) => this.loadProvider(provider))
+      getProviders().map((provider) => this.loadProvider(provider, channels))
     );
     const rawModels: ModelDescriptor[] = [];
     for (const models of providerModels) rawModels.push(...models);
@@ -345,7 +353,7 @@ class ModelCatalog {
 
     const aliases: ModelDescriptor[] = [];
     const aliasIds = new Set(visible.map((model) => model.publicId ?? model.id));
-    for (const channel of getChannels(this.config)) {
+    for (const channel of channels) {
       if (!channel.enabled) continue;
       const provider = getProvider(channel.providerId);
       if (!provider) continue;
@@ -372,16 +380,18 @@ class ModelCatalog {
   }
 
   private async loadProvider(
-    provider: ProviderAdapter
+    provider: ProviderAdapter,
+    channels: ChannelConfig[]
   ): Promise<ModelDescriptor[]> {
-    if (!getChannels(this.config).some((channel) => (
+    if (!channels.some((channel) => (
       channel.enabled && channel.providerId === provider.id
     ))) {
       return [];
     }
     const ownedBy = provider.name;
+    const modelFile = this.config.modelFiles?.[provider.id] ?? provider.modelFile;
     const local = filterModels(
-      readModelsFile(provider.modelFile, ownedBy),
+      readModelsFile(modelFile, ownedBy),
       this.config.modelAllowlist
     );
     if (local.length > 0) return this.withProvider(local, provider);
@@ -425,7 +435,7 @@ class ModelCatalog {
   }
 
   private async fetchRemote(provider: ProviderAdapter): Promise<ModelDescriptor[]> {
-    const snapshot = getAuthStore(this.config).get(provider.id);
+    const snapshot = this.deps.authStore.get(provider.id);
     const auth: AuthHeaders | null = snapshot?.headers ?? null;
     if (!auth) return [];
 
@@ -442,94 +452,82 @@ class ModelCatalog {
       return [];
     }
   }
-}
 
-let defaultCatalog: ModelCatalog | null = null;
-let defaultConfig: GatewayConfig | null = null;
-
-function catalogFor(config: GatewayConfig): ModelCatalog {
-  if (!defaultCatalog || defaultConfig !== config) {
-    defaultConfig = config;
-    defaultCatalog = new ModelCatalog(config);
-  }
-  return defaultCatalog;
-}
-
-export async function getModels(config: GatewayConfig): Promise<ModelDescriptor[]> {
-  return catalogFor(config).get();
-}
-
-function routeFromModel(
-  config: GatewayConfig,
-  model: ModelDescriptor,
-  provider: ProviderAdapter
-): ModelRoute | null {
-  const publicModel = model.publicId ?? model.id;
-  const candidates = getChannelStore(config).selectCandidates(provider.id, publicModel, model.id);
-  if (candidates.length === 0) return null;
-  const selection = candidates[0];
-  return {
-    provider,
-    channel: selection.channel,
-    candidates,
-    model,
-    upstreamModel: selection.upstreamModel,
-    publicModel
-  };
-}
-
-export async function resolveModel(
-  config: GatewayConfig,
-  requestedModel: string
-): Promise<ModelRoute | null> {
-  const models = await getModels(config);
-  const requested = requestedModel.trim();
-  const exact = models.find((model) => model.publicId === requested);
-  if (exact && exact.providerId) {
-    const provider = getProvider(exact.providerId);
-    if (provider) return routeFromModel(config, exact, provider);
+  clear(): void {
+    this.generation += 1;
+    this.memory = null;
   }
 
-  const separator = requested.indexOf("/");
-  if (separator > 0) {
-    const provider = getProvider(requested.slice(0, separator));
-    const upstreamModel = requested.slice(separator + 1).trim();
-    if (provider && upstreamModel) {
-      const candidates = getChannelStore(config)
-        .selectCandidates(provider.id, requested, upstreamModel);
-      if (candidates.length === 0) return null;
-      const selection = candidates[0];
-      return {
-        provider,
-        channel: selection.channel,
-        candidates,
-        model: {
-          id: upstreamModel,
-          providerId: provider.id,
-          publicId: requested,
-          ownedBy: provider.name
-        },
-        upstreamModel: selection.upstreamModel,
-        publicModel: requested
-      };
+  async resolve(requestedModel: string): Promise<ModelRoute | null> {
+    const models = await this.get();
+    const requested = requestedModel.trim();
+    const exact = models.find((model) => model.publicId === requested);
+    if (exact && exact.providerId) {
+      const provider = getProvider(exact.providerId);
+      if (provider) return this.routeFromModel(exact, provider);
     }
+
+    const separator = requested.indexOf("/");
+    if (separator > 0) {
+      const provider = getProvider(requested.slice(0, separator));
+      const upstreamModel = requested.slice(separator + 1).trim();
+      if (provider && upstreamModel) {
+        const candidates = this.deps.channels.selectCandidates(
+          provider.id,
+          requested,
+          upstreamModel
+        );
+        if (candidates.length === 0) return null;
+        const selection = candidates[0];
+        return {
+          provider,
+          channel: selection.channel,
+          candidates,
+          model: {
+            id: upstreamModel,
+            providerId: provider.id,
+            publicId: requested,
+            ownedBy: provider.name
+          },
+          upstreamModel: selection.upstreamModel,
+          publicModel: requested
+        };
+      }
+    }
+
+    const rawMatches = models.filter((model) => model.id === requested);
+    if (rawMatches.length === 1 && rawMatches[0].providerId) {
+      const provider = getProvider(rawMatches[0].providerId);
+      if (provider) return this.routeFromModel(rawMatches[0], provider);
+    }
+
+    if (!requested && models.length > 0 && models[0].providerId) {
+      const provider = getProvider(models[0].providerId);
+      if (provider) return this.routeFromModel(models[0], provider);
+    }
+
+    return null;
   }
 
-  const rawMatches = models.filter((model) => model.id === requested);
-  if (rawMatches.length === 1 && rawMatches[0].providerId) {
-    const provider = getProvider(rawMatches[0].providerId);
-    if (provider) return routeFromModel(config, rawMatches[0], provider);
+  private routeFromModel(
+    model: ModelDescriptor,
+    provider: ProviderAdapter
+  ): ModelRoute | null {
+    const publicModel = model.publicId ?? model.id;
+    const candidates = this.deps.channels.selectCandidates(
+      provider.id,
+      publicModel,
+      model.id
+    );
+    if (candidates.length === 0) return null;
+    const selection = candidates[0];
+    return {
+      provider,
+      channel: selection.channel,
+      candidates,
+      model,
+      upstreamModel: selection.upstreamModel,
+      publicModel
+    };
   }
-
-  if (!requested && models.length > 0 && models[0].providerId) {
-    const provider = getProvider(models[0].providerId);
-    if (provider) return routeFromModel(config, models[0], provider);
-  }
-
-  return null;
-}
-
-export function clearModelCache(config: GatewayConfig): void {
-  if (defaultConfig !== config || !defaultCatalog) return;
-  defaultCatalog = null;
 }

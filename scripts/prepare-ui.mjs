@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 const projectRoot = resolve(process.cwd());
 const webRoot = resolve(projectRoot, "web");
 const outputDir = resolve(projectRoot, "dist/web");
-const bundleFile = resolve(projectRoot, "src/web-bundle.ts");
+const bundleDir = resolve(projectRoot, ".generated");
+const bundleFile = resolve(bundleDir, "web-bundle.ts");
 
 function serialize(value) {
   return JSON.stringify(value)
@@ -51,6 +52,7 @@ export function prepareUi() {
   </body>
 </html>`;
 
+  mkdirSync(bundleDir, { recursive: true });
   writeFileSync(
     bundleFile,
     [

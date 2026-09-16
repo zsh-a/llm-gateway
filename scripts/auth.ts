@@ -6,11 +6,12 @@ import { homedir } from "node:os";
 
 import {
   credentialHeaders,
-  getAuthStore,
+  AuthStore,
   type AuthHeaders
 } from "../src/auth-store.js";
-import { getChannelStore } from "../src/channels.js";
+import { ChannelStore } from "../src/channels.js";
 import { loadConfig } from "../src/config.js";
+import { asRecord } from "../src/json.js";
 import { getProvider, getProviders, type ProviderAdapter } from "../src/provider.js";
 
 interface FlowRequest {
@@ -230,12 +231,6 @@ async function waitForReady(
     await delay(250);
   }
   throw new Error("mitmweb 未在 10000ms 内就绪: " + config.mitmUrl);
-}
-
-function asRecord(value: unknown): { [key: string]: unknown } {
-  return value !== null && typeof value === "object"
-    ? value as { [key: string]: unknown }
-    : {};
 }
 
 function headerEntries(value: unknown): Array<[string, string]> {
@@ -496,7 +491,8 @@ async function main(): Promise<void> {
   const options = parseOptions(args);
   const config = bootstrapConfig();
   const gatewayConfig = loadConfig();
-  const store = getAuthStore(gatewayConfig);
+  const store = new AuthStore(gatewayConfig.authCacheDir);
+  const channels = new ChannelStore(gatewayConfig.channelsFile);
   const providers: ProviderAdapter[] = [];
   for (const id of options.providerIds) {
     const provider = getProvider(id);
@@ -505,7 +501,7 @@ async function main(): Promise<void> {
   }
 
   if (options.channelId) {
-    const channel = getChannelStore(gatewayConfig).list().find((item) => (
+    const channel = channels.list().find((item) => (
       item.id === options.channelId
     ));
     if (!channel) throw new Error("未知 Channel: " + options.channelId);

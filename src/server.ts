@@ -4,11 +4,11 @@ import { cors } from "hono/cors";
 import { streamSSE, type SSEStreamingApi } from "hono/streaming";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 
-import { getAuthStore } from "./auth-store.js";
-import { getChannelStore, type ChannelConfig } from "./channels.js";
+import type { ChannelConfig } from "./channels.js";
 import { loadConfig } from "./config.js";
-import { clearModelCache, getModels, resolveModel, type ModelRoute } from "./models.js";
-import { ApiKeyStore, type ApiKeyIdentity } from "./key-store.js";
+import type { ModelRoute } from "./models.js";
+import type { ApiKeyIdentity, ApiKeyStore } from "./key-store.js";
+import { createGatewayDeps, type GatewayDeps } from "./deps.js";
 import {
   MetricsStore,
   parseDuration,
@@ -50,11 +50,6 @@ import {
 } from "./provider.js";
 import type { JsonRecord, NormalizedChatRequest } from "./types.js";
 import { WEB_UI_HTML } from "./web-ui.js";
-
-const config = loadConfig();
-const authStore = getAuthStore(config);
-const apiKeys = new ApiKeyStore(config.apiKeysFile, config.apiKey);
-const metrics = new MetricsStore(config.metricsMaxRecords, config.metricsFile);
 
 interface GatewayVariables {
   identity: ApiKeyIdentity;
@@ -114,14 +109,13 @@ function requestCredential(c: Context): string {
   return (c.req.header("x-api-key") ?? "").trim();
 }
 
-function authenticateRequest(c: Context): ApiKeyIdentity | null {
+function authenticateRequest(c: Context, apiKeys: ApiKeyStore): ApiKeyIdentity | null {
   const credential = requestCredential(c);
   if (!apiKeys.requiresAuthentication()) return apiKeys.anonymous();
   return apiKeys.authenticate(credential);
 }
 
-function adminAuthorized(c: Context): boolean {
-  const adminKey = config.adminKey || config.apiKey;
+function adminAuthorized(c: Context, adminKey: string): boolean {
   return !adminKey || requestCredential(c) === adminKey;
 }
 
@@ -130,13 +124,14 @@ function metricScope(identity: ApiKeyIdentity): string | undefined {
 }
 
 function beginMetric(
+  deps: GatewayDeps,
   c: GatewayContext,
   protocol: "chat" | "responses",
   route: ModelRoute,
   request: NormalizedChatRequest,
   identity: ApiKeyIdentity
 ): MetricHandle {
-  const handle = metrics.begin(
+  const handle = deps.metrics.begin(
     protocol,
     route.provider.id,
     route.publicModel,
@@ -151,12 +146,13 @@ function beginMetric(
 }
 
 function finishMetric(
+  deps: GatewayDeps,
   handle: MetricHandle,
   identity: ApiKeyIdentity,
   outcome: MetricOutcome
 ): void {
-  metrics.finish(handle, outcome);
-  apiKeys.recordUsage(identity, outcome.usage);
+  deps.metrics.finish(handle, outcome);
+  deps.apiKeys.recordUsage(identity, outcome.usage);
 }
 
 interface MetricAccumulator {
@@ -200,8 +196,8 @@ async function readBody(c: Context, maxBytes: number): Promise<string> {
   }
 }
 
-async function readJsonRecord(c: Context): Promise<JsonRecord> {
-  const raw = await readBody(c, config.maxBodyBytes);
+async function readJsonRecord(c: Context, maxBodyBytes: number): Promise<JsonRecord> {
+  const raw = await readBody(c, maxBodyBytes);
   let value: unknown;
   try {
     value = JSON.parse(raw || "{}");
@@ -259,6 +255,7 @@ function retryableUpstreamFailure(error: unknown): boolean {
 }
 
 async function streamUpstream(
+  deps: GatewayDeps,
   route: ModelRoute,
   request: NormalizedChatRequest,
   onChunk: (chunk: UpstreamChunk) => void,
@@ -270,7 +267,7 @@ async function streamUpstream(
     const candidate = route.candidates[index];
     if (externalSignal?.aborted) throw new Error("请求已取消");
 
-    const snapshot = authStore.get(candidate.channel.authRef);
+    const snapshot = deps.authStore.get(candidate.channel.authRef);
     if (!snapshot) {
       lastError = new UpstreamError(
         503,
@@ -285,7 +282,7 @@ async function streamUpstream(
       const stream = await route.provider.streamChat(
         snapshot.headers,
         { ...request, model: candidate.upstreamModel },
-        config,
+        deps.config,
         (chunk) => {
           if (chunk.choices && chunk.choices.length > 0) emitted = true;
           onChunk(chunk);
@@ -303,7 +300,7 @@ async function streamUpstream(
         error instanceof UpstreamError &&
         (error.status === 401 || error.status === 403)
       ) {
-        authStore.invalidate(candidate.channel.authRef);
+        deps.authStore.invalidate(candidate.channel.authRef);
       }
       if (
         externalSignal?.aborted ||
@@ -326,7 +323,6 @@ class SseWriter {
   writeData(data: string, event?: string): void {
     this.pending = this.pending
       .then(() => this.stream.writeSSE(event ? { data, event } : { data }))
-      .catch(() => undefined);
   }
 
   writeJson(value: Record<string, unknown>, event?: string): void {
@@ -360,6 +356,7 @@ function responseEventName(value: Record<string, unknown>): string {
 }
 
 function handleChatStreaming(
+  deps: GatewayDeps,
   c: GatewayContext,
   route: ModelRoute,
   request: NormalizedChatRequest,
@@ -367,7 +364,7 @@ function handleChatStreaming(
 ): Response {
   const context = createStreamContext(route.publicModel);
   const accumulator = new ChatAccumulator();
-  const metric = beginMetric(c, "chat", route, request, identity);
+  const metric = beginMetric(deps, c, "chat", route, request, identity);
   const includeUsage = includesUsage(request);
   c.header("X-Accel-Buffering", "no");
 
@@ -383,6 +380,7 @@ function handleChatStreaming(
 
     try {
       await streamUpstream(
+        deps,
         route,
         request,
         (chunk) => {
@@ -422,32 +420,34 @@ function handleChatStreaming(
       const failure = upstreamError(error);
       outcome = outcomeFor(accumulator, "error", failure.type);
       if (failure.status === 401 || failure.status === 403) {
-        authStore.invalidate(route.channel.authRef);
+        deps.authStore.invalidate(route.channel.authRef);
       }
       writer.writeJson(errorResponse(failure.message, failure.type));
       writer.writeData("[DONE]");
       await writer.flush();
     } finally {
       clientAbort.dispose();
-      finishMetric(metric, identity, outcome);
+      finishMetric(deps, metric, identity, outcome);
     }
   });
 }
 
 async function handleChatNonStreaming(
+  deps: GatewayDeps,
   c: GatewayContext,
   route: ModelRoute,
   request: NormalizedChatRequest,
   identity: ApiKeyIdentity
 ): Promise<Response> {
   const accumulator = new ChatAccumulator();
-  const metric = beginMetric(c, "chat", route, request, identity);
+  const metric = beginMetric(deps, c, "chat", route, request, identity);
   let outcome: MetricOutcome = {
     status: "error",
     errorType: "internal_error"
   };
   try {
     await streamUpstream(
+      deps,
       route,
       request,
       (chunk) => { accumulator.add(chunk); },
@@ -460,15 +460,16 @@ async function handleChatNonStreaming(
     const failure = upstreamError(error);
     outcome = outcomeFor(accumulator, "error", failure.type);
     if (failure.status === 401 || failure.status === 403) {
-      authStore.invalidate(route.channel.authRef);
+      deps.authStore.invalidate(route.channel.authRef);
     }
     return sendError(c, failure.status, failure.message, failure.type);
   } finally {
-    finishMetric(metric, identity, outcome);
+    finishMetric(deps, metric, identity, outcome);
   }
 }
 
 function handleResponseStreaming(
+  deps: GatewayDeps,
   c: GatewayContext,
   route: ModelRoute,
   request: NormalizedChatRequest,
@@ -476,7 +477,7 @@ function handleResponseStreaming(
 ): Response {
   const context = createResponseContext(route.publicModel, request.response);
   const accumulator = new ResponseAccumulator();
-  const metric = beginMetric(c, "responses", route, request, identity);
+  const metric = beginMetric(deps, c, "responses", route, request, identity);
   c.header("X-Accel-Buffering", "no");
 
   return streamSSE(c, async (stream) => {
@@ -497,6 +498,7 @@ function handleResponseStreaming(
       await writer.flush();
 
       await streamUpstream(
+        deps,
         route,
         request,
         (chunk) => {
@@ -527,18 +529,19 @@ function handleResponseStreaming(
       const failure = upstreamError(error);
       outcome = outcomeFor(accumulator, "error", failure.type);
       if (failure.status === 401 || failure.status === 403) {
-        authStore.invalidate(route.channel.authRef);
+        deps.authStore.invalidate(route.channel.authRef);
       }
       writeEvent(responseFailed(context, failure.message));
       await writer.flush();
     } finally {
       clientAbort.dispose();
-      finishMetric(metric, identity, outcome);
+      finishMetric(deps, metric, identity, outcome);
     }
   });
 }
 
 async function handleResponseNonStreaming(
+  deps: GatewayDeps,
   c: GatewayContext,
   route: ModelRoute,
   request: NormalizedChatRequest,
@@ -546,13 +549,14 @@ async function handleResponseNonStreaming(
 ): Promise<Response> {
   const context = createResponseContext(route.publicModel, request.response);
   const accumulator = new ResponseAccumulator();
-  const metric = beginMetric(c, "responses", route, request, identity);
+  const metric = beginMetric(deps, c, "responses", route, request, identity);
   let outcome: MetricOutcome = {
     status: "error",
     errorType: "internal_error"
   };
   try {
     await streamUpstream(
+      deps,
       route,
       request,
       (chunk) => { accumulator.add(chunk); },
@@ -567,11 +571,11 @@ async function handleResponseNonStreaming(
     const failure = upstreamError(error);
     outcome = outcomeFor(accumulator, "error", failure.type);
     if (failure.status === 401 || failure.status === 403) {
-      authStore.invalidate(route.channel.authRef);
+      deps.authStore.invalidate(route.channel.authRef);
     }
     return sendError(c, failure.status, failure.message, failure.type);
   } finally {
-    finishMetric(metric, identity, outcome);
+    finishMetric(deps, metric, identity, outcome);
   }
 }
 
@@ -589,6 +593,7 @@ type RequestNormalizer = (
 type RequestValidator = (request: NormalizedChatRequest) => string | null;
 
 async function prepareRequest(
+  deps: GatewayDeps,
   c: GatewayContext,
   normalize: RequestNormalizer,
   validate: RequestValidator,
@@ -601,7 +606,7 @@ async function prepareRequest(
     type: string,
     model = "unknown"
   ): Response => {
-    metrics.finishAdmission(admission, model, {
+    deps.metrics.finishAdmission(admission, model, {
       status: "error",
       errorType: type
     });
@@ -611,7 +616,7 @@ async function prepareRequest(
 
   let parsed: JsonRecord;
   try {
-    parsed = await readJsonRecord(c);
+    parsed = await readJsonRecord(c, deps.config.maxBodyBytes);
   } catch (error) {
     const failure = asGatewayError(error, 400, "invalid_request_error");
     return reject(failure.status, failure.message, failure.type);
@@ -619,7 +624,7 @@ async function prepareRequest(
 
   let request: NormalizedChatRequest;
   try {
-    request = normalize(parsed, config.defaultModel);
+    request = normalize(parsed, deps.config.defaultModel);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return reject(400, message, "invalid_request_error");
@@ -630,7 +635,7 @@ async function prepareRequest(
     return reject(400, validationError, "invalid_request_error", request.model);
   }
 
-  const route = await resolveModel(config, request.model);
+  const route = await deps.catalog.resolve(request.model);
   if (!route) {
     return reject(
       400,
@@ -647,7 +652,7 @@ async function prepareRequest(
     return reject(400, modelValidationError, "invalid_request_error", route.publicModel);
   }
 
-  const modelAccessError = apiKeys.authorizeModel(
+  const modelAccessError = deps.apiKeys.authorizeModel(
     identity,
     request.model || route.publicModel
   );
@@ -656,7 +661,7 @@ async function prepareRequest(
   }
 
   const hasAuth = route.candidates.some((candidate) => (
-    authStore.get(candidate.channel.authRef) !== null
+    deps.authStore.get(candidate.channel.authRef) !== null
   ));
   if (!hasAuth) {
     return reject(
@@ -668,12 +673,12 @@ async function prepareRequest(
     );
   }
 
-  const reservationError = apiKeys.reserve(identity);
+  const reservationError = deps.apiKeys.reserve(identity);
   if (reservationError) {
     return reject(429, reservationError, "rate_limit_error", route.publicModel);
   }
 
-  metrics.acceptAdmission(admission);
+  deps.metrics.acceptAdmission(admission);
   return {
     route,
     identity,
@@ -686,11 +691,13 @@ async function prepareRequest(
 }
 
 async function handleChat(
+  deps: GatewayDeps,
   c: GatewayContext,
   identity: ApiKeyIdentity,
   admission: MetricAdmission | undefined
 ): Promise<Response> {
   const prepared = await prepareRequest(
+    deps,
     c,
     normalizeChatRequest,
     validateChatRequest,
@@ -699,16 +706,18 @@ async function handleChat(
   );
   if (prepared instanceof Response) return prepared;
   return prepared.request.stream
-    ? handleChatStreaming(c, prepared.route, prepared.request, prepared.identity)
-    : handleChatNonStreaming(c, prepared.route, prepared.request, prepared.identity);
+    ? handleChatStreaming(deps, c, prepared.route, prepared.request, prepared.identity)
+    : handleChatNonStreaming(deps, c, prepared.route, prepared.request, prepared.identity);
 }
 
 async function handleResponses(
+  deps: GatewayDeps,
   c: GatewayContext,
   identity: ApiKeyIdentity,
   admission: MetricAdmission | undefined
 ): Promise<Response> {
   const prepared = await prepareRequest(
+    deps,
     c,
     normalizeResponseRequest,
     validateResponseRequest,
@@ -717,8 +726,8 @@ async function handleResponses(
   );
   if (prepared instanceof Response) return prepared;
   return prepared.request.stream
-    ? handleResponseStreaming(c, prepared.route, prepared.request, prepared.identity)
-    : handleResponseNonStreaming(c, prepared.route, prepared.request, prepared.identity);
+    ? handleResponseStreaming(deps, c, prepared.route, prepared.request, prepared.identity)
+    : handleResponseNonStreaming(deps, c, prepared.route, prepared.request, prepared.identity);
 }
 
 function admissionProtocol(
@@ -726,54 +735,43 @@ function admissionProtocol(
   path: string
 ): "chat" | "responses" | null {
   if (method !== "POST") return null;
-  if (path === "/v1/responses" || path === "/responses") return "responses";
-  if (path === "/v1/chat/completions" || path === "/chat/completions") {
-    return "chat";
-  }
+  if (path === "/v1/responses") return "responses";
+  if (path === "/v1/chat/completions") return "chat";
   return null;
 }
 
-function requiresGatewayAuth(path: string): boolean {
-  return path.startsWith("/v1/") ||
-    path.startsWith("/chat/") ||
-    path.startsWith("/metrics/") ||
-    path === "/responses";
+function createGatewayAuth(deps: GatewayDeps): MiddlewareHandler<GatewayEnv> {
+  return async (c, next) => {
+    const protocol = admissionProtocol(c.req.method, c.req.path);
+    const admission = protocol
+      ? deps.metrics.beginAdmission(protocol)
+      : undefined;
+    c.set("admission", admission);
+    const identity = authenticateRequest(c, deps.apiKeys);
+    if (!identity) {
+      deps.metrics.finishAdmission(admission, "unknown", {
+        status: "error",
+        errorType: "authentication_error"
+      });
+      if (admission) c.header("X-Request-ID", admission.id);
+      return sendError(c, 401, "缺少或无效的代理 API Key", "authentication_error");
+    }
+
+    c.set("identity", identity);
+    if (admission) admission.apiKeyId = identity.keyId;
+    await next();
+  };
 }
 
-const authenticate: MiddlewareHandler<GatewayEnv> = async (c, next) => {
-  if (!requiresGatewayAuth(c.req.path)) {
+function createAdminAuth(deps: GatewayDeps): MiddlewareHandler<GatewayEnv> {
+  const adminKey = deps.config.adminKey || deps.config.apiKey;
+  return async (c, next) => {
+    if (!adminAuthorized(c, adminKey)) {
+      return sendError(c, 401, "缺少或无效的管理员 API Key", "authentication_error");
+    }
     await next();
-    return;
-  }
-
-  const protocol = admissionProtocol(c.req.method, c.req.path);
-  const admission = protocol ? metrics.beginAdmission(protocol) : undefined;
-  c.set("admission", admission);
-  const identity = authenticateRequest(c);
-  if (!identity) {
-    metrics.finishAdmission(admission, "unknown", {
-      status: "error",
-      errorType: "authentication_error"
-    });
-    if (admission) c.header("X-Request-ID", admission.id);
-    return sendError(c, 401, "缺少或无效的代理 API Key", "authentication_error");
-  }
-
-  c.set("identity", identity);
-  if (admission) admission.apiKeyId = identity.keyId;
-  await next();
-};
-
-const authorizeAdmin: MiddlewareHandler<GatewayEnv> = async (c, next) => {
-  if (c.req.path !== "/admin" && !c.req.path.startsWith("/admin/")) {
-    await next();
-    return;
-  }
-  if (!adminAuthorized(c)) {
-    return sendError(c, 401, "缺少或无效的管理员 API Key", "authentication_error");
-  }
-  await next();
-};
+  };
+}
 
 function identityOf(c: GatewayContext): ApiKeyIdentity {
   return c.get("identity");
@@ -783,21 +781,36 @@ function admissionOf(c: GatewayContext): MetricAdmission | undefined {
   return c.get("admission");
 }
 
-function registerAdminRoutes(app: Hono<GatewayEnv>): void {
-  app.get("/admin/metrics/summary", (c) => sendJson(c, 200, metrics.summary(
-    parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000)
-  )));
+type MetricScopeResolver = (c: GatewayContext) => string | undefined;
 
-  app.get("/admin/metrics/timeseries", (c) => {
-    const windowMs = parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000);
-    const bucket = c.req.query("bucket");
-    return sendJson(c, 200, metrics.timeseries(
-      windowMs,
-      bucket ? parseDuration(bucket, 0) : undefined
+function registerMetricsRoutes(
+  app: Hono<GatewayEnv>,
+  metrics: MetricsStore,
+  prefix: string,
+  resolveScope: MetricScopeResolver
+): void {
+  const defaultWindowMs = 24 * 60 * 60 * 1000;
+
+  app.get(`${prefix}/summary`, (c) => {
+    const scope = resolveScope(c);
+    return sendJson(c, 200, metrics.summary(
+      parseDuration(c.req.query("window"), defaultWindowMs),
+      scope
     ));
   });
 
-  app.get("/admin/metrics/requests", (c) => {
+  app.get(`${prefix}/timeseries`, (c) => {
+    const windowMs = parseDuration(c.req.query("window"), defaultWindowMs);
+    const bucketValue = c.req.query("bucket");
+    const bucketMs = bucketValue ? parseDuration(bucketValue, 0) : undefined;
+    return sendJson(c, 200, metrics.timeseries(
+      windowMs,
+      bucketMs,
+      resolveScope(c)
+    ));
+  });
+
+  app.get(`${prefix}/requests`, (c) => {
     const statusValue = c.req.query("status");
     const status = statusValue === "success" ||
       statusValue === "error" ||
@@ -805,29 +818,35 @@ function registerAdminRoutes(app: Hono<GatewayEnv>): void {
       ? statusValue
       : undefined;
     return sendJson(c, 200, metrics.recent({
-      windowMs: parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000),
+      windowMs: parseDuration(c.req.query("window"), defaultWindowMs),
       limit: Number(c.req.query("limit")) || 50,
       provider: c.req.query("provider") || undefined,
       model: c.req.query("model") || undefined,
-      status
+      status,
+      apiKeyId: resolveScope(c)
     }));
   });
 
-  app.get("/admin/metrics/models", (c) => sendJson(c, 200, metrics.models(
-    parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000)
+  app.get(`${prefix}/models`, (c) => sendJson(c, 200, metrics.models(
+    parseDuration(c.req.query("window"), defaultWindowMs),
+    resolveScope(c)
   )));
+}
 
-  const channels = getChannelStore(config);
+function registerAdminRoutes(app: Hono<GatewayEnv>, deps: GatewayDeps): void {
+  const { config, channels, catalog, apiKeys, metrics } = deps;
+  registerMetricsRoutes(app, metrics, "/admin/metrics", () => undefined);
+
   app.get("/admin/channels", (c) => sendJson(c, 200, {
     object: "llm-gateway.channels",
     data: channels.list()
   }));
 
   app.post("/admin/channels", async (c) => {
-    const body = await readJsonRecord(c);
+    const body = await readJsonRecord(c, config.maxBodyBytes);
     try {
       const channel = channels.upsert(body);
-      clearModelCache(config);
+      catalog.clear();
       return sendJson(c, 200, { object: "llm-gateway.channel", data: channel });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -839,7 +858,7 @@ function registerAdminRoutes(app: Hono<GatewayEnv>): void {
     const id = c.req.param("id");
     const removed = channels.remove(id);
     if (!removed) return sendError(c, 404, "渠道不存在", "invalid_request_error");
-    clearModelCache(config);
+    catalog.clear();
     return sendJson(c, 200, { object: "llm-gateway.channel.deleted", id });
   });
 
@@ -849,7 +868,7 @@ function registerAdminRoutes(app: Hono<GatewayEnv>): void {
   }));
 
   app.post("/admin/keys", async (c) => {
-    const body = await readJsonRecord(c);
+    const body = await readJsonRecord(c, config.maxBodyBytes);
     try {
       const created = apiKeys.create(body);
       return sendJson(c, 201, {
@@ -865,7 +884,7 @@ function registerAdminRoutes(app: Hono<GatewayEnv>): void {
   });
 
   app.patch("/admin/keys/:id", async (c) => {
-    const body = await readJsonRecord(c);
+    const body = await readJsonRecord(c, config.maxBodyBytes);
     const id = c.req.param("id");
     const updated = apiKeys.update(id, body);
     if (!updated) return sendError(c, 404, "API Key 不存在", "invalid_request_error");
@@ -882,7 +901,8 @@ function registerAdminRoutes(app: Hono<GatewayEnv>): void {
   app.all("/admin/*", (c) => sendError(c, 404, "管理接口不存在", "invalid_request_error"));
 }
 
-function registerPublicRoutes(app: Hono<GatewayEnv>): void {
+function registerPublicRoutes(app: Hono<GatewayEnv>, deps: GatewayDeps): void {
+  const { config, authStore, catalog, apiKeys, metrics } = deps;
   const live = (c: Context): Response => sendJson(c, 200, {
     status: "ok",
     service: "llm-gateway",
@@ -896,7 +916,7 @@ function registerPublicRoutes(app: Hono<GatewayEnv>): void {
 
   app.get("/health/ready", async (c) => {
     const auth = authStore.status(getProviders().map((provider) => provider.id));
-    const models = await getModels(config);
+    const models = await catalog.get();
     const ready = auth.ready && models.length > 0;
     return sendJson(c, ready ? 200 : 503, {
       status: ready ? "ok" : "not_ready",
@@ -916,7 +936,7 @@ function registerPublicRoutes(app: Hono<GatewayEnv>): void {
 
   app.get("/.well-known/llm-gateway/capabilities", async (c) => {
     const auth = authStore.status(getProviders().map((provider) => provider.id));
-    const models = modelsResponse(await getModels(config));
+    const models = modelsResponse(await catalog.get());
     return sendJson(c, 200, {
       object: "llm-gateway.capabilities",
       version: 1,
@@ -949,63 +969,27 @@ function registerPublicRoutes(app: Hono<GatewayEnv>): void {
     });
   });
 
-  app.get("/metrics/summary", (c) => {
-    const windowMs = parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000);
-    const scope = metricScope(identityOf(c));
-    return sendJson(c, 200, scope ? metrics.summary(windowMs, scope) : metrics.summary(windowMs));
-  });
-
-  app.get("/metrics/timeseries", (c) => {
-    const windowMs = parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000);
-    const bucketValue = c.req.query("bucket");
-    const bucketMs = bucketValue ? parseDuration(bucketValue, 0) : undefined;
-    const scope = metricScope(identityOf(c));
-    const value = scope
-      ? metrics.timeseries(windowMs, bucketMs, scope)
-      : bucketMs === undefined
-        ? metrics.timeseries(windowMs)
-        : metrics.timeseries(windowMs, bucketMs);
-    return sendJson(c, 200, value);
-  });
-
-  app.get("/metrics/requests", (c) => {
-    const statusValue = c.req.query("status");
-    const status = statusValue === "success" ||
-      statusValue === "error" ||
-      statusValue === "canceled"
-      ? statusValue
-      : undefined;
-    return sendJson(c, 200, metrics.recent({
-      windowMs: parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000),
-      limit: Number(c.req.query("limit")) || 50,
-      provider: c.req.query("provider") || undefined,
-      model: c.req.query("model") || undefined,
-      status,
-      apiKeyId: metricScope(identityOf(c))
-    }));
-  });
-
-  app.get("/metrics/models", (c) => {
-    const windowMs = parseDuration(c.req.query("window"), 24 * 60 * 60 * 1000);
-    const scope = metricScope(identityOf(c));
-    return sendJson(c, 200, scope ? metrics.models(windowMs, scope) : metrics.models(windowMs));
-  });
+  registerMetricsRoutes(
+    app,
+    metrics,
+    "/metrics",
+    (c) => metricScope(identityOf(c))
+  );
 
   app.get("/v1/models", async (c) => sendJson(
     c,
     200,
-    modelsResponse(await getModels(config))
+    modelsResponse(await catalog.get())
   ));
 
-  for (const path of ["/v1/responses", "/responses"]) {
-    app.post(path, (c) => handleResponses(c, identityOf(c), admissionOf(c)));
-  }
-  for (const path of ["/v1/chat/completions", "/chat/completions"]) {
-    app.post(path, (c) => handleChat(c, identityOf(c), admissionOf(c)));
-  }
+  app.post("/v1/responses", (c) => handleResponses(deps, c, identityOf(c), admissionOf(c)));
+  app.post("/v1/chat/completions", (c) => handleChat(deps, c, identityOf(c), admissionOf(c)));
 }
 
-export function createGatewayApp(): Hono<GatewayEnv> {
+export function createGatewayApp(
+  deps: GatewayDeps = createGatewayDeps(loadConfig())
+): Hono<GatewayEnv> {
+  const { config } = deps;
   const app = new Hono<GatewayEnv>();
   app.use("*", cors({
     origin: config.corsOrigin,
@@ -1014,11 +998,14 @@ export function createGatewayApp(): Hono<GatewayEnv> {
     exposeHeaders: ["X-Request-ID"]
   }));
   app.options("*", (c) => c.body(null, 204));
-  app.use("*", authenticate);
-  app.use("*", authorizeAdmin);
+  app.use("/admin", createAdminAuth(deps));
+  app.use("/admin/*", createAdminAuth(deps));
+  const gatewayAuth = createGatewayAuth(deps);
+  app.use("/v1/*", gatewayAuth);
+  app.use("/metrics/*", gatewayAuth);
 
-  registerAdminRoutes(app);
-  registerPublicRoutes(app);
+  registerAdminRoutes(app, deps);
+  registerPublicRoutes(app, deps);
 
   app.onError((error, c) => {
     const failure = asGatewayError(error, 500, "internal_error");
@@ -1030,10 +1017,13 @@ export function createGatewayApp(): Hono<GatewayEnv> {
 
 let gatewayServer: ServerType | null = null;
 
-export function startGateway(): ServerType {
+export function startGateway(
+  deps: GatewayDeps = createGatewayDeps(loadConfig())
+): ServerType {
   if (gatewayServer) return gatewayServer;
 
-  const app = createGatewayApp();
+  const { config } = deps;
+  const app = createGatewayApp(deps);
   const server = serve(
     {
       fetch: app.fetch,
@@ -1045,7 +1035,7 @@ export function startGateway(): ServerType {
         `LLM Gateway 已启动: http://${config.bindHost}:${config.port}`
       );
       console.log(
-        `- 兼容接口: http://${config.bindHost}:${config.port}/v1/chat/completions`
+        `- Chat Completions 接口: http://${config.bindHost}:${config.port}/v1/chat/completions`
       );
       console.log(
         `- Responses 接口: http://${config.bindHost}:${config.port}/v1/responses`

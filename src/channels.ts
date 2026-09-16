@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 
-import type { GatewayConfig } from "./config.js";
+import { asBool, asNumber, asRecord, asTrimmedString } from "./json.js";
 import { getProvider, getProviders } from "./provider.js";
 
 export interface ChannelConfig {
@@ -34,27 +34,21 @@ interface StoredChannels {
   channels: ChannelConfig[];
 }
 
-function stringValue(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
+const MAX_CURSOR_KEYS = 1024;
 
 function integerValue(value: unknown, fallback: number, minimum: number): number {
-  const number = typeof value === "number" ? value : Number(value);
-  return Number.isInteger(number) && number >= minimum ? number : fallback;
-}
-
-function booleanValue(value: unknown, fallback: boolean): boolean {
-  return typeof value === "boolean" ? value : fallback;
+  const number = asNumber(value);
+  return number !== undefined && Number.isInteger(number) && number >= minimum
+    ? number
+    : fallback;
 }
 
 function modelMappings(value: unknown): { [key: string]: string } {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return {};
-  }
+  const record = asRecord(value);
   const result: { [key: string]: string } = {};
-  for (const [key, model] of Object.entries(value as { [key: string]: unknown })) {
+  for (const [key, model] of Object.entries(record)) {
     const normalizedKey = key.trim();
-    const normalizedModel = stringValue(model);
+    const normalizedModel = asTrimmedString(model) ?? "";
     if (normalizedKey && normalizedModel) result[normalizedKey] = normalizedModel;
   }
   return result;
@@ -75,14 +69,14 @@ function defaultChannels(): ChannelConfig[] {
 
 function normalizeChannel(value: unknown, current?: ChannelConfig): ChannelConfig | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as { [key: string]: unknown };
-  const id = stringValue(record.id) || current?.id || "";
-  const providerId = stringValue(record.providerId ?? record.provider_id) ||
+  const record = asRecord(value);
+  const id = asTrimmedString(record.id) || current?.id || "";
+  const providerId = asTrimmedString(record.providerId) ||
     current?.providerId || "";
   const provider = getProvider(providerId);
   if (!id || !provider) return null;
 
-  const rawUrl = stringValue(record.upstreamUrl ?? record.baseUrl ?? record.base_url);
+  const rawUrl = asTrimmedString(record.upstreamUrl) ?? "";
   let upstreamUrl: string | undefined;
   if (rawUrl) {
     try {
@@ -94,15 +88,14 @@ function normalizeChannel(value: unknown, current?: ChannelConfig): ChannelConfi
     }
   }
 
-  const mergedMappings = record.modelMappings ?? record.model_mappings ??
-    current?.modelMappings;
+  const mergedMappings = record.modelMappings ?? current?.modelMappings;
   const result: ChannelConfig = {
     id,
-    name: stringValue(record.name) || current?.name || id,
+    name: asTrimmedString(record.name) || current?.name || id,
     providerId,
-    authRef: stringValue(record.authRef ?? record.auth_ref) ||
+    authRef: asTrimmedString(record.authRef) ||
       current?.authRef || (id === providerId ? providerId : id),
-    enabled: booleanValue(record.enabled, current?.enabled ?? true),
+    enabled: asBool(record.enabled) ?? current?.enabled ?? true,
     priority: integerValue(record.priority, current?.priority ?? 100, 0),
     weight: integerValue(record.weight, current?.weight ?? 1, 1),
     modelMappings: modelMappings(mergedMappings)
@@ -132,7 +125,7 @@ export class ChannelStore {
     const input = value !== null && typeof value === "object" && !Array.isArray(value)
       ? value as { [key: string]: unknown }
       : {};
-    const id = stringValue(input.id);
+    const id = asTrimmedString(input.id) ?? "";
     const current = id ? this.channels!.find((channel) => channel.id === id) : undefined;
     const channel = normalizeChannel(value, current);
     if (!channel) {
@@ -179,9 +172,7 @@ export class ChannelStore {
       })
       .filter((value): value is ChannelSelection => value !== null);
 
-    const key = `${providerId}:${publicModel}`;
-    const next = (this.cursors.get(key) ?? -1) + 1;
-    this.cursors.set(key, next);
+    const next = this.nextCursor(`${providerId}:${publicModel}`);
 
     const priorities = [...new Set(candidates.map((item) => item.channel.priority))]
       .sort((left, right) => right - left);
@@ -219,6 +210,20 @@ export class ChannelStore {
     }));
   }
 
+  private nextCursor(key: string): number {
+    const next = (this.cursors.get(key) ?? -1) + 1;
+    // Map insertion order gives us a small, dependency-free LRU. A caller can
+    // supply arbitrary model names, so cursor state must have a hard bound.
+    this.cursors.delete(key);
+    this.cursors.set(key, next);
+    while (this.cursors.size > MAX_CURSOR_KEYS) {
+      const oldest = this.cursors.keys().next().value;
+      if (oldest === undefined) break;
+      this.cursors.delete(oldest);
+    }
+    return next;
+  }
+
   private ensureLoaded(): void {
     if (this.channels) return;
     const defaults = defaultChannels();
@@ -228,9 +233,7 @@ export class ChannelStore {
         return;
       }
       const value: unknown = JSON.parse(readFileSync(this.file, "utf8"));
-      const record = value !== null && typeof value === "object"
-        ? value as { [key: string]: unknown }
-        : {};
+      const record = asRecord(value);
       if (Number(record.version) !== 1 || !Array.isArray(record.channels)) {
         this.channels = defaults;
         return;
@@ -268,19 +271,4 @@ export class ChannelStore {
       }
     }
   }
-}
-
-let defaultStore: ChannelStore | null = null;
-let defaultConfig: GatewayConfig | null = null;
-
-export function getChannelStore(config: GatewayConfig): ChannelStore {
-  if (!defaultStore || defaultConfig !== config) {
-    defaultConfig = config;
-    defaultStore = new ChannelStore(config.channelsFile);
-  }
-  return defaultStore;
-}
-
-export function getChannels(config: GatewayConfig): ChannelConfig[] {
-  return getChannelStore(config).list();
 }
