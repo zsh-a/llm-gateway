@@ -42,7 +42,7 @@ function configFor(directory: string, providerId: string): GatewayConfig {
 }
 
 test("GatewayDeps isolates catalogs and channel stores by config", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "mimo-proxy-deps-"));
+  const directory = mkdtempSync(join(tmpdir(), "llm-gateway-deps-"));
   try {
     const mimo = createGatewayDeps(configFor(directory, "mimo"));
     const workbuddy = createGatewayDeps(configFor(directory, "workbuddy"));

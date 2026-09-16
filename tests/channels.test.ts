@@ -10,7 +10,7 @@ function withChannelStore(
   channels: Array<Record<string, unknown>>,
   callback: (store: ChannelStore) => void
 ): void {
-  const directory = mkdtempSync(join(tmpdir(), "mimo-proxy-channels-"));
+  const directory = mkdtempSync(join(tmpdir(), "llm-gateway-channels-"));
   try {
     const file = join(directory, "channels.json");
     writeFileSync(file, JSON.stringify({ version: 1, channels }));
