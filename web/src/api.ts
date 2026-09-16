@@ -3,13 +3,13 @@ import type {
   AuthStatus,
   ChannelConfig,
   ChatResult,
+  ChatStreamUpdate,
   DashboardData,
   GatewayModel,
-  ChatStreamUpdate,
   MetricsSummary,
   RecentRequest,
   TimeseriesPoint,
-  Usage
+  Usage,
 } from "./types";
 
 export interface Credentials {
@@ -18,7 +18,10 @@ export interface Credentials {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
     super(message);
     this.name = "ApiError";
   }
@@ -32,17 +35,31 @@ const emptySummary: MetricsSummary = {
   successRate: null,
   activeRequests: 0,
   latency: { averageMs: null, p50Ms: null, p95Ms: null, maxMs: null },
-  tokens: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cachedTokens: 0, cacheCreationTokens: 0, inputAudioTokens: 0, outputAudioTokens: 0, inputImageTokens: 0, outputImageTokens: 0, acceptedPredictionTokens: 0, rejectedPredictionTokens: 0, totalTokens: 0, requestsWithUsage: 0 },
+  tokens: {
+    inputTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+    cachedTokens: 0,
+    cacheCreationTokens: 0,
+    inputAudioTokens: 0,
+    outputAudioTokens: 0,
+    inputImageTokens: 0,
+    outputImageTokens: 0,
+    acceptedPredictionTokens: 0,
+    rejectedPredictionTokens: 0,
+    totalTokens: 0,
+    requestsWithUsage: 0,
+  },
   byProvider: [],
   byChannel: [],
   byModel: [],
-  byApiKey: []
+  byApiKey: [],
 };
 
 export function loadCredentials(): Credentials {
   return {
     apiKey: sessionStorage.getItem("llm-gateway.api-key") ?? "",
-    adminKey: sessionStorage.getItem("llm-gateway.admin-key") ?? ""
+    adminKey: sessionStorage.getItem("llm-gateway.admin-key") ?? "",
   };
 }
 
@@ -58,7 +75,8 @@ export class GatewayApi {
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
     if (path.startsWith("/admin/")) {
-      if (this.credentials.adminKey) headers.set("Authorization", `Bearer ${this.credentials.adminKey}`);
+      if (this.credentials.adminKey)
+        headers.set("Authorization", `Bearer ${this.credentials.adminKey}`);
     } else if (this.credentials.apiKey) {
       headers.set("Authorization", `Bearer ${this.credentials.apiKey}`);
     }
@@ -68,7 +86,7 @@ export class GatewayApi {
     const raw = await response.text();
     let body: Record<string, unknown> = {};
     try {
-      body = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+      body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
     } catch {
       body = {};
     }
@@ -76,7 +94,7 @@ export class GatewayApi {
       const error = body.error as Record<string, unknown> | undefined;
       throw new ApiError(
         typeof error?.message === "string" ? error.message : `请求失败（HTTP ${response.status}）`,
-        response.status
+        response.status,
       );
     }
     return body as T;
@@ -96,8 +114,12 @@ export class GatewayApi {
       this.safe(this.request<AuthStatus>("/health/auth"), { providers: {} }),
       this.safe(this.request<{ data: GatewayModel[] }>("/v1/models"), { data: [] }),
       this.safe(this.request<MetricsSummary>("/metrics/summary?window=24h"), emptySummary),
-      this.safe(this.request<{ data: TimeseriesPoint[] }>("/metrics/timeseries?window=24h"), { data: [] }),
-      this.safe(this.request<{ data: RecentRequest[] }>("/metrics/requests?window=24h&limit=8"), { data: [] })
+      this.safe(this.request<{ data: TimeseriesPoint[] }>("/metrics/timeseries?window=24h"), {
+        data: [],
+      }),
+      this.safe(this.request<{ data: RecentRequest[] }>("/metrics/requests?window=24h&limit=8"), {
+        data: [],
+      }),
     ]);
 
     let channels: ChannelConfig[] = [];
@@ -109,9 +131,12 @@ export class GatewayApi {
       const keyResponse = await this.request<{ data: ApiKeyRecord[] }>("/admin/keys");
       keys = keyResponse.data ?? [];
     } catch (error) {
-      adminError = error instanceof ApiError && error.status === 401
-        ? "需要管理员 API Key"
-        : error instanceof Error ? error.message : "管理接口不可用";
+      adminError =
+        error instanceof ApiError && error.status === 401
+          ? "需要管理员 API Key"
+          : error instanceof Error
+            ? error.message
+            : "管理接口不可用";
     }
 
     return {
@@ -123,7 +148,7 @@ export class GatewayApi {
       recent: recent.data ?? [],
       channels,
       keys,
-      adminError
+      adminError,
     };
   }
 
@@ -136,7 +161,7 @@ export class GatewayApi {
     }
     return {
       reasoning_effort: upstreamEffort ?? effort,
-      thinking: { type: "enabled" }
+      thinking: { type: "enabled" },
     };
   }
 
@@ -146,14 +171,14 @@ export class GatewayApi {
       messages: [{ role: "user", content: prompt }],
       stream,
       ...(stream ? { stream_options: { include_usage: true } } : {}),
-      ...this.reasoningOptions(model, effort)
+      ...this.reasoningOptions(model, effort),
     });
   }
 
   chat(model: GatewayModel, prompt: string, effort?: string): Promise<ChatResult> {
     return this.request<ChatResult>("/v1/chat/completions", {
       method: "POST",
-      body: this.chatBody(model, prompt, effort)
+      body: this.chatBody(model, prompt, effort),
     });
   }
 
@@ -162,18 +187,18 @@ export class GatewayApi {
     prompt: string,
     effort: string | undefined,
     onUpdate: (update: ChatStreamUpdate) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
   ): Promise<void> {
     const headers = new Headers({
       Accept: "text/event-stream",
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     });
     if (this.credentials.apiKey) headers.set("Authorization", `Bearer ${this.credentials.apiKey}`);
     const response = await fetch("/v1/chat/completions", {
       method: "POST",
       headers,
       body: this.chatBody(model, prompt, effort, true),
-      signal
+      signal,
     });
     if (!response.ok) {
       const raw = await response.text();
@@ -224,14 +249,14 @@ export class GatewayApi {
       const delta = choice?.delta;
       const content = Array.isArray(delta?.content)
         ? delta.content.map((part) => part.text ?? "").join("")
-        : delta?.content ?? "";
+        : (delta?.content ?? "");
       const reasoning = delta?.reasoning_content ?? "";
       if (content || reasoning || payload.usage || choice?.finish_reason) {
         onUpdate({
           content: content || undefined,
           reasoning: reasoning || undefined,
           usage: payload.usage,
-          finishReason: choice?.finish_reason
+          finishReason: choice?.finish_reason,
         });
       }
     };
@@ -259,7 +284,10 @@ export class GatewayApi {
   }
 
   createKey(body: Record<string, unknown>): Promise<{ secret: string }> {
-    return this.request<{ secret: string }>("/admin/keys", { method: "POST", body: JSON.stringify(body) });
+    return this.request<{ secret: string }>("/admin/keys", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
   }
 
   revokeKey(id: string): Promise<unknown> {

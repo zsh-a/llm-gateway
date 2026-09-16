@@ -1,23 +1,13 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState
-} from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError, GatewayApi, loadCredentials } from "./api";
-import type { DashboardData, PageKey } from "./types";
-import {
-  emptyDashboard,
-  resolvePage
-} from "./lib/constants";
-import {
-  DashboardLayout
-} from "./components/layout";
+import { DashboardLayout } from "./components/layout";
+import { emptyDashboard, resolvePage } from "./lib/constants";
 import { ManagementPage } from "./pages/ManagementPage";
 import { MetricsPage } from "./pages/MetricsPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { PlaygroundPage } from "./pages/PlaygroundPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import type { DashboardData, PageKey } from "./types";
 
 export function App() {
   const [page, setPage] = useState<PageKey>(() => resolvePage(window.location.hash));
@@ -26,25 +16,30 @@ export function App() {
   const [credentials, setCredentials] = useState(loadCredentials);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState("");
-  const [theme, setTheme] = useState<"light" | "dark">(() => document.documentElement.classList.contains("dark") ? "dark" : "light");
+  const [theme, setTheme] = useState<"light" | "dark">(() =>
+    document.documentElement.classList.contains("dark") ? "dark" : "light",
+  );
   const api = useMemo(() => new GatewayApi(credentials), [credentials]);
 
   const navigate = useCallback((next: PageKey): void => {
-    if (window.location.hash !== "#" + next) window.history.replaceState(null, "", "#" + next);
+    if (window.location.hash !== `#${next}`) window.history.replaceState(null, "", `#${next}`);
     setPage(next);
     setMobileNav(false);
   }, []);
 
-  const refresh = useCallback(async (silent = false): Promise<void> => {
-    if (!silent) setLoading(true);
-    try {
-      setData(await api.dashboard());
-    } catch (error) {
-      if (error instanceof ApiError) setNotice(error.message);
-    } finally {
-      setLoading(false);
-    }
-  }, [api]);
+  const refresh = useCallback(
+    async (silent = false): Promise<void> => {
+      if (!silent) setLoading(true);
+      try {
+        setData(await api.dashboard());
+      } catch (error) {
+        if (error instanceof ApiError) setNotice(error.message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [api],
+  );
 
   useEffect(() => {
     const onHashChange = (): void => setPage(resolvePage(window.location.hash));
@@ -80,14 +75,31 @@ export function App() {
       onToggleMobile={setMobileNav}
       onRefresh={() => void refresh()}
       onDismissNotice={() => setNotice("")}
-      onToggleTheme={() => setTheme((current) => current === "dark" ? "light" : "dark")}
+      onToggleTheme={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
     >
       {page === "overview" && <OverviewPage data={data} onNavigate={navigate} />}
-      {page === "playground" && <PlaygroundPage data={data} api={api} onRefresh={() => void refresh(true)} />}
+      {page === "playground" && (
+        <PlaygroundPage data={data} api={api} onRefresh={() => void refresh(true)} />
+      )}
       {page === "metrics" && <MetricsPage data={data} />}
-      {page === "management" && <ManagementPage data={data} api={api} onRefresh={() => void refresh(true)} onNotice={setNotice} />}
-      {page === "settings" && <SettingsPage credentials={credentials} onCredentials={setCredentials} theme={theme} onTheme={() => setTheme((current) => current === "dark" ? "light" : "dark")} onNotice={setNotice} />}
+      {page === "management" && (
+        <ManagementPage
+          data={data}
+          api={api}
+          onRefresh={() => void refresh(true)}
+          onNotice={setNotice}
+          onNavigate={navigate}
+        />
+      )}
+      {page === "settings" && (
+        <SettingsPage
+          credentials={credentials}
+          onCredentials={setCredentials}
+          theme={theme}
+          onTheme={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+          onNotice={setNotice}
+        />
+      )}
     </DashboardLayout>
   );
 }
-

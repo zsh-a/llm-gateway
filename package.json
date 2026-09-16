@@ -20,12 +20,17 @@
     "export:harness": "./dist/llm-gateway export deepseek-harness",
     "auth": "npm run build:auth && node dist/auth/scripts/auth.js",
     "test": "tsc -p tsconfig.test.json && node --test .test-dist/tests/*.test.js",
-    "typecheck": "tsc --noEmit && tsc -p web/tsconfig.json --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p web/tsconfig.json --noEmit",
+    "format": "biome format --write web/src",
+    "format:check": "biome format web/src",
+    "lint": "biome lint web/src",
+    "check:frontend": "biome check web/src"
   },
   "engines": {
     "node": ">=20.19.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.14",
     "@perryts/perry": "0.5.1520",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^22.15.0",

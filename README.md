@@ -84,6 +84,19 @@ npm run export:harness         # 输出 DeepSeek Harness 的 settings.yaml 片�
 
 `export:harness` 只输出配置，不会修改 Harness 文件；它会把当前自动发现的 Chat 模型、上下文窗口、最大输出和 reasoning 档位生成到一个统一的 `llm-gateway` Provider 下。
 
+## 前端代码质量
+
+前端源码使用 Biome 统一处理格式化、导入排序和静态检查：
+
+```bash
+npm run format          # 格式化 web/src
+npm run format:check   # 仅检查格式
+npm run lint            # 运行前端 lint
+npm run check:frontend  # 同时检查格式、导入和 lint
+```
+
+提交前建议至少运行 `npm run check:frontend` 和 `npm run typecheck`。
+
 ## 首次认证
 
 认证所有内置 Provider：

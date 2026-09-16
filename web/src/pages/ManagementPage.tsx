@@ -5,21 +5,13 @@ import {
   KeyRound,
   Network,
   Plus,
-  RefreshCw,
+  Power,
   Save,
-  Trash2
+  Trash2,
 } from "lucide-react";
-import {
-  useState,
-  type FormEvent
-} from "react";
-import type {
-  ApiKeyRecord,
-  ChannelConfig,
-  DashboardData
-} from "../types";
+import { type FormEvent, useState } from "react";
 import type { GatewayApi } from "../api";
-import { formatCompact } from "../lib/format";
+import { EmptyState, Field, StatusBadge } from "../components/common";
 import {
   Badge,
   Button,
@@ -28,13 +20,13 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
-  Input
+  Input,
+  Select,
+  Textarea,
 } from "../components/ui";
-import {
-  EmptyState,
-  Field,
-  StatusBadge
-} from "../components/common";
+import { formatCompact } from "../lib/format";
+import { cn } from "../lib/utils";
+import type { ApiKeyRecord, ChannelConfig, DashboardData, PageKey } from "../types";
 
 interface ChannelDraft {
   id: string;
@@ -63,7 +55,7 @@ const initialChannel: ChannelDraft = {
   upstreamUrl: "",
   priority: "100",
   weight: "1",
-  modelMappings: ""
+  modelMappings: "",
 };
 
 const initialKey: KeyDraft = {
@@ -71,25 +63,28 @@ const initialKey: KeyDraft = {
   allowedModels: "",
   rpmLimit: "",
   tpmLimit: "",
-  quotaTokens: ""
+  quotaTokens: "",
 };
 
 export function ManagementPage({
   data,
   api,
   onRefresh,
-  onNotice
+  onNotice,
+  onNavigate,
 }: {
   data: DashboardData;
   api: GatewayApi;
   onRefresh: () => void;
   onNotice: (message: string) => void;
+  onNavigate: (page: PageKey) => void;
 }) {
   const [channel, setChannel] = useState<ChannelDraft>(initialChannel);
   const [key, setKey] = useState<KeyDraft>(initialKey);
   const [secret, setSecret] = useState("");
   const [saving, setSaving] = useState(false);
   const [copyState, setCopyState] = useState(false);
+  const providerOptions = data.health.providers ?? Object.keys(data.auth.providers);
 
   const updateChannel = (name: keyof ChannelDraft, value: string): void => {
     setChannel((current) => ({ ...current, [name]: value }));
@@ -124,7 +119,7 @@ export function ManagementPage({
         enabled: true,
         priority: Number(channel.priority) || 100,
         weight: Number(channel.weight) || 1,
-        modelMappings
+        modelMappings,
       });
       onNotice("渠道已保存");
       setChannel({ ...initialChannel });
@@ -146,10 +141,13 @@ export function ManagementPage({
     try {
       const created = await api.createKey({
         name: key.name,
-        allowedModels: key.allowedModels.split(",").map((item) => item.trim()).filter(Boolean),
+        allowedModels: key.allowedModels
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean),
         ...(key.rpmLimit ? { rpmLimit: Number(key.rpmLimit) } : {}),
         ...(key.tpmLimit ? { tpmLimit: Number(key.tpmLimit) } : {}),
-        ...(key.quotaTokens ? { quotaTokens: Number(key.quotaTokens) } : {})
+        ...(key.quotaTokens ? { quotaTokens: Number(key.quotaTokens) } : {}),
       });
       setSecret(created.secret);
       setKey({ ...initialKey });
@@ -162,7 +160,7 @@ export function ManagementPage({
   };
 
   const removeChannel = async (item: ChannelConfig): Promise<void> => {
-    if (!window.confirm("确认删除渠道「" + (item.name || item.id) + "」？")) return;
+    if (!window.confirm(`确认删除渠道「${item.name || item.id}」？`)) return;
     try {
       await api.deleteChannel(item.id);
       onRefresh();
@@ -181,7 +179,7 @@ export function ManagementPage({
   };
 
   const revokeKey = async (item: ApiKeyRecord): Promise<void> => {
-    if (!window.confirm("确认撤销 Key「" + item.name + "」？")) return;
+    if (!window.confirm(`确认撤销 Key「${item.name}」？`)) return;
     try {
       await api.revokeKey(item.id);
       onRefresh();
@@ -199,13 +197,49 @@ export function ManagementPage({
 
   return (
     <div className="space-y-6">
-      {data.adminError && <div className="flex items-start gap-2 rounded-xl border border-amber-400/25 bg-amber-400/10 p-3 text-sm text-amber-200"><AlertCircle className="mt-0.5 size-4 shrink-0" />{data.adminError}。在设置中保存管理员 API Key 后即可进行写操作。</div>}
-      <div className="grid gap-6 xl:grid-cols-2">
-        <ChannelForm draft={channel} saving={saving} disabled={Boolean(data.adminError)} onChange={updateChannel} onSubmit={saveChannel} />
-        <KeyForm draft={key} saving={saving} disabled={Boolean(data.adminError)} secret={secret} copyState={copyState} onChange={updateKey} onSubmit={createKey} onCopy={copySecret} />
+      {data.adminError && (
+        <div
+          role="alert"
+          className={cn(
+            "flex flex-wrap items-center justify-between gap-3 rounded-xl",
+            "border border-amber-400/20 bg-amber-400/8 p-3 text-sm text-amber-200",
+          )}
+        >
+          <div className="flex items-start gap-2">
+            <AlertCircle className="mt-0.5 size-4 shrink-0" />
+            {data.adminError}。在设置中保存管理员 API Key 后即可进行写操作。
+          </div>
+          <Button variant="outline" size="sm" onClick={() => onNavigate("settings")}>
+            前往设置
+          </Button>
+        </div>
+      )}
+      <div className="grid items-start gap-6 xl:grid-cols-2">
+        <ChannelForm
+          providers={providerOptions}
+          draft={channel}
+          saving={saving}
+          disabled={Boolean(data.adminError)}
+          onChange={updateChannel}
+          onSubmit={saveChannel}
+        />
+        <KeyForm
+          draft={key}
+          saving={saving}
+          disabled={Boolean(data.adminError)}
+          secret={secret}
+          copyState={copyState}
+          onChange={updateKey}
+          onSubmit={createKey}
+          onCopy={copySecret}
+        />
       </div>
-      <div className="grid gap-6 xl:grid-cols-2">
-        <ChannelList items={data.channels} onToggle={(item) => void toggleChannel(item)} onRemove={(item) => void removeChannel(item)} />
+      <div className="grid items-start gap-6 xl:grid-cols-2">
+        <ChannelList
+          items={data.channels}
+          onToggle={(item) => void toggleChannel(item)}
+          onRemove={(item) => void removeChannel(item)}
+        />
         <ApiKeyList items={data.keys} onRevoke={(item) => void revokeKey(item)} />
       </div>
     </div>
@@ -213,34 +247,123 @@ export function ManagementPage({
 }
 
 function ChannelForm({
+  providers,
   draft,
   saving,
   disabled,
   onChange,
-  onSubmit
+  onSubmit,
 }: {
+  providers: string[];
   draft: ChannelDraft;
   saving: boolean;
   disabled: boolean;
   onChange: (name: keyof ChannelDraft, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
+  const providerOptions = Array.from(new Set([...providers, draft.providerId].filter(Boolean)));
   return (
     <Card>
-      <CardHeader><div className="flex items-center gap-2"><Network className="size-4 text-primary" /><CardTitle>新增渠道</CardTitle></div><CardDescription>通过 Provider、认证引用和优先级组成统一路由。</CardDescription></CardHeader>
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <Network className="size-4 text-primary" />
+          <CardTitle>新增渠道</CardTitle>
+        </div>
+        <CardDescription>通过 Provider、认证引用和优先级组成统一路由。</CardDescription>
+      </CardHeader>
       <CardContent>
         <form className="space-y-4" onSubmit={onSubmit}>
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="渠道 ID"><Input value={draft.id} onChange={(event) => onChange("id", event.target.value)} placeholder="mimo-primary" /></Field>
-            <Field label="显示名称"><Input value={draft.name} onChange={(event) => onChange("name", event.target.value)} placeholder="MiMo 主渠道" /></Field>
-            <Field label="Provider"><Input value={draft.providerId} onChange={(event) => onChange("providerId", event.target.value)} placeholder="mimo / workbuddy" /></Field>
-            <Field label="认证引用"><Input value={draft.authRef} onChange={(event) => onChange("authRef", event.target.value)} placeholder="mimo" /></Field>
-            <Field label="优先级"><Input inputMode="numeric" value={draft.priority} onChange={(event) => onChange("priority", event.target.value)} placeholder="100" /></Field>
-            <Field label="权重"><Input inputMode="numeric" value={draft.weight} onChange={(event) => onChange("weight", event.target.value)} placeholder="1" /></Field>
+            <Field label="渠道 ID" htmlFor="channel-id">
+              <Input
+                id="channel-id"
+                required
+                value={draft.id}
+                onChange={(event) => onChange("id", event.target.value)}
+                placeholder="mimo-primary"
+              />
+            </Field>
+            <Field label="显示名称" htmlFor="channel-name">
+              <Input
+                id="channel-name"
+                value={draft.name}
+                onChange={(event) => onChange("name", event.target.value)}
+                placeholder="MiMo 主渠道"
+              />
+            </Field>
+            <Field label="Provider" htmlFor="channel-provider">
+              <Select
+                id="channel-provider"
+                required
+                value={draft.providerId}
+                onChange={(event) => onChange("providerId", event.target.value)}
+                disabled={!providerOptions.length}
+              >
+                <option value="">
+                  {providerOptions.length ? "选择 Provider" : "暂无可用 Provider"}
+                </option>
+                {providerOptions.map((provider) => (
+                  <option key={provider} value={provider}>
+                    {provider}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="认证引用" htmlFor="channel-auth-ref">
+              <Input
+                id="channel-auth-ref"
+                required
+                value={draft.authRef}
+                onChange={(event) => onChange("authRef", event.target.value)}
+                placeholder="mimo"
+              />
+            </Field>
+            <Field label="优先级" htmlFor="channel-priority">
+              <Input
+                id="channel-priority"
+                type="number"
+                min="0"
+                inputMode="numeric"
+                value={draft.priority}
+                onChange={(event) => onChange("priority", event.target.value)}
+                placeholder="100"
+              />
+            </Field>
+            <Field label="权重" htmlFor="channel-weight">
+              <Input
+                id="channel-weight"
+                type="number"
+                min="1"
+                inputMode="numeric"
+                value={draft.weight}
+                onChange={(event) => onChange("weight", event.target.value)}
+                placeholder="1"
+              />
+            </Field>
           </div>
-          <Field label="上游 URL（可选）"><Input value={draft.upstreamUrl} onChange={(event) => onChange("upstreamUrl", event.target.value)} placeholder="留空使用 Provider 默认地址" /></Field>
-          <Field label="模型映射 JSON（可选）"><Input value={draft.modelMappings} onChange={(event) => onChange("modelMappings", event.target.value)} placeholder={'{"public-model":"upstream-model"}'} /></Field>
-          <Button type="submit" disabled={saving || disabled}><Save className="size-4" />{saving ? "保存中..." : "保存渠道"}</Button>
+          <Field label="上游 URL（可选）" htmlFor="channel-upstream-url">
+            <Input
+              id="channel-upstream-url"
+              value={draft.upstreamUrl}
+              onChange={(event) => onChange("upstreamUrl", event.target.value)}
+              placeholder="留空使用 Provider 默认地址"
+            />
+          </Field>
+          <Field label="模型映射 JSON（可选）" htmlFor="channel-model-mappings">
+            <Textarea
+              id="channel-model-mappings"
+              rows={2}
+              spellCheck={false}
+              value={draft.modelMappings}
+              onChange={(event) => onChange("modelMappings", event.target.value)}
+              placeholder={'{"public-model":"upstream-model"}'}
+              className="min-h-20 font-mono text-xs"
+            />
+          </Field>
+          <Button type="submit" disabled={saving || disabled}>
+            <Save className="size-4" />
+            {saving ? "保存中..." : "保存渠道"}
+          </Button>
         </form>
       </CardContent>
     </Card>
@@ -255,7 +378,7 @@ function KeyForm({
   copyState,
   onChange,
   onSubmit,
-  onCopy
+  onCopy,
 }: {
   draft: KeyDraft;
   saving: boolean;
@@ -268,19 +391,88 @@ function KeyForm({
 }) {
   return (
     <Card>
-      <CardHeader><div className="flex items-center gap-2"><KeyRound className="size-4 text-cyan-300" /><CardTitle>创建访问 Key</CardTitle></div><CardDescription>为 Cline、Roo、DeepSeek Harness 等客户端分配独立凭证。</CardDescription></CardHeader>
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <KeyRound className="size-4 text-cyan-300" />
+          <CardTitle>创建访问 Key</CardTitle>
+        </div>
+        <CardDescription>为 Cline、Roo、DeepSeek Harness 等客户端分配独立凭证。</CardDescription>
+      </CardHeader>
       <CardContent>
         <form className="space-y-4" onSubmit={onSubmit}>
-          <Field label="Key 名称"><Input value={draft.name} onChange={(event) => onChange("name", event.target.value)} placeholder="local-client" /></Field>
-          <Field label="允许模型"><Input value={draft.allowedModels} onChange={(event) => onChange("allowedModels", event.target.value)} placeholder="留空表示全部模型，多个模型用逗号分隔" /></Field>
+          <Field label="Key 名称" htmlFor="key-name">
+            <Input
+              id="key-name"
+              required
+              value={draft.name}
+              onChange={(event) => onChange("name", event.target.value)}
+              placeholder="local-client"
+            />
+          </Field>
+          <Field label="允许模型" htmlFor="key-allowed-models">
+            <Input
+              id="key-allowed-models"
+              value={draft.allowedModels}
+              onChange={(event) => onChange("allowedModels", event.target.value)}
+              placeholder="留空表示全部模型，多个模型用逗号分隔"
+            />
+          </Field>
           <div className="grid gap-4 sm:grid-cols-3">
-            <Field label="RPM"><Input inputMode="numeric" value={draft.rpmLimit} onChange={(event) => onChange("rpmLimit", event.target.value)} placeholder="不限" /></Field>
-            <Field label="TPM"><Input inputMode="numeric" value={draft.tpmLimit} onChange={(event) => onChange("tpmLimit", event.target.value)} placeholder="不限" /></Field>
-            <Field label="Token 配额"><Input inputMode="numeric" value={draft.quotaTokens} onChange={(event) => onChange("quotaTokens", event.target.value)} placeholder="不限" /></Field>
+            <Field label="RPM" htmlFor="key-rpm">
+              <Input
+                id="key-rpm"
+                type="number"
+                min="0"
+                inputMode="numeric"
+                value={draft.rpmLimit}
+                onChange={(event) => onChange("rpmLimit", event.target.value)}
+                placeholder="不限"
+              />
+            </Field>
+            <Field label="TPM" htmlFor="key-tpm">
+              <Input
+                id="key-tpm"
+                type="number"
+                min="0"
+                inputMode="numeric"
+                value={draft.tpmLimit}
+                onChange={(event) => onChange("tpmLimit", event.target.value)}
+                placeholder="不限"
+              />
+            </Field>
+            <Field label="Token 配额" htmlFor="key-quota">
+              <Input
+                id="key-quota"
+                type="number"
+                min="0"
+                inputMode="numeric"
+                value={draft.quotaTokens}
+                onChange={(event) => onChange("quotaTokens", event.target.value)}
+                placeholder="不限"
+              />
+            </Field>
           </div>
-          <Button type="submit" disabled={saving || disabled}><Plus className="size-4" />创建 Key</Button>
+          <Button type="submit" disabled={saving || disabled}>
+            <Plus className="size-4" />
+            创建 Key
+          </Button>
         </form>
-        {secret && <div className="mt-5 rounded-xl border border-emerald-400/25 bg-emerald-400/10 p-3"><div className="mb-2 flex items-center justify-between gap-2"><div className="text-xs font-medium text-emerald-200">Secret 只显示这一次，请立即保存</div><Button variant="ghost" size="sm" onClick={onCopy}>{copyState ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}{copyState ? "已复制" : "复制"}</Button></div><code className="block break-all rounded-lg bg-black/15 p-2 font-mono text-xs text-emerald-100">{secret}</code></div>}
+        {secret && (
+          <div className="mt-5 rounded-xl border border-emerald-400/25 bg-emerald-400/10 p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-xs font-medium text-emerald-200">
+                Secret 只显示这一次，请立即保存
+              </div>
+              <Button variant="ghost" size="sm" onClick={onCopy}>
+                {copyState ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                {copyState ? "已复制" : "复制"}
+              </Button>
+            </div>
+            <code className="block break-all rounded-lg bg-black/15 p-2 font-mono text-xs text-emerald-100">
+              {secret}
+            </code>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -289,7 +481,7 @@ function KeyForm({
 function ChannelList({
   items,
   onToggle,
-  onRemove
+  onRemove,
 }: {
   items: ChannelConfig[];
   onToggle: (item: ChannelConfig) => void;
@@ -297,13 +489,55 @@ function ChannelList({
 }) {
   return (
     <Card>
-      <CardHeader><CardTitle>渠道列表</CardTitle><CardDescription>{items.length} 个已配置渠道</CardDescription></CardHeader>
+      <CardHeader>
+        <CardTitle>渠道列表</CardTitle>
+        <CardDescription>{items.length} 个已配置渠道</CardDescription>
+      </CardHeader>
       <CardContent className="space-y-2">
         {items.length === 0 && <EmptyState icon={Network} title="暂无渠道" />}
         {items.map((item) => (
-          <div key={item.id} className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/15 px-3.5 py-3">
-            <div className="flex min-w-0 items-center gap-3"><div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Network className="size-4" /></div><div className="min-w-0"><div className="truncate text-sm font-medium">{item.name || item.id}</div><div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">{item.id} · {item.providerId} · {item.authRef}</div></div></div>
-            <div className="flex shrink-0 items-center gap-2"><StatusBadge status={item.enabled === false ? "offline" : "ready"} label={item.enabled === false ? "停用" : "启用"} /><Button variant="ghost" size="icon" onClick={() => onToggle(item)} title="切换状态"><RefreshCw className="size-3.5" /></Button><Button variant="ghost" size="icon" onClick={() => onRemove(item)} title="删除"><Trash2 className="size-3.5 text-red-300" /></Button></div>
+          <div
+            key={item.id}
+            className={cn(
+              "flex items-center justify-between gap-3 rounded-xl",
+              "border border-border/70 bg-muted/15 px-3.5 py-3",
+            )}
+          >
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <Network className="size-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium">{item.name || item.id}</div>
+                <div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+                  {item.id} · {item.providerId} · {item.authRef}
+                </div>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <StatusBadge
+                status={item.enabled === false ? "offline" : "ready"}
+                label={item.enabled === false ? "停用" : "启用"}
+              />
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => onToggle(item)}
+                title={item.enabled === false ? "启用渠道" : "停用渠道"}
+                aria-label={item.enabled === false ? "启用渠道" : "停用渠道"}
+              >
+                <Power className="size-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => onRemove(item)}
+                title="删除渠道"
+                aria-label="删除渠道"
+              >
+                <Trash2 className="size-3.5 text-red-300" />
+              </Button>
+            </div>
           </div>
         ))}
       </CardContent>
@@ -311,20 +545,55 @@ function ChannelList({
   );
 }
 
-function ApiKeyList({ items, onRevoke }: { items: ApiKeyRecord[]; onRevoke: (item: ApiKeyRecord) => void }) {
+function ApiKeyList({
+  items,
+  onRevoke,
+}: {
+  items: ApiKeyRecord[];
+  onRevoke: (item: ApiKeyRecord) => void;
+}) {
   return (
     <Card>
-      <CardHeader><CardTitle>虚拟 API Keys</CardTitle><CardDescription>{items.length} 个已管理密钥</CardDescription></CardHeader>
+      <CardHeader>
+        <CardTitle>虚拟 API Keys</CardTitle>
+        <CardDescription>{items.length} 个已管理密钥</CardDescription>
+      </CardHeader>
       <CardContent className="space-y-2">
         {items.length === 0 && <EmptyState icon={KeyRound} title="暂无虚拟 Key" />}
         {items.map((item) => (
-          <div key={item.id} className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/15 px-3.5 py-3">
-            <div className="flex min-w-0 items-center gap-3"><div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-cyan-400/10 text-cyan-300"><KeyRound className="size-4" /></div><div className="min-w-0"><div className="truncate text-sm font-medium">{item.name}</div><div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">{item.prefix}… · 已用 {formatCompact(item.usedTokens)} tokens</div></div></div>
-            <div className="flex shrink-0 items-center gap-2">{item.enabled ? <Badge variant="success">启用</Badge> : <Badge variant="muted">已撤销</Badge>}{item.enabled && <Button variant="ghost" size="icon" onClick={() => onRevoke(item)} title="撤销"><Trash2 className="size-3.5 text-red-300" /></Button>}</div>
+          <div
+            key={item.id}
+            className={cn(
+              "flex items-center justify-between gap-3 rounded-xl",
+              "border border-border/70 bg-muted/15 px-3.5 py-3",
+            )}
+          >
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-cyan-400/10 text-cyan-300">
+                <KeyRound className="size-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium">{item.name}</div>
+                <div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+                  {item.prefix}… · 已用 {formatCompact(item.usedTokens)} tokens
+                </div>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {item.enabled ? (
+                <Badge variant="success">启用</Badge>
+              ) : (
+                <Badge variant="muted">已撤销</Badge>
+              )}
+              {item.enabled && (
+                <Button variant="ghost" size="icon" onClick={() => onRevoke(item)} title="撤销">
+                  <Trash2 className="size-3.5 text-red-300" />
+                </Button>
+              )}
+            </div>
           </div>
         ))}
       </CardContent>
     </Card>
   );
 }
-
