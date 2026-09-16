@@ -8,11 +8,11 @@ import {
   credentialHeaders,
   AuthStore,
   type AuthHeaders
-} from "../src/auth-store.js";
-import { ChannelStore } from "../src/channels.js";
-import { loadConfig } from "../src/config.js";
-import { asRecord } from "../src/json.js";
-import { getProvider, getProviders, type ProviderAdapter } from "../src/provider.js";
+} from "../src/auth/auth-store.js";
+import { ChannelStore } from "../src/routing/channels.js";
+import { loadConfig } from "../src/app/config.js";
+import { asRecord } from "../src/domain/json.js";
+import { getProvider, getProviders, type ProviderAdapter } from "../src/providers/index.js";
 
 interface FlowRequest {
   method?: unknown;

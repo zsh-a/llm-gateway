@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { AuthStore } from "../src/auth-store.js";
-import { ChannelStore } from "../src/channels.js";
-import type { GatewayConfig } from "../src/config.js";
-import { ModelCatalog } from "../src/models.js";
-import { ProviderRegistry, type ProviderAdapter } from "../src/provider.js";
+import { AuthStore } from "../src/auth/auth-store.js";
+import { ChannelStore } from "../src/routing/channels.js";
+import type { GatewayConfig } from "../src/app/config.js";
+import { ModelCatalog } from "../src/routing/model-catalog.js";
+import { ProviderRegistry, type ProviderAdapter } from "../src/providers/index.js";
 
 function config(directory: string): GatewayConfig {
   return {

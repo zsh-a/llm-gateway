@@ -24,34 +24,19 @@
 核心代码：
 
 ```text
-src/config.ts       轻量网关配置
-src/deps.ts         GatewayDeps 组合根，集中构造网关服务
-src/json.ts         JSON 边界的统一运行时窄化工具
-src/provider.ts     Provider 注册表、默认上游和统一传输
-src/events.ts       Provider 无关的流事件类型
-src/file-store.ts   原子 JSON 文件读写基础设施
-src/http-types.ts   Hono 请求上下文和认证/指标变量类型
-src/http-utils.ts   JSON、错误、SSE 和凭据处理工具
-src/protocol-handlers.ts Chat/Responses 执行与指标收口
-src/response-store.ts 进程内 Responses 会话存储与生命周期控制
-src/auth-store.ts   网关只读/失效认证缓存
-src/channels.ts     Channel 配置、模型映射、优先级和权重选择
-src/key-store.ts    虚拟 API Key、模型权限、RPM 与 Token 配额
-src/models.ts       多 Provider 模型聚合和模型目录缓存
-src/model-router.ts 模型标识解析和 Channel 路由
-src/gateway-service.ts 请求规范化、校验、路由和配额预留
-src/upstream.ts     上游超时、取消、重试和故障切换
-src/sse.ts          基于 eventsource-parser 的 SSE/JSON 流解析器
-src/stream.ts       Provider chunk → StreamEvent 统一中间表示
-src/tool-history.ts 工具调用历史规范化和链路校验
-src/metrics.ts      请求生命周期、延迟和 Token 用量统计
-src/openai.ts       OpenAI 请求/响应适配
-src/responses.ts    Responses 输入/输出适配
-src/server.ts       OpenAI 兼容 HTTP 服务与启动生命周期
-src/web-ui.ts       Web 控制台嵌入入口
+src/app/            配置、依赖组合根、网关应用服务和应用错误
+src/domain/         JSON 边界、领域类型、推理能力和 Provider 无关事件
+src/auth/           认证缓存、虚拟 API Key 和安全策略
+src/routing/        Channel、模型描述解析、模型目录和模型路由
+src/providers/      Provider 契约、通用适配器、内置实现、注册表和故障切换
+src/protocols/      Chat/Responses、流、SSE 和工具历史协议适配
+src/infrastructure/ 文件存储和 Responses 会话存储
+src/observability/  请求指标和用量归一化
+src/transport/http/ HTTP 类型、工具、协议处理器和服务器装配
+src/embedded-ui/    Web 控制台嵌入入口及生成资源声明
+src/cli/main.ts     serve / desktop 模式入口
+src/cli/management.ts doctor / models / export 管理命令
 web/src/            React + Tailwind + shadcn/ui 控制台源码
-src/main.ts         serve / desktop 模式入口
-src/management.ts   doctor / models / export 管理命令
 scripts/auth.ts         一次性认证引导工具
 scripts/clean.mjs       清理构建、测试和临时产物
 scripts/prepare-ui.mjs  Vite 构建并将 Web 资源内嵌到 Perry
@@ -377,4 +362,4 @@ curl http://127.0.0.1:3000/v1/responses \
 
 ## 扩展 Provider
 
-新增客户端时，在 [`src/provider.ts`](./src/provider.ts) 注册一个 `ProviderAdapter` 并加入 `ProviderRegistry`，提供默认上游、认证匹配规则和模型源即可；需要特殊模型发现逻辑时实现可选的 `discoverModels`。模型目录、认证缓存、路由、SSE 和 OpenAI 转换逻辑无需复制。
+新增客户端时，在 [`src/providers/contracts.ts`](./src/providers/contracts.ts) 遵循 `ProviderAdapter` 契约，在 [`src/providers/builtins.ts`](./src/providers/builtins.ts) 注册实现；通用 OpenAI 兼容传输由 `openai-compatible.ts` 提供，特殊模型发现逻辑通过可选的 `discoverModels` 注入。模型目录、认证缓存、路由、SSE 和 OpenAI 转换逻辑无需复制。

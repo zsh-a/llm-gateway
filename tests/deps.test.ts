@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createGatewayDeps } from "../src/deps.js";
-import type { GatewayConfig } from "../src/config.js";
+import { createGatewayDeps } from "../src/app/deps.js";
+import type { GatewayConfig } from "../src/app/config.js";
 
 function configFor(directory: string, providerId: string): GatewayConfig {
   const channelsFile = join(directory, `${providerId}-channels.json`);

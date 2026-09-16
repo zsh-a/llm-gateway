@@ -9,7 +9,7 @@
   "scripts": {
     "clean": "node scripts/clean.mjs",
     "build": "npm run clean && npm run build:gateway && npm run build:auth",
-    "build:gateway": "npm run build:web && node scripts/build-native.mjs src/main.ts dist/llm-gateway",
+    "build:gateway": "npm run build:web && node scripts/build-native.mjs src/cli/main.ts dist/llm-gateway",
     "build:auth": "tsc -p tsconfig.auth.json",
     "build:web": "node scripts/prepare-ui.mjs",
     "start": "./dist/llm-gateway serve",

@@ -4,17 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { AuthStore } from "../src/auth-store.js";
-import { ChannelStore } from "../src/channels.js";
-import type { GatewayConfig } from "../src/config.js";
-import { ApiKeyStore } from "../src/key-store.js";
-import { MetricsStore } from "../src/metrics.js";
-import { ModelCatalog } from "../src/models.js";
-import { ModelRouter } from "../src/model-router.js";
-import type { ProviderAdapter } from "../src/provider.js";
-import { ProviderRegistry } from "../src/provider.js";
-import { InMemoryResponseStore } from "../src/response-store.js";
-import { createGatewayApp } from "../src/server.js";
+import { AuthStore } from "../src/auth/auth-store.js";
+import { ChannelStore } from "../src/routing/channels.js";
+import type { GatewayConfig } from "../src/app/config.js";
+import { ApiKeyStore } from "../src/auth/api-key-store.js";
+import { MetricsStore } from "../src/observability/metrics.js";
+import { ModelCatalog } from "../src/routing/model-catalog.js";
+import { ModelRouter } from "../src/routing/model-router.js";
+import type { ProviderAdapter } from "../src/providers/index.js";
+import { ProviderRegistry } from "../src/providers/index.js";
+import { InMemoryResponseStore } from "../src/infrastructure/response-store.js";
+import { createGatewayApp } from "../src/transport/http/server.js";
 
 function config(directory: string, bindHost = "127.0.0.1"): GatewayConfig {
   return {

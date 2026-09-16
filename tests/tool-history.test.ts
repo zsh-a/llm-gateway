@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizeToolHistory } from "../src/tool-history.js";
+import { normalizeToolHistory } from "../src/protocols/tool-history.js";
 
 test("tool history normalizes matching assistant calls and results", () => {
   const messages = normalizeToolHistory([

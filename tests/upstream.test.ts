@@ -4,18 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { AuthStore } from "../src/auth-store.js";
-import type { ChannelConfig } from "../src/channels.js";
-import type { GatewayConfig } from "../src/config.js";
-import type { ModelRoute } from "../src/model-router.js";
+import { AuthStore } from "../src/auth/auth-store.js";
+import type { ChannelConfig } from "../src/routing/channels.js";
+import type { GatewayConfig } from "../src/app/config.js";
+import type { ModelRoute } from "../src/routing/model-router.js";
 import {
   UpstreamNetworkError,
   type ProviderAdapter
-} from "../src/provider.js";
+} from "../src/providers/index.js";
 import {
   streamUpstream,
   UpstreamTimeoutError
-} from "../src/upstream.js";
+} from "../src/providers/upstream.js";
 
 function config(requestTimeoutMs: number): GatewayConfig {
   return {

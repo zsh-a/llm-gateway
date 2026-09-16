@@ -6,8 +6,8 @@ import {
   normalizeResponseRequest,
   rememberResponse,
   ResponseAccumulator
-} from "../src/responses.js";
-import { InMemoryResponseStore } from "../src/response-store.js";
+} from "../src/protocols/responses/index.js";
+import { InMemoryResponseStore } from "../src/infrastructure/response-store.js";
 
 test("Responses storage honors store=false and isolates owners", () => {
   const store = new InMemoryResponseStore();

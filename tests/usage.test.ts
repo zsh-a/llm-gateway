@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizeUsage } from "../src/usage.js";
+import { normalizeUsage } from "../src/observability/usage.js";
 
 test("usage normalization reconciles aliases without double counting", () => {
   assert.deepEqual(

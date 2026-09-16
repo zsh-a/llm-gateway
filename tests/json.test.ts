@@ -7,7 +7,7 @@ import {
   asRecord,
   asString,
   asTrimmedString
-} from "../src/json.js";
+} from "../src/domain/json.js";
 
 test("JSON guards keep arrays out of record boundaries", () => {
   assert.deepEqual(asRecord([]), {});

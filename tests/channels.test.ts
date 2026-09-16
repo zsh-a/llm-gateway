@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { ChannelStore } from "../src/channels.js";
+import { ChannelStore } from "../src/routing/channels.js";
 
 function withChannelStore(
   channels: Array<Record<string, unknown>>,

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizeEffort } from "../src/config.js";
-import { normalizeChatRequest } from "../src/openai.js";
-import { normalizeResponseRequest } from "../src/responses.js";
+import { normalizeEffort } from "../src/domain/reasoning.js";
+import { normalizeChatRequest } from "../src/protocols/chat.js";
+import { normalizeResponseRequest } from "../src/protocols/responses/index.js";
 
 test("Responses tool items use the native function call protocol", () => {
   const request = normalizeResponseRequest({
