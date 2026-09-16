@@ -52,6 +52,15 @@ export class UpstreamStreamError extends Error {
   }
 }
 
+export class UpstreamNetworkError extends Error {
+  public readonly status = 502;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "UpstreamNetworkError";
+  }
+}
+
 export interface UpstreamStreamResult {
   eventCount: number;
   sawDone: boolean;
@@ -61,7 +70,6 @@ export interface UpstreamStreamResult {
 export interface ProviderAdapter {
   readonly id: ProviderId;
   readonly name: string;
-  readonly defaultModel: string;
   readonly upstreamUrl: string;
   readonly modelListUrl: string;
   readonly modelFile: string;
@@ -71,6 +79,11 @@ export interface ProviderAdapter {
   readonly authMethods: string[];
   readonly captureHeaders: string[];
   readonly clientCandidates: string[];
+  readonly discoverModels?: (
+    authHeaders: AuthHeaders,
+    config: GatewayConfig,
+    signal?: AbortSignal
+  ) => Promise<ModelDescriptor[]>;
   readonly describeModel?: (model: ModelDescriptor) => ModelDescriptor;
   streamChat(
     authHeaders: AuthHeaders,
@@ -94,7 +107,6 @@ type RequestBodyBuilder = (
 interface OpenAICompatibleProviderOptions {
   id: ProviderId;
   name: string;
-  defaultModel: string;
   upstreamUrl: string;
   modelListUrl: string;
   modelFile: string;
@@ -104,6 +116,11 @@ interface OpenAICompatibleProviderOptions {
   authMethods: string[];
   captureHeaders: string[];
   clientCandidates: string[];
+  discoverModels?: (
+    authHeaders: AuthHeaders,
+    config: GatewayConfig,
+    signal?: AbortSignal
+  ) => Promise<ModelDescriptor[]>;
   buildBody: RequestBodyBuilder;
   describeModel?: (model: ModelDescriptor) => ModelDescriptor;
 }
@@ -232,7 +249,6 @@ function workbuddyModelDescriptor(model: ModelDescriptor): ModelDescriptor {
 class OpenAICompatibleProvider implements ProviderAdapter {
   public readonly id: ProviderId;
   public readonly name: string;
-  public readonly defaultModel: string;
   public readonly upstreamUrl: string;
   public readonly modelListUrl: string;
   public readonly modelFile: string;
@@ -242,13 +258,16 @@ class OpenAICompatibleProvider implements ProviderAdapter {
   public readonly authMethods: string[];
   public readonly captureHeaders: string[];
   public readonly clientCandidates: string[];
+  public readonly discoverModels?: (
+    authHeaders: AuthHeaders,
+    config: GatewayConfig
+  ) => Promise<ModelDescriptor[]>;
   public readonly describeModel?: (model: ModelDescriptor) => ModelDescriptor;
   private readonly buildBody: RequestBodyBuilder;
 
   constructor(options: OpenAICompatibleProviderOptions) {
     this.id = options.id;
     this.name = options.name;
-    this.defaultModel = options.defaultModel;
     this.upstreamUrl = options.upstreamUrl;
     this.modelListUrl = options.modelListUrl;
     this.modelFile = options.modelFile;
@@ -258,6 +277,7 @@ class OpenAICompatibleProvider implements ProviderAdapter {
     this.authMethods = options.authMethods;
     this.captureHeaders = options.captureHeaders;
     this.clientCandidates = options.clientCandidates;
+    this.discoverModels = options.discoverModels;
     this.buildBody = options.buildBody;
     this.describeModel = options.describeModel;
   }
@@ -288,12 +308,19 @@ class OpenAICompatibleProvider implements ProviderAdapter {
     }
 
     try {
-      const response = await fetch(channel?.upstreamUrl ?? this.upstreamUrl, {
-        method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify(this.buildBody(request)),
-        signal: controller.signal
-      });
+      let response: Response;
+      try {
+        response = await fetch(channel?.upstreamUrl ?? this.upstreamUrl, {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify(this.buildBody(request)),
+          signal: controller.signal
+        });
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        throw new UpstreamNetworkError(message);
+      }
 
       if (!response.ok) {
         throw new UpstreamError(response.status, await response.text().catch(() => ""));
@@ -343,7 +370,6 @@ const providers: ProviderAdapter[] = [
   new OpenAICompatibleProvider({
     id: "mimo",
     name: "MiMo",
-    defaultModel: "mimo-x-pro-preview",
     upstreamUrl: "https://mimo-server-cn.xiaomimimo.com/api/route/chat/completions",
     modelListUrl: "https://mimo-server-cn.xiaomimimo.com/api/model/list",
     modelFile: "",
@@ -359,7 +385,6 @@ const providers: ProviderAdapter[] = [
   new OpenAICompatibleProvider({
     id: "workbuddy",
     name: "WorkBuddy",
-    defaultModel: "default",
     upstreamUrl: "https://copilot.tencent.com/v2/chat/completions",
     modelListUrl: "",
     modelFile: "",
@@ -374,13 +399,33 @@ const providers: ProviderAdapter[] = [
   })
 ];
 
-const providerMap: { [key: string]: ProviderAdapter } = {};
-for (const provider of providers) providerMap[provider.id] = provider;
+export class ProviderRegistry {
+  private readonly providerMap = new Map<string, ProviderAdapter>();
+
+  constructor(providerList: ReadonlyArray<ProviderAdapter>) {
+    for (const provider of providerList) {
+      if (this.providerMap.has(provider.id)) {
+        throw new Error(`重复的 Provider ID: ${provider.id}`);
+      }
+      this.providerMap.set(provider.id, provider);
+    }
+  }
+
+  list(): ProviderAdapter[] {
+    return [...this.providerMap.values()];
+  }
+
+  get(id: string): ProviderAdapter | null {
+    return this.providerMap.get(id) ?? null;
+  }
+}
+
+export const defaultProviderRegistry = new ProviderRegistry(providers);
 
 export function getProviders(): ProviderAdapter[] {
-  return [...providers];
+  return defaultProviderRegistry.list();
 }
 
 export function getProvider(id: string): ProviderAdapter | null {
-  return providerMap[id] ?? null;
+  return defaultProviderRegistry.get(id);
 }

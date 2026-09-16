@@ -1,17 +1,9 @@
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync
-} from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { type AuthHeaders, type AuthStore } from "./auth-store.js";
 import type { GatewayConfig } from "./config.js";
 import { type ChannelConfig, type ChannelStore } from "./channels.js";
+import { readJsonFile, writeJsonFileAtomic } from "./file-store.js";
 import {
   asBool,
   asRecord,
@@ -19,8 +11,8 @@ import {
   asTrimmedString
 } from "./json.js";
 import {
-  getProvider,
-  getProviders,
+  defaultProviderRegistry,
+  type ProviderRegistry,
   type ProviderAdapter
 } from "./provider.js";
 import type {
@@ -41,18 +33,6 @@ interface StoredModels {
 interface ModelSnapshot {
   models: ModelDescriptor[];
   source: ModelSource;
-}
-
-export interface ModelRoute {
-  provider: ProviderAdapter;
-  channel: ChannelConfig;
-  candidates: Array<{
-    channel: ChannelConfig;
-    upstreamModel: string;
-  }>;
-  model: ModelDescriptor;
-  upstreamModel: string;
-  publicModel: string;
 }
 
 function reasoningEffortsValue(value: unknown): ReasoningEfforts | undefined {
@@ -240,8 +220,9 @@ function providerCacheFile(
 
 function readModelsFile(file: string, defaultOwnedBy: string): ModelDescriptor[] {
   try {
-    if (!file || !existsSync(file)) return [];
-    return extractModels(JSON.parse(readFileSync(file, "utf8")), defaultOwnedBy);
+    if (!file) return [];
+    const value = readJsonFile(file);
+    return value === null ? [] : extractModels(value, defaultOwnedBy);
   } catch {
     return [];
   }
@@ -249,8 +230,8 @@ function readModelsFile(file: string, defaultOwnedBy: string): ModelDescriptor[]
 
 function readCachedModels(file: string, defaultOwnedBy: string): ModelDescriptor[] {
   try {
-    if (!existsSync(file)) return [];
-    const value: unknown = JSON.parse(readFileSync(file, "utf8"));
+    const value = readJsonFile(file);
+    if (value === null) return [];
     const record = asRecord(value);
     if (Number(record.version) !== 1 || !Array.isArray(record.models)) return [];
     return uniqueModels(record.models, defaultOwnedBy);
@@ -267,20 +248,7 @@ function writeCachedModels(file: string, models: ModelDescriptor[]): void {
   };
 
   try {
-    mkdirSync(dirname(file), { recursive: true });
-    const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
-    try {
-      writeFileSync(temporary, `${JSON.stringify(stored)}\n`, { mode: 0o600 });
-      chmodSync(temporary, 0o600);
-      renameSync(temporary, file);
-      chmodSync(file, 0o600);
-    } finally {
-      try {
-        if (existsSync(temporary)) unlinkSync(temporary);
-      } catch {
-        // Best-effort cleanup; the cache remains usable after a successful rename.
-      }
-    }
+    writeJsonFileAtomic(file, stored);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`无法保存模型列表缓存 ${file}: ${message}`);
@@ -290,6 +258,7 @@ function writeCachedModels(file: string, models: ModelDescriptor[]): void {
 export interface ModelCatalogDeps {
   authStore: AuthStore;
   channels: ChannelStore;
+  providers?: ProviderRegistry;
 }
 
 export class ModelCatalog {
@@ -303,7 +272,11 @@ export class ModelCatalog {
   constructor(
     private readonly config: GatewayConfig,
     private readonly deps: ModelCatalogDeps
-  ) {}
+  ) {
+    this.providers = deps.providers ?? defaultProviderRegistry;
+  }
+
+  private readonly providers: ProviderRegistry;
 
   async get(): Promise<ModelDescriptor[]> {
     if (
@@ -334,7 +307,7 @@ export class ModelCatalog {
   private async load(): Promise<ModelDescriptor[]> {
     const channels = this.deps.channels.list();
     const providerModels = await Promise.all(
-      getProviders().map((provider) => this.loadProvider(provider, channels))
+      this.providers.list().map((provider) => this.loadProvider(provider, channels))
     );
     const rawModels: ModelDescriptor[] = [];
     for (const models of providerModels) rawModels.push(...models);
@@ -355,7 +328,7 @@ export class ModelCatalog {
     const aliasIds = new Set(visible.map((model) => model.publicId ?? model.id));
     for (const channel of channels) {
       if (!channel.enabled) continue;
-      const provider = getProvider(channel.providerId);
+      const provider = this.providers.get(channel.providerId);
       if (!provider) continue;
       for (const [publicId, upstreamModel] of Object.entries(channel.modelMappings)) {
         if (publicId === "*" || aliasIds.has(publicId)) continue;
@@ -396,9 +369,12 @@ export class ModelCatalog {
     );
     if (local.length > 0) return this.withProvider(local, provider);
 
-    if (this.config.modelDiscoveryEnabled && provider.modelListUrl) {
+    if (
+      this.config.modelDiscoveryEnabled &&
+      (Boolean(provider.discoverModels) || Boolean(provider.modelListUrl))
+    ) {
       const remote = filterModels(
-        await this.fetchRemote(provider),
+        await this.fetchRemote(provider, channels),
         this.config.modelAllowlist
       );
       if (remote.length > 0) {
@@ -434,23 +410,59 @@ export class ModelCatalog {
     });
   }
 
-  private async fetchRemote(provider: ProviderAdapter): Promise<ModelDescriptor[]> {
-    const snapshot = this.deps.authStore.get(provider.id);
-    const auth: AuthHeaders | null = snapshot?.headers ?? null;
-    if (!auth) return [];
+  private async fetchRemote(
+    provider: ProviderAdapter,
+    channels: ChannelConfig[]
+  ): Promise<ModelDescriptor[]> {
+    const authRefs = [
+      provider.id,
+      ...channels
+        .filter((channel) => channel.enabled && channel.providerId === provider.id)
+        .map((channel) => channel.authRef)
+    ];
+    const attempted = new Set<string>();
 
-    try {
-      const response = await fetch(provider.modelListUrl, {
-        headers: {
-          ...auth,
-          accept: "application/json"
-        }
-      });
-      if (!response.ok) return [];
-      return extractModels(await response.json(), provider.name);
-    } catch {
-      return [];
+    for (const authRef of authRefs) {
+      if (attempted.has(authRef)) continue;
+      attempted.add(authRef);
+      const snapshot = this.deps.authStore.get(authRef);
+      const auth: AuthHeaders | null = snapshot?.headers ?? null;
+      if (!auth) continue;
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(
+        () => controller.abort(),
+        this.config.modelDiscoveryTimeoutMs
+      );
+      try {
+        const models = provider.discoverModels
+          ? await provider.discoverModels(auth, this.config, controller.signal)
+          : await this.fetchOpenAiCompatibleModels(provider, auth, controller.signal);
+        if (models.length > 0) return models;
+      } catch {
+        // Try another authenticated channel before falling back to cache.
+      } finally {
+        clearTimeout(timeoutId);
+      }
     }
+    return [];
+  }
+
+  private async fetchOpenAiCompatibleModels(
+    provider: ProviderAdapter,
+    auth: AuthHeaders,
+    signal: AbortSignal
+  ): Promise<ModelDescriptor[]> {
+    if (!provider.modelListUrl) return [];
+    const response = await fetch(provider.modelListUrl, {
+      headers: {
+        ...auth,
+        accept: "application/json"
+      },
+      signal
+    });
+    if (!response.ok) return [];
+    return extractModels(await response.json(), provider.name);
   }
 
   clear(): void {
@@ -458,76 +470,4 @@ export class ModelCatalog {
     this.memory = null;
   }
 
-  async resolve(requestedModel: string): Promise<ModelRoute | null> {
-    const models = await this.get();
-    const requested = requestedModel.trim();
-    const exact = models.find((model) => model.publicId === requested);
-    if (exact && exact.providerId) {
-      const provider = getProvider(exact.providerId);
-      if (provider) return this.routeFromModel(exact, provider);
-    }
-
-    const separator = requested.indexOf("/");
-    if (separator > 0) {
-      const provider = getProvider(requested.slice(0, separator));
-      const upstreamModel = requested.slice(separator + 1).trim();
-      if (provider && upstreamModel) {
-        const candidates = this.deps.channels.selectCandidates(
-          provider.id,
-          requested,
-          upstreamModel
-        );
-        if (candidates.length === 0) return null;
-        const selection = candidates[0];
-        return {
-          provider,
-          channel: selection.channel,
-          candidates,
-          model: {
-            id: upstreamModel,
-            providerId: provider.id,
-            publicId: requested,
-            ownedBy: provider.name
-          },
-          upstreamModel: selection.upstreamModel,
-          publicModel: requested
-        };
-      }
-    }
-
-    const rawMatches = models.filter((model) => model.id === requested);
-    if (rawMatches.length === 1 && rawMatches[0].providerId) {
-      const provider = getProvider(rawMatches[0].providerId);
-      if (provider) return this.routeFromModel(rawMatches[0], provider);
-    }
-
-    if (!requested && models.length > 0 && models[0].providerId) {
-      const provider = getProvider(models[0].providerId);
-      if (provider) return this.routeFromModel(models[0], provider);
-    }
-
-    return null;
-  }
-
-  private routeFromModel(
-    model: ModelDescriptor,
-    provider: ProviderAdapter
-  ): ModelRoute | null {
-    const publicModel = model.publicId ?? model.id;
-    const candidates = this.deps.channels.selectCandidates(
-      provider.id,
-      publicModel,
-      model.id
-    );
-    if (candidates.length === 0) return null;
-    const selection = candidates[0];
-    return {
-      provider,
-      channel: selection.channel,
-      candidates,
-      model,
-      upstreamModel: selection.upstreamModel,
-      publicModel
-    };
-  }
 }

@@ -1,32 +1,9 @@
 import type { UpstreamChunk } from "./provider.js";
 import { asRecord, asString, serializedValue } from "./json.js";
+import type { StreamEvent, StreamToolCall } from "./events.js";
 import type { JsonRecord } from "./types.js";
 
-export interface StreamToolCall {
-  index: number;
-  id?: string;
-  callId?: string;
-  type: string;
-  name: string;
-  arguments: string;
-}
-
-export type StreamEvent =
-  | { type: "role"; role: string }
-  | { type: "text"; text: string }
-  | { type: "reasoning"; text: string }
-  | { type: "refusal"; text: string }
-  | {
-      type: "tool_call";
-      index: number;
-      id?: string;
-      callId?: string;
-      toolType?: string;
-      name?: string;
-      arguments?: string;
-    }
-  | { type: "finish"; reason: string }
-  | { type: "usage"; usage: JsonRecord };
+export type { StreamEvent, StreamToolCall } from "./events.js";
 
 function indexValue(value: unknown, fallback: number): number {
   const index = Number(value);

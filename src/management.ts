@@ -3,7 +3,6 @@ import { existsSync } from "node:fs";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import { createGatewayDeps, type GatewayDeps } from "./deps.js";
 import { modelsResponse } from "./openai.js";
-import { getProviders } from "./provider.js";
 import type { ModelDescriptor, ReasoningEfforts } from "./types.js";
 
 function quote(value: string): string {
@@ -106,7 +105,7 @@ export async function runDoctor(
   config: GatewayConfig = loadConfig(),
   deps: GatewayDeps = createGatewayDeps(config)
 ): Promise<number> {
-  const providers = getProviders();
+  const providers = deps.providers.list();
   const auth = deps.authStore.status(providers.map((provider) => provider.id));
   const models = await deps.catalog.get();
   const endpoint = formatEndpoint(config);

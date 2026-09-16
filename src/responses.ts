@@ -1,7 +1,15 @@
 import { ChatAccumulator, normalizeChatRequest } from "./openai.js";
-import { asRecord, asString, asTrimmedString, serializedValue } from "./json.js";
+import {
+  asNumber,
+  asRecord,
+  asString,
+  asTrimmedString,
+  serializedValue
+} from "./json.js";
 import type { UpstreamChunk } from "./provider.js";
-import type { StreamEvent, StreamToolCall } from "./stream.js";
+import type { ResponseStore, StoredResponse } from "./response-store.js";
+import { cloneJsonValue } from "./response-store.js";
+import type { StreamEvent, StreamToolCall } from "./events.js";
 import type {
   JsonRecord,
   NormalizedChatRequest,
@@ -224,6 +232,13 @@ function responseToolChoice(value: unknown): unknown {
   return value;
 }
 
+function optionalNumber(value: unknown, field: string): number | null | undefined {
+  if (value === undefined || value === null) return value as null | undefined;
+  const number = asNumber(value);
+  if (number === undefined) throw new Error(`${field} 必须是数字或 null`);
+  return number;
+}
+
 function responseFormat(value: unknown): unknown {
   if (value === undefined || value === null) return undefined;
   const format = asRecord(value);
@@ -248,43 +263,9 @@ function responseFormat(value: unknown): unknown {
   throw new Error("暂不支持 Responses text.format 类型: " + (type || "unknown"));
 }
 
-interface StoredResponse {
-  model: string;
-  messages: JsonRecord[];
-  options: JsonRecord;
-  response: ResponseRequestOptions;
-}
-
-const responseHistory = new Map<string, StoredResponse>();
-const MAX_RESPONSE_HISTORY = 128;
-
-function copyValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(copyValue);
-  if (value !== null && typeof value === "object") {
-    const result: JsonRecord = {};
-    for (const [key, nested] of Object.entries(value)) {
-      result[key] = copyValue(nested);
-    }
-    return result;
-  }
-  return value;
-}
-
-function copyRecord(value: JsonRecord): JsonRecord {
-  return copyValue(value) as JsonRecord;
-}
-
-function previousResponse(id: string): StoredResponse | null {
-  const stored = responseHistory.get(id);
-  if (!stored) return null;
-  responseHistory.delete(id);
-  responseHistory.set(id, stored);
-  return {
-    model: stored.model,
-    messages: stored.messages.map(copyRecord),
-    options: copyValue(stored.options) as JsonRecord,
-    response: copyValue(stored.response) as ResponseRequestOptions
-  };
+export interface ResponseNormalizationContext {
+  responseStore?: ResponseStore;
+  owner?: string;
 }
 
 function mergeResponseOptions(
@@ -292,7 +273,7 @@ function mergeResponseOptions(
   current: ResponseRequestOptions
 ): ResponseRequestOptions {
   return {
-    ...(inherited ? copyValue(inherited) as ResponseRequestOptions : {}),
+    ...(inherited ? cloneJsonValue(inherited) as ResponseRequestOptions : {}),
     ...current
   };
 }
@@ -343,13 +324,20 @@ function responseRequestOptions(body: JsonRecord): ResponseRequestOptions {
     }
     options.parallelToolCalls = body.parallel_tool_calls;
   }
-  if (body.temperature !== undefined) options.temperature = body.temperature as number;
-  if (body.top_p !== undefined) options.topP = body.top_p as number;
+  if (body.temperature !== undefined) {
+    options.temperature = optionalNumber(body.temperature, "temperature");
+  }
+  if (body.top_p !== undefined) {
+    options.topP = optionalNumber(body.top_p, "top_p");
+  }
   if (body.tool_choice !== undefined) options.toolChoice = body.tool_choice;
   if (Array.isArray(body.tools)) options.tools = body.tools;
   if (body.truncation !== undefined) options.truncation = body.truncation as string;
   if (body.max_output_tokens !== undefined) {
-    options.maxOutputTokens = body.max_output_tokens as number;
+    options.maxOutputTokens = optionalNumber(
+      body.max_output_tokens,
+      "max_output_tokens"
+    );
   }
   if (body.reasoning !== undefined) {
     if (
@@ -366,12 +354,16 @@ function responseRequestOptions(body: JsonRecord): ResponseRequestOptions {
 
 export function normalizeResponseRequest(
   value: unknown,
-  defaultModel = ""
+  defaultModel = "",
+  context: ResponseNormalizationContext = {}
 ): NormalizedChatRequest {
   const body = asRecord(value);
   const responseOverrides = responseRequestOptions(body);
   const previous = responseOverrides.previousResponseId
-    ? previousResponse(responseOverrides.previousResponseId)
+    ? context.responseStore?.get(
+      responseOverrides.previousResponseId,
+      context.owner ?? "anonymous"
+    ) ?? null
     : null;
   const response = mergeResponseOptions(previous?.response, responseOverrides);
   const messages: JsonRecord[] = [];
@@ -624,7 +616,9 @@ function responseObject(
     parallel_tool_calls: options.parallelToolCalls ?? true,
     previous_response_id: options.previousResponseId ?? null,
     reasoning: options.reasoning ?? { effort: null, summary: null },
-    store: options.store ?? false,
+    // Responses are stored by default so previous_response_id remains useful;
+    // an explicit store=false is honored by rememberResponse.
+    store: options.store ?? true,
     temperature: options.temperature ?? 1,
     text: options.text ?? { format: { type: "text" } },
     tool_choice: options.toolChoice ?? "auto",
@@ -1015,21 +1009,18 @@ export function responseFailed(
 export function rememberResponse(
   context: ResponseContext,
   request: NormalizedChatRequest,
-  accumulator: ResponseAccumulator
+  accumulator: ResponseAccumulator,
+  store: ResponseStore,
+  owner = "anonymous"
 ): void {
-  responseHistory.delete(context.id);
-  responseHistory.set(context.id, {
+  if (request.response?.store === false) return;
+  store.put(context.id, owner, {
     model: context.model,
     messages: [
-      ...request.messages.map(copyRecord),
-      copyRecord(accumulator.assistantMessage())
+      ...request.messages.map((message) => cloneJsonValue(message) as JsonRecord),
+      cloneJsonValue(accumulator.assistantMessage()) as JsonRecord
     ],
-    options: copyValue(request.options) as JsonRecord,
-    response: copyValue(request.response ?? {}) as ResponseRequestOptions
+    options: cloneJsonValue(request.options) as JsonRecord,
+    response: cloneJsonValue(request.response ?? {}) as ResponseRequestOptions
   });
-  while (responseHistory.size > MAX_RESPONSE_HISTORY) {
-    const first = responseHistory.keys().next().value;
-    if (first === undefined) break;
-    responseHistory.delete(first);
-  }
 }

@@ -1,14 +1,6 @@
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync
-} from "node:fs";
 import { join } from "node:path";
 
+import { readJsonFile, removeFile, writeJsonFileAtomic } from "./file-store.js";
 import { asRecord } from "./json.js";
 
 export interface AuthHeaders {
@@ -104,8 +96,8 @@ function cacheFile(cacheDir: string, providerId: string): string {
 
 function readSnapshot(file: string): AuthSnapshot | null {
   try {
-    if (!existsSync(file)) return null;
-    const value: unknown = JSON.parse(readFileSync(file, "utf8"));
+    const value = readJsonFile(file);
+    if (value === null) return null;
     const record = asRecord(value);
     if (Number(record.version) !== 1) return null;
 
@@ -137,29 +129,11 @@ export class AuthStore {
       headers: normalized,
       capturedAt: Date.now()
     };
-    mkdirSync(this.cacheDir, { recursive: true });
-    const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
-    try {
-      writeFileSync(temporary, `${JSON.stringify(stored)}\n`, { mode: 0o600 });
-      chmodSync(temporary, 0o600);
-      renameSync(temporary, file);
-      chmodSync(file, 0o600);
-    } finally {
-      try {
-        if (existsSync(temporary)) unlinkSync(temporary);
-      } catch {
-        // A best-effort cleanup must not hide the original write error.
-      }
-    }
+    writeJsonFileAtomic(file, stored);
   }
 
   invalidate(providerId: string): void {
-    try {
-      const file = cacheFile(this.cacheDir, providerId);
-      if (existsSync(file)) unlinkSync(file);
-    } catch {
-      // A stale cache must not prevent the next authentication attempt.
-    }
+    removeFile(cacheFile(this.cacheDir, providerId));
   }
 
   status(providerIds: string[]): AuthStatus {

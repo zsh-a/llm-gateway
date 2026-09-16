@@ -11,6 +11,14 @@ interface NormalizedAssistant {
   calls: PendingToolCall[];
 }
 
+const MESSAGE_ROLES = new Set([
+  "system",
+  "developer",
+  "user",
+  "assistant",
+  "tool"
+]);
+
 function invalid(message: string): never {
   throw new Error("工具调用历史无效: " + message);
 }
@@ -155,6 +163,12 @@ export function normalizeToolHistory(messages: unknown[]): JsonRecord[] {
 
     const message = asRecord(value);
     const role = asTrimmedString(message.role) ?? "";
+    if (role === "function") {
+      invalid(`messages[${index}] 工具结果必须使用 role=tool`);
+    }
+    if (!MESSAGE_ROLES.has(role)) {
+      invalid(`messages[${index}] role 无效`);
+    }
 
     if (role === "assistant") {
       requireToolResults(index, pending);
@@ -162,10 +176,6 @@ export function normalizeToolHistory(messages: unknown[]): JsonRecord[] {
       normalized.push(result.message);
       pending = result.calls;
       continue;
-    }
-
-    if (role === "function") {
-      invalid(`messages[${index}] 工具结果必须使用 role=tool`);
     }
 
     if (role === "tool") {

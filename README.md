@@ -28,10 +28,19 @@ src/config.ts       轻量网关配置
 src/deps.ts         GatewayDeps 组合根，集中构造网关服务
 src/json.ts         JSON 边界的统一运行时窄化工具
 src/provider.ts     Provider 注册表、默认上游和统一传输
+src/events.ts       Provider 无关的流事件类型
+src/file-store.ts   原子 JSON 文件读写基础设施
+src/http-types.ts   Hono 请求上下文和认证/指标变量类型
+src/http-utils.ts   JSON、错误、SSE 和凭据处理工具
+src/protocol-handlers.ts Chat/Responses 执行与指标收口
+src/response-store.ts 进程内 Responses 会话存储与生命周期控制
 src/auth-store.ts   网关只读/失效认证缓存
 src/channels.ts     Channel 配置、模型映射、优先级和权重选择
 src/key-store.ts    虚拟 API Key、模型权限、RPM 与 Token 配额
-src/models.ts       多 Provider 模型聚合和自动路由
+src/models.ts       多 Provider 模型聚合和模型目录缓存
+src/model-router.ts 模型标识解析和 Channel 路由
+src/gateway-service.ts 请求规范化、校验、路由和配额预留
+src/upstream.ts     上游超时、取消、重试和故障切换
 src/sse.ts          基于 eventsource-parser 的 SSE/JSON 流解析器
 src/stream.ts       Provider chunk → StreamEvent 统一中间表示
 src/tool-history.ts 工具调用历史规范化和链路校验
@@ -266,11 +275,18 @@ AUTH_CACHE_DIR=./.runtime/auth
 MODEL_CACHE_DIR=./.runtime/models
 WORKBUDDY_MODEL_FILE= # 可选：覆盖 WorkBuddy 本地模型目录文件
 MODEL_DISCOVERY=true
+MODEL_DISCOVERY_TIMEOUT_MS=30000
 METRICS_MAX_RECORDS=2000
+REQUEST_TIMEOUT_MS=180000
+RESPONSE_STORE_MAX_ENTRIES=128
+RESPONSE_STORE_TTL_MS=3600000
+RESPONSE_STORE_MAX_BYTES=8388608
 CHANNELS_FILE=./.runtime/channels.json
 API_KEYS_FILE=./.runtime/api-keys.json
 METRICS_FILE=./.runtime/metrics.json
 ```
+
+默认只允许同源访问；需要跨域时显式设置 `CORS_ORIGIN`。生产部署建议同时配置 `PROXY_ADMIN_KEY`，并将 `BIND_HOST` 保持为可信网卡地址。
 
 认证工具的 mitmproxy 和客户端参数见 [.env.example](./.env.example)，这些参数不会被网关进程使用。
 
@@ -321,7 +337,7 @@ POST /v1/responses
 .runtime/auth/workbuddy.json
 ```
 
-Channel 可以配置独立认证缓存、上游地址、模型映射、优先级和权重。相同 Provider 的多个 Channel 会先按优先级选择，再按权重轮询；上游在首个响应块之前返回 429、5xx 或网络错误时，网关会自动尝试下一个 Channel。流式响应已经开始输出后不会切换上游。
+Channel 可以配置独立认证缓存、上游地址、模型映射、优先级和权重。相同 Provider 的多个 Channel 会先按优先级选择，再按权重轮询；上游在首个响应块之前返回可重试的 429、5xx 或网络错误时，网关会自动尝试下一个 Channel。所有尝试共享一个总请求超时，流式响应已经开始输出后不会切换上游。
 
 创建一个模型别名和备用渠道：
 
@@ -349,7 +365,7 @@ Chat Completions 流式请求支持标准 `stream_options.include_usage`：网�
 
 工具调用历史在转发前会统一为 `tool_calls` / `tool` 消息，并校验每个工具调用是否有且只有一个匹配的 `tool_call_id` 结果；缺失、重复、孤立或 ID 不匹配的历史会由网关直接返回 400，不再交给上游返回模糊错误。Chat 请求只接受这套标准工具消息格式。
 
-Responses API 会将 `input`、`instructions` 和 Responses 风格的 function tools 适配为上游所需的 Chat Completions 请求，并返回标准 `response` 对象。`stream: true` 时输出标准 Responses SSE 事件，包含 `response.reasoning_text.delta/done`、文本、拒答和函数调用的增量/完成事件（如 `response.function_call_arguments.delta/done`）。`text.format` 会转换为上游的结构化输出参数；`previous_response_id` 支持当前网关进程内的轻量会话链，网关重启后会按无状态服务返回 400，而不是静默丢弃。
+Responses API 会将 `input`、`instructions` 和 Responses 风格的 function tools 适配为上游所需的 Chat Completions 请求，并返回标准 `response` 对象。`stream: true` 时输出标准 Responses SSE 事件，包含 `response.reasoning_text.delta/done`、文本、拒答和函数调用的增量/完成事件（如 `response.function_call_arguments.delta/done`）。`text.format` 会转换为上游的结构化输出参数；Responses 默认保留在受限的进程内会话存储中，支持 `previous_response_id` 链接，并按 TTL、条目数和总字节数淘汰；设置 `response.store=false` 可禁用保存。
 
 调用示例：
 
@@ -361,4 +377,4 @@ curl http://127.0.0.1:3000/v1/responses \
 
 ## 扩展 Provider
 
-新增客户端时，在 [`src/provider.ts`](./src/provider.ts) 注册一个 `ProviderAdapter`，提供默认上游、认证匹配规则和模型源即可。模型目录、认证缓存、路由、SSE 和 OpenAI 转换逻辑无需复制。
+新增客户端时，在 [`src/provider.ts`](./src/provider.ts) 注册一个 `ProviderAdapter` 并加入 `ProviderRegistry`，提供默认上游、认证匹配规则和模型源即可；需要特殊模型发现逻辑时实现可选的 `discoverModels`。模型目录、认证缓存、路由、SSE 和 OpenAI 转换逻辑无需复制。

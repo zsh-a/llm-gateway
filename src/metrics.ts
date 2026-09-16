@@ -1,14 +1,4 @@
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync
-} from "node:fs";
-import { dirname } from "node:path";
-
+import { readJsonFile, writeJsonFileAtomic } from "./file-store.js";
 import type { JsonRecord, NormalizedChatRequest } from "./types.js";
 import {
   normalizeUsage,
@@ -194,6 +184,7 @@ export class MetricsStore {
   private readonly records: MetricRecord[] = [];
   private sequence = 0;
   private active = 0;
+  private persistenceTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly maxRecords: number,
@@ -474,9 +465,10 @@ export class MetricsStore {
   }
 
   private load(): void {
-    if (!this.file || !existsSync(this.file)) return;
+    if (!this.file) return;
     try {
-      const value: unknown = JSON.parse(readFileSync(this.file, "utf8"));
+      const value = readJsonFile(this.file);
+      if (value === null) return;
       const record = value !== null && typeof value === "object"
         ? value as { [key: string]: unknown }
         : {};
@@ -507,22 +499,28 @@ export class MetricsStore {
 
   private persist(): void {
     if (!this.file) return;
+    if (this.persistenceTimer !== null) return;
+    // Metrics are diagnostic data. Coalesce bursts of completions so the
+    // request path does not synchronously rewrite the complete ring buffer.
+    this.persistenceTimer = setTimeout(() => {
+      this.persistenceTimer = null;
+      this.persistNow();
+    }, 0);
+  }
+
+  /** Flush pending diagnostic data before an intentional process shutdown. */
+  flush(): void {
+    if (this.persistenceTimer === null) return;
+    clearTimeout(this.persistenceTimer);
+    this.persistenceTimer = null;
+    this.persistNow();
+  }
+
+  private persistNow(): void {
+    if (!this.file) return;
     try {
-      mkdirSync(dirname(this.file), { recursive: true });
-      const temporary = `${this.file}.${process.pid}.${Date.now()}.tmp`;
       const stored: StoredMetrics = { version: 1, records: this.records };
-      try {
-        writeFileSync(temporary, `${JSON.stringify(stored)}\n`, { mode: 0o600 });
-        chmodSync(temporary, 0o600);
-        renameSync(temporary, this.file);
-        chmodSync(this.file, 0o600);
-      } finally {
-        try {
-          if (existsSync(temporary)) unlinkSync(temporary);
-        } catch {
-          // Best-effort cleanup after an atomic rename.
-        }
-      }
+      writeJsonFileAtomic(this.file, stored);
     } catch {
       // Metrics are observability data; persistence failure must not break a request.
     }

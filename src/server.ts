@@ -1,113 +1,19 @@
 import { serve, type ServerType } from "@hono/node-server";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { cors } from "hono/cors";
-import { streamSSE, type SSEStreamingApi } from "hono/streaming";
-import type { ContentfulStatusCode } from "hono/utils/http-status";
 
-import type { ChannelConfig } from "./channels.js";
-import { loadConfig } from "./config.js";
-import type { ModelRoute } from "./models.js";
-import type { ApiKeyIdentity, ApiKeyStore } from "./key-store.js";
+import { isLoopbackHost, loadConfig } from "./config.js";
 import { createGatewayDeps, type GatewayDeps } from "./deps.js";
+import { appError, adminAuthorized, readJsonRecord, requestCredential, sendError, sendJson, sendWebUi } from "./http-utils.js";
+import type { GatewayContext, GatewayEnv } from "./http-types.js";
+import type { ApiKeyIdentity, ApiKeyStore } from "./key-store.js";
 import {
   MetricsStore,
   parseDuration,
-  type MetricHandle,
-  type MetricAdmission,
-  type MetricOutcome
+  type MetricAdmission
 } from "./metrics.js";
-import {
-  ChatAccumulator,
-  createStreamContext,
-  errorResponse,
-  finalOpenAIChunk,
-  includesUsage,
-  modelsResponse,
-  normalizeChatRequest,
-  toOpenAIChunks,
-  validateChatRequest,
-  validateModelRequest,
-  usageOpenAIChunk
-} from "./openai.js";
-import {
-  createResponseContext,
-  normalizeResponseRequest,
-  responseChunkEvents,
-  responseCreated,
-  responseFailed,
-  responseFinishEvents,
-  responseInProgress,
-  rememberResponse,
-  ResponseAccumulator,
-  validateResponseRequest
-} from "./responses.js";
-import {
-  getProviders,
-  UpstreamError,
-  UpstreamStreamError,
-  type UpstreamStreamResult,
-  type UpstreamChunk
-} from "./provider.js";
-import type { JsonRecord, NormalizedChatRequest } from "./types.js";
-import { WEB_UI_HTML } from "./web-ui.js";
-
-interface GatewayVariables {
-  identity: ApiKeyIdentity;
-  admission: MetricAdmission | undefined;
-}
-
-type GatewayEnv = { Variables: GatewayVariables };
-type GatewayContext = Context<GatewayEnv>;
-
-class GatewayError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly type: string,
-    message: string
-  ) {
-    super(message);
-    this.name = "GatewayError";
-  }
-}
-
-function statusCode(status: number): ContentfulStatusCode {
-  return status as ContentfulStatusCode;
-}
-
-function sendJson(c: Context, status: number, body: unknown): Response {
-  return c.body(
-    JSON.stringify(body),
-    statusCode(status),
-    { "Content-Type": "application/json; charset=utf-8" }
-  );
-}
-
-function sendError(
-  c: Context,
-  status: number,
-  message: string,
-  type: string
-): Response {
-  return sendJson(c, status, errorResponse(message, type));
-}
-
-function sendWebUi(c: Context): Response {
-  return c.body(WEB_UI_HTML, 200, {
-    "Content-Type": "text/html; charset=utf-8",
-    "Cache-Control": "no-store",
-    "Content-Security-Policy": "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
-    "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "same-origin"
-  });
-}
-
-function requestCredential(c: Context): string {
-  const authorization = c.req.header("authorization") ?? "";
-  if (authorization.toLowerCase().startsWith("bearer ")) {
-    return authorization.slice(7).trim();
-  }
-  return (c.req.header("x-api-key") ?? "").trim();
-}
+import { modelsResponse } from "./openai.js";
+import { handleChat, handleResponses } from "./protocol-handlers.js";
 
 function authenticateRequest(c: Context, apiKeys: ApiKeyStore): ApiKeyIdentity | null {
   const credential = requestCredential(c);
@@ -115,619 +21,8 @@ function authenticateRequest(c: Context, apiKeys: ApiKeyStore): ApiKeyIdentity |
   return apiKeys.authenticate(credential);
 }
 
-function adminAuthorized(c: Context, adminKey: string): boolean {
-  return !adminKey || requestCredential(c) === adminKey;
-}
-
 function metricScope(identity: ApiKeyIdentity): string | undefined {
   return identity.source === "managed" ? identity.keyId : undefined;
-}
-
-function beginMetric(
-  deps: GatewayDeps,
-  c: GatewayContext,
-  protocol: "chat" | "responses",
-  route: ModelRoute,
-  request: NormalizedChatRequest,
-  identity: ApiKeyIdentity
-): MetricHandle {
-  const handle = deps.metrics.begin(
-    protocol,
-    route.provider.id,
-    route.publicModel,
-    request,
-    {
-      channelId: route.channel.id,
-      apiKeyId: identity.keyId
-    }
-  );
-  c.header("X-Request-ID", handle.id);
-  return handle;
-}
-
-function finishMetric(
-  deps: GatewayDeps,
-  handle: MetricHandle,
-  identity: ApiKeyIdentity,
-  outcome: MetricOutcome
-): void {
-  deps.metrics.finish(handle, outcome);
-  deps.apiKeys.recordUsage(identity, outcome.usage);
-}
-
-interface MetricAccumulator {
-  usage: unknown;
-  finishReason: string;
-  finishSeen: boolean;
-  toolCalls: unknown[];
-}
-
-function outcomeFor(
-  accumulator: MetricAccumulator,
-  status: MetricOutcome["status"],
-  errorType?: string
-): MetricOutcome {
-  return {
-    status,
-    errorType,
-    usage: accumulator.usage,
-    finishReason: accumulator.finishSeen ? accumulator.finishReason : undefined,
-    toolCalls: accumulator.toolCalls.filter(Boolean).length
-  };
-}
-
-async function readBody(c: Context, maxBytes: number): Promise<string> {
-  const contentLength = Number(c.req.header("content-length"));
-  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-    throw new GatewayError(413, "invalid_request_error", "请求体超过大小限制");
-  }
-
-  try {
-    const raw = await c.req.text();
-    const size = new TextEncoder().encode(raw).byteLength;
-    if (size > maxBytes) {
-      throw new GatewayError(413, "invalid_request_error", "请求体超过大小限制");
-    }
-    return raw;
-  } catch (error) {
-    if (error instanceof GatewayError) throw error;
-    const message = error instanceof Error ? error.message : String(error);
-    throw new GatewayError(400, "invalid_request_error", message);
-  }
-}
-
-async function readJsonRecord(c: Context, maxBodyBytes: number): Promise<JsonRecord> {
-  const raw = await readBody(c, maxBodyBytes);
-  let value: unknown;
-  try {
-    value = JSON.parse(raw || "{}");
-  } catch {
-    throw new GatewayError(400, "invalid_request_error", "请求体不是合法 JSON");
-  }
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new GatewayError(400, "invalid_request_error", "请求体必须是 JSON 对象");
-  }
-  return value as JsonRecord;
-}
-
-function asGatewayError(
-  error: unknown,
-  fallbackStatus: number,
-  fallbackType: string
-): GatewayError {
-  if (error instanceof GatewayError) return error;
-  const message = error instanceof Error ? error.message : String(error);
-  return new GatewayError(fallbackStatus, fallbackType, message);
-}
-
-function upstreamError(error: unknown): {
-  status: number;
-  message: string;
-  type: string;
-} {
-  if (error instanceof UpstreamStreamError) {
-    return {
-      status: error.status,
-      message: error.message,
-      type: "upstream_stream_incomplete"
-    };
-  }
-  if (error instanceof UpstreamError) {
-    return {
-      status: error.status,
-      message: error.message,
-      type: "upstream_error"
-    };
-  }
-
-  const message = error instanceof Error ? error.message : String(error);
-  if (message.toLowerCase().includes("abort")) {
-    return { status: 504, message: "上游请求超时或已取消", type: "timeout_error" };
-  }
-  return { status: 502, message, type: "upstream_error" };
-}
-
-function retryableUpstreamFailure(error: unknown): boolean {
-  if (!(error instanceof UpstreamError)) return true;
-  return error.status === 401 || error.status === 403 ||
-    error.status === 408 || error.status === 409 || error.status === 429 ||
-    error.status >= 500;
-}
-
-async function streamUpstream(
-  deps: GatewayDeps,
-  route: ModelRoute,
-  request: NormalizedChatRequest,
-  onChunk: (chunk: UpstreamChunk) => void,
-  externalSignal: AbortSignal | undefined,
-  onChannel: (channel: ChannelConfig) => void
-): Promise<{ channel: ChannelConfig; stream: UpstreamStreamResult }> {
-  let lastError: unknown = null;
-  for (let index = 0; index < route.candidates.length; index += 1) {
-    const candidate = route.candidates[index];
-    if (externalSignal?.aborted) throw new Error("请求已取消");
-
-    const snapshot = deps.authStore.get(candidate.channel.authRef);
-    if (!snapshot) {
-      lastError = new UpstreamError(
-        503,
-        "未找到渠道 " + candidate.channel.id + " 的认证缓存"
-      );
-      continue;
-    }
-
-    let emitted = false;
-    onChannel(candidate.channel);
-    try {
-      const stream = await route.provider.streamChat(
-        snapshot.headers,
-        { ...request, model: candidate.upstreamModel },
-        deps.config,
-        (chunk) => {
-          if (chunk.choices && chunk.choices.length > 0) emitted = true;
-          onChunk(chunk);
-        },
-        externalSignal,
-        candidate.channel
-      );
-      if (!stream.sawDone && !stream.sawFinish) {
-        throw new UpstreamStreamError();
-      }
-      return { channel: candidate.channel, stream };
-    } catch (error) {
-      lastError = error;
-      if (
-        error instanceof UpstreamError &&
-        (error.status === 401 || error.status === 403)
-      ) {
-        deps.authStore.invalidate(candidate.channel.authRef);
-      }
-      if (
-        externalSignal?.aborted ||
-        emitted ||
-        index === route.candidates.length - 1 ||
-        !retryableUpstreamFailure(error)
-      ) {
-        throw error;
-      }
-    }
-  }
-  throw lastError ?? new Error("没有可用的上游渠道");
-}
-
-class SseWriter {
-  private pending: Promise<void> = Promise.resolve();
-
-  constructor(private readonly stream: SSEStreamingApi) {}
-
-  writeData(data: string, event?: string): void {
-    this.pending = this.pending
-      .then(() => this.stream.writeSSE(event ? { data, event } : { data }))
-  }
-
-  writeJson(value: Record<string, unknown>, event?: string): void {
-    this.writeData(JSON.stringify(value), event);
-  }
-
-  flush(): Promise<void> {
-    return this.pending;
-  }
-}
-
-interface AbortLink {
-  signal: AbortSignal;
-  dispose: () => void;
-}
-
-function linkClientAbort(c: Context, stream: SSEStreamingApi): AbortLink {
-  const controller = new AbortController();
-  const abort = (): void => controller.abort();
-  c.req.raw.signal.addEventListener("abort", abort);
-  stream.onAbort(abort);
-  if (c.req.raw.signal.aborted) abort();
-  return {
-    signal: controller.signal,
-    dispose: () => c.req.raw.signal.removeEventListener("abort", abort)
-  };
-}
-
-function responseEventName(value: Record<string, unknown>): string {
-  return typeof value.type === "string" ? value.type : "message";
-}
-
-function handleChatStreaming(
-  deps: GatewayDeps,
-  c: GatewayContext,
-  route: ModelRoute,
-  request: NormalizedChatRequest,
-  identity: ApiKeyIdentity
-): Response {
-  const context = createStreamContext(route.publicModel);
-  const accumulator = new ChatAccumulator();
-  const metric = beginMetric(deps, c, "chat", route, request, identity);
-  const includeUsage = includesUsage(request);
-  c.header("X-Accel-Buffering", "no");
-
-  return streamSSE(c, async (stream) => {
-    const writer = new SseWriter(stream);
-    const clientAbort = linkClientAbort(c, stream);
-    let finishSeen = false;
-    let outcome: MetricOutcome = {
-      status: "error",
-      errorType: "internal_error"
-    };
-    const aborted = (): boolean => stream.aborted || clientAbort.signal.aborted;
-
-    try {
-      await streamUpstream(
-        deps,
-        route,
-        request,
-        (chunk) => {
-          if (aborted()) return;
-          const events = accumulator.add(chunk);
-          if (events.some((event) => event.type === "finish")) finishSeen = true;
-          const visibleEvents = includeUsage
-            ? events.filter((event) => event.type !== "usage")
-            : events;
-          for (const value of toOpenAIChunks(visibleEvents, context)) {
-            writer.writeJson(value);
-          }
-        },
-        clientAbort.signal,
-        (channel) => { metric.channelId = channel.id; }
-      );
-
-      if (aborted()) {
-        outcome = outcomeFor(accumulator, "canceled", "client_disconnect");
-        return;
-      }
-      await writer.flush();
-      if (aborted()) {
-        outcome = outcomeFor(accumulator, "canceled", "client_disconnect");
-        return;
-      }
-      if (!finishSeen) writer.writeJson(finalOpenAIChunk(context, accumulator.finishReason));
-      if (includeUsage) writer.writeJson(usageOpenAIChunk(context, accumulator.usage));
-      writer.writeData("[DONE]");
-      await writer.flush();
-      outcome = outcomeFor(accumulator, "success");
-    } catch (error) {
-      if (aborted()) {
-        outcome = outcomeFor(accumulator, "canceled", "client_disconnect");
-        return;
-      }
-      const failure = upstreamError(error);
-      outcome = outcomeFor(accumulator, "error", failure.type);
-      if (failure.status === 401 || failure.status === 403) {
-        deps.authStore.invalidate(route.channel.authRef);
-      }
-      writer.writeJson(errorResponse(failure.message, failure.type));
-      writer.writeData("[DONE]");
-      await writer.flush();
-    } finally {
-      clientAbort.dispose();
-      finishMetric(deps, metric, identity, outcome);
-    }
-  });
-}
-
-async function handleChatNonStreaming(
-  deps: GatewayDeps,
-  c: GatewayContext,
-  route: ModelRoute,
-  request: NormalizedChatRequest,
-  identity: ApiKeyIdentity
-): Promise<Response> {
-  const accumulator = new ChatAccumulator();
-  const metric = beginMetric(deps, c, "chat", route, request, identity);
-  let outcome: MetricOutcome = {
-    status: "error",
-    errorType: "internal_error"
-  };
-  try {
-    await streamUpstream(
-      deps,
-      route,
-      request,
-      (chunk) => { accumulator.add(chunk); },
-      undefined,
-      (channel) => { metric.channelId = channel.id; }
-    );
-    outcome = outcomeFor(accumulator, "success");
-    return sendJson(c, 200, accumulator.response(route.publicModel));
-  } catch (error) {
-    const failure = upstreamError(error);
-    outcome = outcomeFor(accumulator, "error", failure.type);
-    if (failure.status === 401 || failure.status === 403) {
-      deps.authStore.invalidate(route.channel.authRef);
-    }
-    return sendError(c, failure.status, failure.message, failure.type);
-  } finally {
-    finishMetric(deps, metric, identity, outcome);
-  }
-}
-
-function handleResponseStreaming(
-  deps: GatewayDeps,
-  c: GatewayContext,
-  route: ModelRoute,
-  request: NormalizedChatRequest,
-  identity: ApiKeyIdentity
-): Response {
-  const context = createResponseContext(route.publicModel, request.response);
-  const accumulator = new ResponseAccumulator();
-  const metric = beginMetric(deps, c, "responses", route, request, identity);
-  c.header("X-Accel-Buffering", "no");
-
-  return streamSSE(c, async (stream) => {
-    const writer = new SseWriter(stream);
-    const clientAbort = linkClientAbort(c, stream);
-    let outcome: MetricOutcome = {
-      status: "error",
-      errorType: "internal_error"
-    };
-    const aborted = (): boolean => stream.aborted || clientAbort.signal.aborted;
-    const writeEvent = (value: Record<string, unknown>): void => {
-      writer.writeJson(value, responseEventName(value));
-    };
-
-    try {
-      writeEvent(responseCreated(context));
-      writeEvent(responseInProgress(context));
-      await writer.flush();
-
-      await streamUpstream(
-        deps,
-        route,
-        request,
-        (chunk) => {
-          if (aborted()) return;
-          for (const value of responseChunkEvents(chunk, context, accumulator)) {
-            writeEvent(value);
-          }
-        },
-        clientAbort.signal,
-        (channel) => { metric.channelId = channel.id; }
-      );
-
-      if (aborted()) {
-        outcome = outcomeFor(accumulator, "canceled", "client_disconnect");
-        return;
-      }
-      for (const value of responseFinishEvents(context, accumulator)) {
-        writeEvent(value);
-      }
-      rememberResponse(context, request, accumulator);
-      await writer.flush();
-      outcome = outcomeFor(accumulator, "success");
-    } catch (error) {
-      if (aborted()) {
-        outcome = outcomeFor(accumulator, "canceled", "client_disconnect");
-        return;
-      }
-      const failure = upstreamError(error);
-      outcome = outcomeFor(accumulator, "error", failure.type);
-      if (failure.status === 401 || failure.status === 403) {
-        deps.authStore.invalidate(route.channel.authRef);
-      }
-      writeEvent(responseFailed(context, failure.message));
-      await writer.flush();
-    } finally {
-      clientAbort.dispose();
-      finishMetric(deps, metric, identity, outcome);
-    }
-  });
-}
-
-async function handleResponseNonStreaming(
-  deps: GatewayDeps,
-  c: GatewayContext,
-  route: ModelRoute,
-  request: NormalizedChatRequest,
-  identity: ApiKeyIdentity
-): Promise<Response> {
-  const context = createResponseContext(route.publicModel, request.response);
-  const accumulator = new ResponseAccumulator();
-  const metric = beginMetric(deps, c, "responses", route, request, identity);
-  let outcome: MetricOutcome = {
-    status: "error",
-    errorType: "internal_error"
-  };
-  try {
-    await streamUpstream(
-      deps,
-      route,
-      request,
-      (chunk) => { accumulator.add(chunk); },
-      undefined,
-      (channel) => { metric.channelId = channel.id; }
-    );
-    const response = sendJson(c, 200, accumulator.response(context));
-    rememberResponse(context, request, accumulator);
-    outcome = outcomeFor(accumulator, "success");
-    return response;
-  } catch (error) {
-    const failure = upstreamError(error);
-    outcome = outcomeFor(accumulator, "error", failure.type);
-    if (failure.status === 401 || failure.status === 403) {
-      deps.authStore.invalidate(route.channel.authRef);
-    }
-    return sendError(c, failure.status, failure.message, failure.type);
-  } finally {
-    finishMetric(deps, metric, identity, outcome);
-  }
-}
-
-interface PreparedRequest {
-  route: ModelRoute;
-  request: NormalizedChatRequest;
-  identity: ApiKeyIdentity;
-}
-
-type RequestNormalizer = (
-  value: unknown,
-  defaultModel?: string
-) => NormalizedChatRequest;
-
-type RequestValidator = (request: NormalizedChatRequest) => string | null;
-
-async function prepareRequest(
-  deps: GatewayDeps,
-  c: GatewayContext,
-  normalize: RequestNormalizer,
-  validate: RequestValidator,
-  identity: ApiKeyIdentity,
-  admission: MetricAdmission | undefined
-): Promise<PreparedRequest | Response> {
-  const reject = (
-    status: number,
-    message: string,
-    type: string,
-    model = "unknown"
-  ): Response => {
-    deps.metrics.finishAdmission(admission, model, {
-      status: "error",
-      errorType: type
-    });
-    if (admission) c.header("X-Request-ID", admission.id);
-    return sendError(c, status, message, type);
-  };
-
-  let parsed: JsonRecord;
-  try {
-    parsed = await readJsonRecord(c, deps.config.maxBodyBytes);
-  } catch (error) {
-    const failure = asGatewayError(error, 400, "invalid_request_error");
-    return reject(failure.status, failure.message, failure.type);
-  }
-
-  let request: NormalizedChatRequest;
-  try {
-    request = normalize(parsed, deps.config.defaultModel);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return reject(400, message, "invalid_request_error");
-  }
-
-  const validationError = validate(request);
-  if (validationError) {
-    return reject(400, validationError, "invalid_request_error", request.model);
-  }
-
-  const route = await deps.catalog.resolve(request.model);
-  if (!route) {
-    return reject(
-      400,
-      request.model
-        ? "未找到模型 " + request.model + "，请先请求 /v1/models"
-        : "请求必须包含 model",
-      "invalid_request_error",
-      request.model
-    );
-  }
-
-  const modelValidationError = validateModelRequest(request, route.model);
-  if (modelValidationError) {
-    return reject(400, modelValidationError, "invalid_request_error", route.publicModel);
-  }
-
-  const modelAccessError = deps.apiKeys.authorizeModel(
-    identity,
-    request.model || route.publicModel
-  );
-  if (modelAccessError) {
-    return reject(403, modelAccessError, "permission_error", route.publicModel);
-  }
-
-  const hasAuth = route.candidates.some((candidate) => (
-    deps.authStore.get(candidate.channel.authRef) !== null
-  ));
-  if (!hasAuth) {
-    return reject(
-      503,
-      "未找到 " + route.provider.name + " 渠道 " + route.channel.id +
-        " 认证，请先执行 npm run auth -- --provider " + route.provider.id,
-      "auth_error",
-      route.publicModel
-    );
-  }
-
-  const reservationError = deps.apiKeys.reserve(identity);
-  if (reservationError) {
-    return reject(429, reservationError, "rate_limit_error", route.publicModel);
-  }
-
-  deps.metrics.acceptAdmission(admission);
-  return {
-    route,
-    identity,
-    request: {
-      ...request,
-      model: route.upstreamModel,
-      modelDescriptor: route.model
-    }
-  };
-}
-
-async function handleChat(
-  deps: GatewayDeps,
-  c: GatewayContext,
-  identity: ApiKeyIdentity,
-  admission: MetricAdmission | undefined
-): Promise<Response> {
-  const prepared = await prepareRequest(
-    deps,
-    c,
-    normalizeChatRequest,
-    validateChatRequest,
-    identity,
-    admission
-  );
-  if (prepared instanceof Response) return prepared;
-  return prepared.request.stream
-    ? handleChatStreaming(deps, c, prepared.route, prepared.request, prepared.identity)
-    : handleChatNonStreaming(deps, c, prepared.route, prepared.request, prepared.identity);
-}
-
-async function handleResponses(
-  deps: GatewayDeps,
-  c: GatewayContext,
-  identity: ApiKeyIdentity,
-  admission: MetricAdmission | undefined
-): Promise<Response> {
-  const prepared = await prepareRequest(
-    deps,
-    c,
-    normalizeResponseRequest,
-    validateResponseRequest,
-    identity,
-    admission
-  );
-  if (prepared instanceof Response) return prepared;
-  return prepared.request.stream
-    ? handleResponseStreaming(deps, c, prepared.route, prepared.request, prepared.identity)
-    : handleResponseNonStreaming(deps, c, prepared.route, prepared.request, prepared.identity);
 }
 
 function admissionProtocol(
@@ -757,6 +52,23 @@ function createGatewayAuth(deps: GatewayDeps): MiddlewareHandler<GatewayEnv> {
       return sendError(c, 401, "缺少或无效的代理 API Key", "authentication_error");
     }
 
+    if (
+      identity.source === "anonymous" &&
+      !isLoopbackHost(deps.config.bindHost)
+    ) {
+      deps.metrics.finishAdmission(admission, "unknown", {
+        status: "error",
+        errorType: "configuration_error"
+      });
+      if (admission) c.header("X-Request-ID", admission.id);
+      return sendError(
+        c,
+        503,
+        "非本地监听必须配置 PROXY_API_KEY 或虚拟 API Key",
+        "configuration_error"
+      );
+    }
+
     c.set("identity", identity);
     if (admission) admission.apiKeyId = identity.keyId;
     await next();
@@ -764,8 +76,18 @@ function createGatewayAuth(deps: GatewayDeps): MiddlewareHandler<GatewayEnv> {
 }
 
 function createAdminAuth(deps: GatewayDeps): MiddlewareHandler<GatewayEnv> {
-  const adminKey = deps.config.adminKey || deps.config.apiKey;
+  const adminKey = deps.config.adminKey || (
+    isLoopbackHost(deps.config.bindHost) ? deps.config.apiKey : ""
+  );
   return async (c, next) => {
+    if (!adminKey && !isLoopbackHost(deps.config.bindHost)) {
+      return sendError(
+        c,
+        503,
+        "非本地监听必须配置 PROXY_ADMIN_KEY",
+        "configuration_error"
+      );
+    }
     if (!adminAuthorized(c, adminKey)) {
       return sendError(c, 401, "缺少或无效的管理员 API Key", "authentication_error");
     }
@@ -791,13 +113,10 @@ function registerMetricsRoutes(
 ): void {
   const defaultWindowMs = 24 * 60 * 60 * 1000;
 
-  app.get(`${prefix}/summary`, (c) => {
-    const scope = resolveScope(c);
-    return sendJson(c, 200, metrics.summary(
-      parseDuration(c.req.query("window"), defaultWindowMs),
-      scope
-    ));
-  });
+  app.get(`${prefix}/summary`, (c) => sendJson(c, 200, metrics.summary(
+    parseDuration(c.req.query("window"), defaultWindowMs),
+    resolveScope(c)
+  )));
 
   app.get(`${prefix}/timeseries`, (c) => {
     const windowMs = parseDuration(c.req.query("window"), defaultWindowMs);
@@ -902,12 +221,12 @@ function registerAdminRoutes(app: Hono<GatewayEnv>, deps: GatewayDeps): void {
 }
 
 function registerPublicRoutes(app: Hono<GatewayEnv>, deps: GatewayDeps): void {
-  const { config, authStore, catalog, apiKeys, metrics } = deps;
+  const { authStore, catalog, apiKeys, metrics } = deps;
   const live = (c: Context): Response => sendJson(c, 200, {
     status: "ok",
     service: "llm-gateway",
     mode: "live",
-    providers: getProviders().map((provider) => provider.id)
+    providers: deps.providers.list().map((provider) => provider.id)
   });
   for (const path of ["/", "/health", "/health/live"]) app.get(path, live);
   for (const path of ["/ui", "/ui/", "/ui/index.html"]) {
@@ -915,7 +234,7 @@ function registerPublicRoutes(app: Hono<GatewayEnv>, deps: GatewayDeps): void {
   }
 
   app.get("/health/ready", async (c) => {
-    const auth = authStore.status(getProviders().map((provider) => provider.id));
+    const auth = authStore.status(deps.providers.list().map((provider) => provider.id));
     const models = await catalog.get();
     const ready = auth.ready && models.length > 0;
     return sendJson(c, ready ? 200 : 503, {
@@ -931,11 +250,11 @@ function registerPublicRoutes(app: Hono<GatewayEnv>, deps: GatewayDeps): void {
   app.get("/health/auth", (c) => sendJson(
     c,
     200,
-    authStore.status(getProviders().map((provider) => provider.id))
+    authStore.status(deps.providers.list().map((provider) => provider.id))
   ));
 
   app.get("/.well-known/llm-gateway/capabilities", async (c) => {
-    const auth = authStore.status(getProviders().map((provider) => provider.id));
+    const auth = authStore.status(deps.providers.list().map((provider) => provider.id));
     const models = modelsResponse(await catalog.get());
     return sendJson(c, 200, {
       object: "llm-gateway.capabilities",
@@ -960,7 +279,7 @@ function registerPublicRoutes(app: Hono<GatewayEnv>, deps: GatewayDeps): void {
           previousResponseId: "process"
         }
       },
-      providers: getProviders().map((provider) => ({
+      providers: deps.providers.list().map((provider) => ({
         id: provider.id,
         name: provider.name,
         authenticated: auth.providers[provider.id]?.ready === true
@@ -1008,7 +327,7 @@ export function createGatewayApp(
   registerPublicRoutes(app, deps);
 
   app.onError((error, c) => {
-    const failure = asGatewayError(error, 500, "internal_error");
+    const failure = appError(error);
     return sendError(c, failure.status, failure.message, failure.type);
   });
   app.notFound((c) => sendError(c, 404, "Not found", "invalid_request_error"));
@@ -1047,6 +366,11 @@ export function startGateway(
 
   server.on("error", (error) => {
     console.error("LLM Gateway 服务错误:", error.message);
+  });
+  server.on("close", () => {
+    deps.apiKeys.flush();
+    deps.metrics.flush();
+    if (gatewayServer === server) gatewayServer = null;
   });
   gatewayServer = server;
   return server;

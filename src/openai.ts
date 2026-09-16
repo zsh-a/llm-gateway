@@ -1,10 +1,7 @@
 import { normalizeEffort } from "./config.js";
 import { asRecord } from "./json.js";
-import {
-  StreamAccumulator,
-  type StreamEvent,
-  type StreamToolCall
-} from "./stream.js";
+import { StreamAccumulator } from "./stream.js";
+import type { StreamEvent, StreamToolCall } from "./events.js";
 import { normalizeToolHistory } from "./tool-history.js";
 import type {
   JsonRecord,
@@ -71,11 +68,14 @@ export function normalizeChatRequest(
   if (body.reasoning_effort !== undefined && typeof body.reasoning_effort !== "string") {
     throw new Error("reasoning_effort 必须是字符串");
   }
+  if (!Array.isArray(body.messages)) {
+    throw new Error("messages 必须是数组");
+  }
   const model = typeof body.model === "string" && body.model.trim()
     ? body.model.trim()
     : defaultModel;
   const messages = normalizeToolHistory(
-    Array.isArray(body.messages) ? body.messages : []
+    body.messages
   );
   const thinking = asRecord(body.thinking);
   const reasoning = asRecord(body.reasoning);

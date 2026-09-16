@@ -1,15 +1,7 @@
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync
-} from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { dirname } from "node:path";
+import { readJsonFile, writeJsonFileAtomic } from "./file-store.js";
 import { asNumber, asPositiveInt, asTrimmedString } from "./json.js";
+import { secretsEqual } from "./security.js";
 
 export interface ApiKeyIdentity {
   keyId: string;
@@ -125,6 +117,7 @@ export class ApiKeyStore {
   private keys: StoredApiKey[] | null = null;
   private readonly requestTimes = new Map<string, number[]>();
   private readonly tokenEvents = new Map<string, Array<{ at: number; tokens: number }>>();
+  private persistenceTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly file: string,
@@ -139,7 +132,7 @@ export class ApiKeyStore {
   authenticate(secret: string): ApiKeyIdentity | null {
     this.ensureLoaded();
     if (!secret) return null;
-    if (this.environmentSecret && secret === this.environmentSecret) {
+    if (this.environmentSecret && secretsEqual(secret, this.environmentSecret)) {
       return {
         keyId: "environment",
         name: "环境变量 API Key",
@@ -156,7 +149,7 @@ export class ApiKeyStore {
     const now = Date.now();
     const key = this.keys!.find((item) => (
       item.enabled &&
-      item.hash === hash &&
+      secretsEqual(item.hash, hash) &&
       (item.expiresAt === null || item.expiresAt > now)
     ));
     return key ? identityFromKey(key) : null;
@@ -263,7 +256,7 @@ export class ApiKeyStore {
       usedTokens: 0
     };
     this.keys!.push(key);
-    this.persist();
+    this.persist(true);
     return { record: this.publicKey(key), secret };
   }
 
@@ -272,7 +265,7 @@ export class ApiKeyStore {
     const key = this.keys!.find((item) => item.id === id);
     if (!key) return false;
     key.enabled = false;
-    this.persist();
+    this.persist(true);
     return true;
   }
 
@@ -295,7 +288,7 @@ export class ApiKeyStore {
       key.quotaTokens = asPositiveInt(input.quotaTokens) ?? null;
     }
     if (input.expiresAt !== undefined) key.expiresAt = timestampValue(input.expiresAt);
-    this.persist();
+    this.persist(true);
     return this.publicKey(key);
   }
 
@@ -327,8 +320,8 @@ export class ApiKeyStore {
     if (this.keys) return;
     this.keys = [];
     try {
-      if (!existsSync(this.file)) return;
-      const value: unknown = JSON.parse(readFileSync(this.file, "utf8"));
+      const value = readJsonFile(this.file);
+      if (value === null) return;
       const record = value !== null && typeof value === "object"
         ? value as { [key: string]: unknown }
         : {};
@@ -341,21 +334,41 @@ export class ApiKeyStore {
     }
   }
 
-  private persist(): void {
-    mkdirSync(dirname(this.file), { recursive: true });
-    const temporary = `${this.file}.${process.pid}.${Date.now()}.tmp`;
-    const stored: StoredKeys = { version: 1, keys: this.keys! };
-    try {
-      writeFileSync(temporary, `${JSON.stringify(stored)}\n`, { mode: 0o600 });
-      chmodSync(temporary, 0o600);
-      renameSync(temporary, this.file);
-      chmodSync(this.file, 0o600);
-    } finally {
-      try {
-        if (existsSync(temporary)) unlinkSync(temporary);
-      } catch {
-        // Best-effort cleanup after an atomic rename.
+  private persist(immediate = false): void {
+    if (!this.file) return;
+    if (immediate) {
+      if (this.persistenceTimer !== null) {
+        clearTimeout(this.persistenceTimer);
+        this.persistenceTimer = null;
       }
+      this.persistNow(true);
+      return;
+    }
+    if (this.persistenceTimer !== null) return;
+    // Usage is updated on every request. Coalesce writes so quota accounting
+    // stays synchronous in memory without rewriting the whole key file inline.
+    this.persistenceTimer = setTimeout(() => {
+      this.persistenceTimer = null;
+      this.persistNow();
+    }, 0);
+  }
+
+  /** Flush pending key mutations before an intentional process shutdown. */
+  flush(): void {
+    if (this.persistenceTimer === null) return;
+    clearTimeout(this.persistenceTimer);
+    this.persistenceTimer = null;
+    this.persistNow();
+  }
+
+  private persistNow(throwOnError = false): void {
+    if (!this.file) return;
+    try {
+      const stored: StoredKeys = { version: 1, keys: this.keys! };
+      writeJsonFileAtomic(this.file, stored);
+    } catch (error) {
+      // A deferred usage write must never become an uncaught async exception.
+      if (throwOnError) throw error;
     }
   }
 }

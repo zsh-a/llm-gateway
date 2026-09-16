@@ -1,16 +1,9 @@
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync
-} from "node:fs";
-import { dirname } from "node:path";
-
+import { readJsonFile, writeJsonFileAtomic } from "./file-store.js";
 import { asBool, asNumber, asRecord, asTrimmedString } from "./json.js";
-import { getProvider, getProviders } from "./provider.js";
+import {
+  defaultProviderRegistry,
+  type ProviderRegistry
+} from "./provider.js";
 
 export interface ChannelConfig {
   id: string;
@@ -54,8 +47,8 @@ function modelMappings(value: unknown): { [key: string]: string } {
   return result;
 }
 
-function defaultChannels(): ChannelConfig[] {
-  return getProviders().map((provider) => ({
+function defaultChannels(registry: ProviderRegistry): ChannelConfig[] {
+  return registry.list().map((provider) => ({
     id: `${provider.id}-default`,
     name: `${provider.name} 默认渠道`,
     providerId: provider.id,
@@ -67,13 +60,17 @@ function defaultChannels(): ChannelConfig[] {
   }));
 }
 
-function normalizeChannel(value: unknown, current?: ChannelConfig): ChannelConfig | null {
+function normalizeChannel(
+  value: unknown,
+  current: ChannelConfig | undefined,
+  registry: ProviderRegistry
+): ChannelConfig | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const record = asRecord(value);
   const id = asTrimmedString(record.id) || current?.id || "";
   const providerId = asTrimmedString(record.providerId) ||
     current?.providerId || "";
-  const provider = getProvider(providerId);
+  const provider = registry.get(providerId);
   if (!id || !provider) return null;
 
   const rawUrl = asTrimmedString(record.upstreamUrl) ?? "";
@@ -113,7 +110,10 @@ export class ChannelStore {
   private channels: ChannelConfig[] | null = null;
   private readonly cursors = new Map<string, number>();
 
-  constructor(private readonly file: string) {}
+  constructor(
+    private readonly file: string,
+    private readonly registry: ProviderRegistry = defaultProviderRegistry
+  ) {}
 
   list(): ChannelConfig[] {
     this.ensureLoaded();
@@ -127,7 +127,7 @@ export class ChannelStore {
       : {};
     const id = asTrimmedString(input.id) ?? "";
     const current = id ? this.channels!.find((channel) => channel.id === id) : undefined;
-    const channel = normalizeChannel(value, current);
+    const channel = normalizeChannel(value, current, this.registry);
     if (!channel) {
       throw new Error("渠道配置无效：需要有效的 id 和已注册 providerId");
     }
@@ -226,13 +226,13 @@ export class ChannelStore {
 
   private ensureLoaded(): void {
     if (this.channels) return;
-    const defaults = defaultChannels();
+    const defaults = defaultChannels(this.registry);
     try {
-      if (!existsSync(this.file)) {
+      const value = readJsonFile(this.file);
+      if (value === null) {
         this.channels = defaults;
         return;
       }
-      const value: unknown = JSON.parse(readFileSync(this.file, "utf8"));
       const record = asRecord(value);
       if (Number(record.version) !== 1 || !Array.isArray(record.channels)) {
         this.channels = defaults;
@@ -240,7 +240,7 @@ export class ChannelStore {
       }
       const channels: ChannelConfig[] = [];
       for (const item of record.channels) {
-        const channel = normalizeChannel(item);
+        const channel = normalizeChannel(item, undefined, this.registry);
         if (channel && !channels.some((current) => current.id === channel.id)) {
           channels.push(channel);
         }
@@ -252,23 +252,10 @@ export class ChannelStore {
   }
 
   private persist(): void {
-    mkdirSync(dirname(this.file), { recursive: true });
-    const temporary = `${this.file}.${process.pid}.${Date.now()}.tmp`;
     const stored: StoredChannels = {
       version: 1,
       channels: this.channels!.map(cloneChannel)
     };
-    try {
-      writeFileSync(temporary, `${JSON.stringify(stored)}\n`, { mode: 0o600 });
-      chmodSync(temporary, 0o600);
-      renameSync(temporary, this.file);
-      chmodSync(this.file, 0o600);
-    } finally {
-      try {
-        if (existsSync(temporary)) unlinkSync(temporary);
-      } catch {
-        // Best-effort cleanup after an atomic rename.
-      }
-    }
+    writeJsonFileAtomic(this.file, stored);
   }
 }
