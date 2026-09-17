@@ -13,6 +13,7 @@ import {
   CardTitle,
   Input,
 } from "../components/ui";
+import type { NoticeTone } from "../types";
 
 export function SettingsPage({
   credentials,
@@ -25,7 +26,7 @@ export function SettingsPage({
   onCredentials: (next: Credentials) => void;
   theme: "light" | "dark";
   onTheme: () => void;
-  onNotice: (message: string) => void;
+  onNotice: (message: string, tone?: NoticeTone) => void;
 }) {
   const [apiKey, setApiKey] = useState(credentials.apiKey);
   const [adminKey, setAdminKey] = useState(credentials.adminKey);
@@ -45,6 +46,7 @@ export function SettingsPage({
     setAdminKey("");
     saveCredentials({ apiKey: "", adminKey: "" });
     onCredentials({ apiKey: "", adminKey: "" });
+    onNotice("访问凭证已清除");
   };
 
   return (

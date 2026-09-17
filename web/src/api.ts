@@ -6,6 +6,8 @@ import type {
   ChatStreamUpdate,
   DashboardData,
   GatewayModel,
+  MetricsQuery,
+  MetricsSnapshot,
   MetricsSummary,
   RecentRequest,
   TimeseriesPoint,
@@ -71,6 +73,10 @@ export function saveCredentials(credentials: Credentials): void {
 export class GatewayApi {
   constructor(private readonly credentials: Credentials) {}
 
+  private metricsPrefix(): "/metrics" | "/admin/metrics" {
+    return this.credentials.adminKey ? "/admin/metrics" : "/metrics";
+  }
+
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
@@ -108,36 +114,48 @@ export class GatewayApi {
     }
   }
 
-  async dashboard(): Promise<DashboardData> {
+  async dashboard(signal?: AbortSignal): Promise<DashboardData> {
+    const metricsPrefix = this.metricsPrefix();
     const [health, auth, models, summary, timeseries, recent] = await Promise.all([
-      this.safe(this.request<DashboardData["health"]>("/health"), { status: "offline" }),
-      this.safe(this.request<AuthStatus>("/health/auth"), { providers: {} }),
-      this.safe(this.request<{ data: GatewayModel[] }>("/v1/models"), { data: [] }),
-      this.safe(this.request<MetricsSummary>("/metrics/summary?window=24h"), emptySummary),
-      this.safe(this.request<{ data: TimeseriesPoint[] }>("/metrics/timeseries?window=24h"), {
-        data: [],
+      this.safe(this.request<DashboardData["health"]>("/health", { signal }), {
+        status: "offline",
       }),
-      this.safe(this.request<{ data: RecentRequest[] }>("/metrics/requests?window=24h&limit=8"), {
-        data: [],
-      }),
+      this.safe(this.request<AuthStatus>("/health/auth", { signal }), { providers: {} }),
+      this.safe(this.request<{ data: GatewayModel[] }>("/v1/models", { signal }), { data: [] }),
+      this.safe(
+        this.request<MetricsSummary>(`${metricsPrefix}/summary?window=24h`, { signal }),
+        emptySummary,
+      ),
+      this.safe(
+        this.request<{ data: TimeseriesPoint[] }>(`${metricsPrefix}/timeseries?window=24h`, {
+          signal,
+        }),
+        { data: [] },
+      ),
+      this.safe(
+        this.request<{ data: RecentRequest[] }>(`${metricsPrefix}/requests?window=24h&limit=50`, {
+          signal,
+        }),
+        { data: [] },
+      ),
     ]);
 
-    let channels: ChannelConfig[] = [];
-    let keys: ApiKeyRecord[] = [];
-    let adminError = "";
-    try {
-      const channelResponse = await this.request<{ data: ChannelConfig[] }>("/admin/channels");
-      channels = channelResponse.data ?? [];
-      const keyResponse = await this.request<{ data: ApiKeyRecord[] }>("/admin/keys");
-      keys = keyResponse.data ?? [];
-    } catch (error) {
-      adminError =
-        error instanceof ApiError && error.status === 401
-          ? "需要管理员 API Key"
-          : error instanceof Error
-            ? error.message
-            : "管理接口不可用";
-    }
+    const [channelResult, keyResult] = await Promise.allSettled([
+      this.request<{ data: ChannelConfig[] }>("/admin/channels", { signal }),
+      this.request<{ data: ApiKeyRecord[] }>("/admin/keys", { signal }),
+    ]);
+    const channels = channelResult.status === "fulfilled" ? (channelResult.value.data ?? []) : [];
+    const keys = keyResult.status === "fulfilled" ? (keyResult.value.data ?? []) : [];
+    const adminFailure = [channelResult, keyResult].find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    const adminError = adminFailure
+      ? adminFailure.reason instanceof ApiError && adminFailure.reason.status === 401
+        ? "需要管理员 API Key"
+        : adminFailure.reason instanceof Error
+          ? adminFailure.reason.message
+          : "管理接口不可用"
+      : "";
 
     return {
       health,
@@ -149,6 +167,34 @@ export class GatewayApi {
       channels,
       keys,
       adminError,
+    };
+  }
+
+  async metrics(query: MetricsQuery, signal?: AbortSignal): Promise<MetricsSnapshot> {
+    const prefix = this.metricsPrefix();
+    const filterParams = new URLSearchParams({ window: query.window });
+    if (query.provider) filterParams.set("provider", query.provider);
+    if (query.model) filterParams.set("model", query.model);
+    if (query.status) filterParams.set("status", query.status);
+    const requestParams = new URLSearchParams(filterParams);
+    requestParams.set("limit", String(query.limit ?? 50));
+    if (query.offset) requestParams.set("offset", String(query.offset));
+
+    const [summary, series, recent] = await Promise.all([
+      this.request<MetricsSummary>(`${prefix}/summary?${filterParams.toString()}`, { signal }),
+      this.request<{ data: TimeseriesPoint[] }>(`${prefix}/timeseries?${filterParams.toString()}`, {
+        signal,
+      }),
+      this.request<{ data: RecentRequest[]; total?: number }>(
+        `${prefix}/requests?${requestParams.toString()}`,
+        { signal },
+      ),
+    ]);
+    return {
+      summary,
+      timeseries: series.data ?? [],
+      recent: recent.data ?? [],
+      total: recent.total ?? recent.data?.length ?? 0,
     };
   }
 
@@ -286,6 +332,13 @@ export class GatewayApi {
   createKey(body: Record<string, unknown>): Promise<{ secret: string }> {
     return this.request<{ secret: string }>("/admin/keys", {
       method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  updateKey(id: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.request(`/admin/keys/${encodeURIComponent(id)}`, {
+      method: "PATCH",
       body: JSON.stringify(body),
     });
   }

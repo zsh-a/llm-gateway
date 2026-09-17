@@ -10,6 +10,7 @@ import type { ApiKeyIdentity, ApiKeyStore } from "../../auth/api-key-store.js";
 import {
   MetricsStore,
   parseDuration,
+  type MetricFilter,
   type MetricAdmission
 } from "../../observability/metrics.js";
 import { modelsResponse } from "../../protocols/chat.js";
@@ -105,6 +106,20 @@ function admissionOf(c: GatewayContext): MetricAdmission | undefined {
 
 type MetricScopeResolver = (c: GatewayContext) => string | undefined;
 
+function metricFilter(c: Context): Pick<MetricFilter, "provider" | "model" | "status"> {
+  const statusValue = c.req.query("status");
+  const status = statusValue === "success" ||
+    statusValue === "error" ||
+    statusValue === "canceled"
+    ? statusValue
+    : undefined;
+  return {
+    provider: c.req.query("provider") || undefined,
+    model: c.req.query("model") || undefined,
+    status
+  };
+}
+
 function registerMetricsRoutes(
   app: Hono<GatewayEnv>,
   metrics: MetricsStore,
@@ -113,35 +128,35 @@ function registerMetricsRoutes(
 ): void {
   const defaultWindowMs = 24 * 60 * 60 * 1000;
 
-  app.get(`${prefix}/summary`, (c) => sendJson(c, 200, metrics.summary(
-    parseDuration(c.req.query("window"), defaultWindowMs),
-    resolveScope(c)
-  )));
+  app.get(`${prefix}/summary`, (c) => {
+    const filter = metricFilter(c);
+    return sendJson(c, 200, metrics.summary(
+      parseDuration(c.req.query("window"), defaultWindowMs),
+      resolveScope(c),
+      filter
+    ));
+  });
 
   app.get(`${prefix}/timeseries`, (c) => {
     const windowMs = parseDuration(c.req.query("window"), defaultWindowMs);
     const bucketValue = c.req.query("bucket");
     const bucketMs = bucketValue ? parseDuration(bucketValue, 0) : undefined;
+    const filter = metricFilter(c);
     return sendJson(c, 200, metrics.timeseries(
       windowMs,
       bucketMs,
-      resolveScope(c)
+      resolveScope(c),
+      filter
     ));
   });
 
   app.get(`${prefix}/requests`, (c) => {
-    const statusValue = c.req.query("status");
-    const status = statusValue === "success" ||
-      statusValue === "error" ||
-      statusValue === "canceled"
-      ? statusValue
-      : undefined;
+    const filter = metricFilter(c);
     return sendJson(c, 200, metrics.recent({
       windowMs: parseDuration(c.req.query("window"), defaultWindowMs),
       limit: Number(c.req.query("limit")) || 50,
-      provider: c.req.query("provider") || undefined,
-      model: c.req.query("model") || undefined,
-      status,
+      offset: Math.max(0, Number(c.req.query("offset")) || 0),
+      ...filter,
       apiKeyId: resolveScope(c)
     }));
   });
@@ -375,4 +390,3 @@ export function startGateway(
   gatewayServer = server;
   return server;
 }
-

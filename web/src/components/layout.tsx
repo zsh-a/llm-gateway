@@ -1,6 +1,9 @@
 import {
+  AlertCircle,
+  AlertTriangle,
   CheckCircle2,
   ChevronRight,
+  Info,
   Menu,
   Moon,
   RefreshCw,
@@ -11,10 +14,11 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { navigation, pageMeta } from "../lib/constants";
+import { formatTime } from "../lib/format";
 import { cn } from "../lib/utils";
-import type { PageKey } from "../types";
+import type { Navigate, Notice, PageKey } from "../types";
 import { StatusBadge } from "./common";
-import { Button, Separator } from "./ui";
+import { Button, Separator, Spinner } from "./ui";
 
 export function Sidebar({
   page,
@@ -22,7 +26,7 @@ export function Sidebar({
   mobileOpen,
 }: {
   page: PageKey;
-  onNavigate: (page: PageKey) => void;
+  onNavigate: Navigate;
   mobileOpen: boolean;
 }) {
   return (
@@ -109,6 +113,7 @@ export function DashboardLayout({
   page,
   mobileOpen,
   loading,
+  lastUpdated,
   notice,
   healthStatus,
   theme,
@@ -122,10 +127,11 @@ export function DashboardLayout({
   page: PageKey;
   mobileOpen: boolean;
   loading: boolean;
-  notice: string;
+  lastUpdated: number | null;
+  notice: Notice | null;
   healthStatus: string | undefined;
   theme: "light" | "dark";
-  onNavigate: (page: PageKey) => void;
+  onNavigate: Navigate;
   onToggleMobile: (open: boolean) => void;
   onRefresh: () => void;
   onDismissNotice: () => void;
@@ -164,6 +170,9 @@ export function DashboardLayout({
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              <span className="hidden text-[10px] text-muted-foreground lg:inline">
+                {lastUpdated ? `更新于 ${formatTime(lastUpdated)}` : "连接中"}
+              </span>
               <StatusBadge status={healthStatus} />
               <Button
                 variant="ghost"
@@ -190,23 +199,43 @@ export function DashboardLayout({
         <main className="mx-auto min-h-[calc(100vh-4rem)] max-w-[1600px] px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
           {notice && (
             <div
-              role="status"
+              role={notice.tone === "error" ? "alert" : "status"}
               aria-live="polite"
               className={cn(
                 "mb-5 flex items-center justify-between gap-3 rounded-xl",
-                "border border-primary/20 bg-primary/8 px-3.5 py-3 text-sm text-primary",
+                "border px-3.5 py-3 text-sm",
+                notice.tone === "success" &&
+                  "border-emerald-400/20 bg-emerald-400/8 text-emerald-200",
+                notice.tone === "error" && "border-red-400/25 bg-red-400/10 text-red-200",
+                notice.tone === "warning" && "border-amber-400/20 bg-amber-400/8 text-amber-200",
+                notice.tone === "info" && "border-primary/20 bg-primary/8 text-primary",
               )}
             >
               <div className="flex items-center gap-2">
-                <CheckCircle2 className="size-4" />
-                {notice}
+                {notice.tone === "success" && <CheckCircle2 className="size-4" />}
+                {notice.tone === "error" && <AlertCircle className="size-4" />}
+                {notice.tone === "warning" && <AlertTriangle className="size-4" />}
+                {notice.tone === "info" && <Info className="size-4" />}
+                {notice.message}
               </div>
               <Button variant="ghost" size="icon" onClick={onDismissNotice} aria-label="关闭提示">
                 <X className="size-4" />
               </Button>
             </div>
           )}
-          {children}
+          {loading && !lastUpdated ? (
+            <div
+              className="flex min-h-[50vh] flex-col items-center justify-center gap-3 text-center text-muted-foreground"
+              role="status"
+              aria-live="polite"
+            >
+              <Spinner className="size-6 text-primary" />
+              <div className="text-sm font-medium text-foreground">正在连接 Gateway</div>
+              <div className="text-xs">正在加载运行状态、模型和统计数据</div>
+            </div>
+          ) : (
+            children
+          )}
         </main>
       </div>
     </div>

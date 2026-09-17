@@ -12,12 +12,23 @@ export function statusVariant(
 ): "success" | "warning" | "danger" | "muted" {
   if (status === "success" || status === "ok" || status === "ready") return "success";
   if (status === "error" || status === "offline") return "danger";
-  if (status === "pending" || status === "starting") return "warning";
+  if (status === "pending" || status === "starting" || status === "not_ready") return "warning";
   return "muted";
 }
 
 export function StatusBadge({ status, label }: { status: string | undefined; label?: string }) {
   const online = status === "ok" || status === "ready" || status === "success";
+  const statusLabels: Record<string, string> = {
+    canceled: "已取消",
+    error: "失败",
+    not_ready: "未就绪",
+    offline: "离线",
+    pending: "等待中",
+    ready: "就绪",
+    starting: "启动中",
+    success: "成功",
+    unknown: "未知",
+  };
   return (
     <Badge variant={statusVariant(status)}>
       <span
@@ -26,7 +37,7 @@ export function StatusBadge({ status, label }: { status: string | undefined; lab
           online ? "bg-emerald-400" : status === "offline" ? "bg-red-400" : "bg-amber-300",
         )}
       />
-      {label ?? (online ? "在线" : status === "offline" ? "离线" : (status ?? "未知"))}
+      {label ?? (online ? "在线" : (statusLabels[status ?? "unknown"] ?? status ?? "未知"))}
     </Badge>
   );
 }
@@ -364,12 +375,23 @@ export function InfoRow({
 
 export function CopyButton({ value, label = "复制" }: { value: string; label?: string }) {
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
 
   const copy = async (): Promise<void> => {
-    if (!navigator.clipboard || !value) return;
-    await navigator.clipboard.writeText(value);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
+    if (!navigator.clipboard || !value) {
+      setCopyError(true);
+      window.setTimeout(() => setCopyError(false), 1600);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setCopyError(false);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setCopyError(true);
+      window.setTimeout(() => setCopyError(false), 1600);
+    }
   };
 
   return (
@@ -382,11 +404,17 @@ export function CopyButton({ value, label = "复制" }: { value: string; label?:
         "hover:bg-muted hover:text-foreground focus-visible:outline-none",
         "focus-visible:ring-2 focus-visible:ring-ring",
       )}
-      aria-label={copied ? "已复制" : label}
-      title={copied ? "已复制" : label}
+      aria-label={copyError ? "复制失败" : copied ? "已复制" : label}
+      title={copyError ? "复制失败，请手动复制" : copied ? "已复制" : label}
     >
-      {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
-      <span className="hidden sm:inline">{copied ? "已复制" : label}</span>
+      {copyError ? (
+        <Copy className="size-3 text-red-300" />
+      ) : copied ? (
+        <Check className="size-3" />
+      ) : (
+        <Copy className="size-3" />
+      )}
+      <span className="hidden sm:inline">{copyError ? "复制失败" : copied ? "已复制" : label}</span>
     </button>
   );
 }

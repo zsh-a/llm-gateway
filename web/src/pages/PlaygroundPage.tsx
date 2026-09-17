@@ -5,13 +5,14 @@ import {
   CircleDashed,
   Loader2,
   MessageSquareText,
+  RefreshCw,
   TerminalSquare,
   Trash2,
   X,
   XCircle,
   Zap,
 } from "lucide-react";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import type { GatewayApi } from "../api";
 import { CopyButton } from "../components/common";
 import {
@@ -31,9 +32,9 @@ import {
 import { formatNumber, toFiniteNumber, usageTotal } from "../lib/format";
 import { modelEfforts, modelSupportsReasoning } from "../lib/models";
 import { cn } from "../lib/utils";
-import type { DashboardData, GatewayModel, Usage } from "../types";
+import type { DashboardData, GatewayModel, Navigate, Usage } from "../types";
 
-type PlaygroundState = "idle" | "streaming" | "success" | "error";
+type PlaygroundState = "idle" | "streaming" | "success" | "error" | "canceled";
 
 const examplePrompts = [
   "用一句话介绍当前 Gateway 的能力。",
@@ -44,13 +45,17 @@ const examplePrompts = [
 export function PlaygroundPage({
   data,
   api,
+  initialModelId,
+  onNavigate,
   onRefresh,
 }: {
   data: DashboardData;
   api: GatewayApi;
+  initialModelId?: string;
+  onNavigate: Navigate;
   onRefresh: () => void;
 }) {
-  const [modelId, setModelId] = useState(data.models[0]?.id ?? "");
+  const [modelId, setModelId] = useState(initialModelId ?? data.models[0]?.id ?? "");
   const [effort, setEffort] = useState("off");
   const [prompt, setPrompt] = useState("请用一句话介绍当前 Gateway 的能力。");
   const [content, setContent] = useState("");
@@ -59,15 +64,55 @@ export function PlaygroundPage({
   const [state, setState] = useState<PlaygroundState>("idle");
   const [error, setError] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  const lastRequestRef = useRef<{
+    model: GatewayModel;
+    prompt: string;
+    effort: string;
+  } | null>(null);
   const model = data.models.find((item) => item.id === modelId) ?? data.models[0];
 
   useEffect(() => {
-    if (!modelId && data.models[0]) setModelId(data.models[0].id);
-    if (model && !modelSupportsReasoning(model)) setEffort("off");
-  }, [data.models, model, modelId]);
+    return () => {
+      abortRef.current?.abort();
+      abortRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!data.models.length) {
+      setModelId("");
+      return;
+    }
+    if (!data.models.some((item) => item.id === modelId)) {
+      const nextModelId = data.models[0].id;
+      setModelId(nextModelId);
+      onNavigate("playground", { modelId: nextModelId, replace: true });
+    }
+  }, [data.models, modelId, onNavigate]);
+
+  useEffect(() => {
+    if (initialModelId && data.models.some((item) => item.id === initialModelId)) {
+      setModelId((current) => (current === initialModelId ? current : initialModelId));
+    }
+  }, [data.models, initialModelId]);
+
+  useEffect(() => {
+    const efforts = modelEfforts(model);
+    if (!modelSupportsReasoning(model)) {
+      setEffort("off");
+      return;
+    }
+    setEffort((current) => {
+      if (current === "off" || Object.hasOwn(efforts, current)) return current;
+      return model.defaultReasoningEffort && Object.hasOwn(efforts, model.defaultReasoningEffort)
+        ? model.defaultReasoningEffort
+        : (Object.keys(efforts)[0] ?? "off");
+    });
+  }, [model]);
 
   const clearOutput = (): void => {
     abortRef.current?.abort();
+    abortRef.current = null;
     setState("idle");
     setContent("");
     setReasoning("");
@@ -75,37 +120,79 @@ export function PlaygroundPage({
     setError("");
   };
 
+  const send = useCallback(
+    async (
+      requestModel: GatewayModel,
+      requestPrompt: string,
+      requestEffort: string,
+    ): Promise<void> => {
+      if (state === "streaming") return;
+      const controller = new AbortController();
+      abortRef.current = controller;
+      setState("streaming");
+      setContent("");
+      setReasoning("");
+      setUsage(undefined);
+      setError("");
+      try {
+        await api.streamChat(
+          requestModel,
+          requestPrompt,
+          requestEffort,
+          (update) => {
+            if (update.content) setContent((current) => current + update.content);
+            if (update.reasoning) setReasoning((current) => current + update.reasoning);
+            if (update.usage) setUsage(update.usage);
+          },
+          controller.signal,
+        );
+        if (controller.signal.aborted) {
+          if (abortRef.current === controller) setState("canceled");
+          return;
+        }
+        setState("success");
+        onRefresh();
+      } catch (caught) {
+        if (controller.signal.aborted) {
+          if (abortRef.current === controller) setState("canceled");
+          return;
+        }
+        setState("error");
+        setError(caught instanceof Error ? caught.message : "请求失败");
+      } finally {
+        if (abortRef.current === controller) abortRef.current = null;
+      }
+    },
+    [api, onRefresh, state],
+  );
+
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (!model || !prompt.trim() || state === "streaming") return;
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setState("streaming");
-    setContent("");
-    setReasoning("");
-    setUsage(undefined);
-    setError("");
-    try {
-      await api.streamChat(
-        model,
-        prompt.trim(),
-        effort,
-        (update) => {
-          if (update.content) setContent((current) => current + update.content);
-          if (update.reasoning) setReasoning((current) => current + update.reasoning);
-          if (update.usage) setUsage(update.usage);
-        },
-        controller.signal,
-      );
-      setState("success");
-      onRefresh();
-    } catch (caught) {
-      if (controller.signal.aborted) return;
-      setState("error");
-      setError(caught instanceof Error ? caught.message : "请求失败");
-    } finally {
-      abortRef.current = null;
-    }
+    const requestPrompt = prompt.trim();
+    lastRequestRef.current = { model, prompt: requestPrompt, effort };
+    await send(model, requestPrompt, effort);
+  };
+
+  const stop = (): void => {
+    if (!abortRef.current) return;
+    abortRef.current.abort();
+    setState("canceled");
+  };
+
+  const retry = (): void => {
+    const request = lastRequestRef.current;
+    if (!request || state === "streaming") return;
+    void send(request.model, request.prompt, request.effort);
+  };
+
+  const changeModel = (nextModelId: string): void => {
+    setModelId(nextModelId);
+    onNavigate("playground", { modelId: nextModelId, replace: true });
+  };
+
+  const clearPrompt = (): void => {
+    setPrompt("");
   };
 
   return (
@@ -117,11 +204,12 @@ export function PlaygroundPage({
         effort={effort}
         prompt={prompt}
         state={state}
-        onModelChange={setModelId}
+        onModelChange={changeModel}
         onEffortChange={setEffort}
         onPromptChange={setPrompt}
+        onClearPrompt={clearPrompt}
         onSubmit={submit}
-        onStop={() => abortRef.current?.abort()}
+        onStop={stop}
       />
       <ResponsePreview
         model={model}
@@ -132,6 +220,7 @@ export function PlaygroundPage({
         content={content}
         usage={usage}
         onClear={clearOutput}
+        onRetry={retry}
       />
     </div>
   );
@@ -147,6 +236,7 @@ function PlaygroundForm({
   onModelChange,
   onEffortChange,
   onPromptChange,
+  onClearPrompt,
   onSubmit,
   onStop,
 }: {
@@ -159,6 +249,7 @@ function PlaygroundForm({
   onModelChange: (value: string) => void;
   onEffortChange: (value: string) => void;
   onPromptChange: (value: string) => void;
+  onClearPrompt: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onStop: () => void;
 }) {
@@ -237,8 +328,10 @@ function PlaygroundForm({
               placeholder="输入一条消息..."
               className="min-h-44"
               onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === "Enter")
-                  void onSubmit(event as unknown as FormEvent<HTMLFormElement>);
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                  event.preventDefault();
+                  event.currentTarget.form?.requestSubmit();
+                }
               }}
             />
             <div className="flex flex-wrap items-center gap-1.5">
@@ -258,8 +351,19 @@ function PlaygroundForm({
                 </button>
               ))}
             </div>
-            <div className="flex justify-end text-[11px] text-muted-foreground">
-              {prompt.length} 字符
+            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2"
+                onClick={onClearPrompt}
+                disabled={!prompt}
+              >
+                <Trash2 className="size-3" />
+                清空输入
+              </Button>
+              <span>{prompt.length} 字符</span>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -306,6 +410,7 @@ function ResponsePreview({
   content,
   usage,
   onClear,
+  onRetry,
 }: {
   model?: GatewayModel;
   effort: string;
@@ -315,6 +420,7 @@ function ResponsePreview({
   content: string;
   usage?: Usage;
   onClear: () => void;
+  onRetry: () => void;
 }) {
   const title = model
     ? `${model.name || model.id} · ${effort === "off" ? "思考关闭" : effort}`
@@ -330,7 +436,23 @@ function ResponsePreview({
           <div className="flex items-center gap-1.5">
             {(content || reasoning || error) && (
               <>
-                {content && <CopyButton value={content} />}
+                {(content || reasoning) && (
+                  <CopyButton
+                    value={[
+                      reasoning ? `思考过程\n${reasoning}` : "",
+                      content ? `Assistant\n${content}` : "",
+                    ]
+                      .filter(Boolean)
+                      .join("\n\n")}
+                    label="复制全部"
+                  />
+                )}
+                {state !== "streaming" && (
+                  <Button variant="ghost" size="sm" onClick={onRetry} aria-label="重试请求">
+                    <RefreshCw className="size-3.5" />
+                    <span className="hidden sm:inline">重试</span>
+                  </Button>
+                )}
                 <Button variant="ghost" size="sm" onClick={onClear} aria-label="清空响应">
                   <Trash2 className="size-3.5" />
                   <span className="hidden sm:inline">清空</span>
@@ -351,6 +473,11 @@ function ResponsePreview({
               <Badge variant="danger">
                 <XCircle className="size-3" />
                 失败
+              </Badge>
+            ) : state === "canceled" ? (
+              <Badge variant="muted">
+                <XCircle className="size-3" />
+                已停止
               </Badge>
             ) : (
               <Badge variant="muted">待命</Badge>

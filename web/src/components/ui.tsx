@@ -203,3 +203,79 @@ export function Kbd({ children }: { children: React.ReactNode }) {
     </kbd>
   );
 }
+
+export function ConfirmDialog({
+  open,
+  title,
+  description,
+  confirmLabel = "确认",
+  loading = false,
+  destructive = false,
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  confirmLabel?: string;
+  loading?: boolean;
+  destructive?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const confirmButtonRef = React.useRef<HTMLButtonElement>(null);
+
+  React.useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape" && !loading) onCancel();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    confirmButtonRef.current?.focus();
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [loading, onCancel, open]);
+
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm"
+      role="presentation"
+    >
+      <button
+        type="button"
+        aria-label="关闭确认对话框"
+        className="absolute inset-0 cursor-default"
+        onClick={onCancel}
+        disabled={loading}
+      />
+      <Card
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirm-dialog-title"
+        aria-describedby="confirm-dialog-description"
+        className="relative w-full max-w-md border-border/80 bg-card shadow-2xl"
+      >
+        <CardHeader>
+          <CardTitle id="confirm-dialog-title" className="text-base">
+            {title}
+          </CardTitle>
+          <CardDescription id="confirm-dialog-description">{description}</CardDescription>
+        </CardHeader>
+        <CardFooter className="justify-end gap-2">
+          <Button variant="ghost" onClick={onCancel} disabled={loading}>
+            取消
+          </Button>
+          <Button
+            ref={confirmButtonRef}
+            variant={destructive ? "destructive" : "default"}
+            onClick={onConfirm}
+            disabled={loading}
+          >
+            {loading ? <Spinner className="size-3.5" /> : null}
+            {loading ? "处理中..." : confirmLabel}
+          </Button>
+        </CardFooter>
+      </Card>
+    </div>
+  );
+}

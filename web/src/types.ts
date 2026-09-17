@@ -1,5 +1,31 @@
 export type PageKey = "overview" | "playground" | "metrics" | "management" | "settings";
 
+export type NoticeTone = "success" | "error" | "warning" | "info";
+
+export interface Notice {
+  message: string;
+  tone: NoticeTone;
+}
+
+export interface NavigateOptions {
+  modelId?: string;
+  replace?: boolean;
+}
+
+export type Navigate = (page: PageKey, options?: NavigateOptions) => void;
+
+export type MetricsWindow = "1h" | "24h" | "7d" | "30d";
+export type MetricsStatus = "all" | "success" | "error" | "canceled";
+
+export interface MetricsQuery {
+  window: MetricsWindow;
+  provider?: string;
+  model?: string;
+  status?: Exclude<MetricsStatus, "all">;
+  limit?: number;
+  offset?: number;
+}
+
 export interface GatewayModel {
   id: string;
   name?: string;
@@ -81,6 +107,13 @@ export interface MetricsSummary {
   byChannel: MetricGroup[];
   byModel: MetricGroup[];
   byApiKey: MetricGroup[];
+}
+
+export interface MetricsSnapshot {
+  summary: MetricsSummary;
+  timeseries: TimeseriesPoint[];
+  recent: RecentRequest[];
+  total: number;
 }
 
 export interface TimeseriesPoint {

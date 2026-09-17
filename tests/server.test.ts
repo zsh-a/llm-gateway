@@ -139,3 +139,38 @@ test("remote HTTP listeners reject unauthenticated gateway traffic", async () =>
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("metrics routes apply model and status filters consistently", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "llm-gateway-http-"));
+  const deps = depsFor(directory);
+  try {
+    const failed = deps.metrics.beginAdmission("chat");
+    deps.metrics.finishAdmission(failed, "demo", { status: "error" });
+    const succeeded = deps.metrics.beginAdmission("chat");
+    deps.metrics.finishAdmission(succeeded, "other", { status: "success" });
+
+    const app = createGatewayApp(deps);
+    const summary = await app.request(
+      "http://localhost/metrics/summary?window=1h&model=demo&status=error",
+    );
+    assert.equal(summary.status, 200);
+    assert.equal((await summary.json()).requests, 1);
+
+    const timeseries = await app.request(
+      "http://localhost/metrics/timeseries?window=1h&model=demo&status=error",
+    );
+    assert.equal(timeseries.status, 200);
+    const points = (await timeseries.json()).data as Array<{ requests: number }>;
+    assert.equal(points.reduce((total, point) => total + point.requests, 0), 1);
+
+    const page = await app.request("http://localhost/metrics/requests?window=1h&limit=1&offset=1");
+    assert.equal(page.status, 200);
+    const pageBody = await page.json();
+    assert.equal(pageBody.total, 2);
+    assert.equal(pageBody.offset, 1);
+    assert.equal(pageBody.data.length, 1);
+  } finally {
+    deps.metrics.flush();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

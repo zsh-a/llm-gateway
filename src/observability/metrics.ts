@@ -58,9 +58,10 @@ export interface MetricOutcome {
   toolCalls?: number;
 }
 
-interface MetricFilter {
+export interface MetricFilter {
   windowMs?: number;
   limit?: number;
+  offset?: number;
   provider?: string;
   model?: string;
   status?: MetricStatus;
@@ -291,9 +292,10 @@ export class MetricsStore {
 
   summary(
     windowMs = 24 * 60 * 60 * 1000,
-    apiKeyId?: string
+    apiKeyId?: string,
+    filter: Pick<MetricFilter, "provider" | "model" | "status"> = {}
   ): JsonRecord {
-    const records = this.filter({ windowMs, apiKeyId });
+    const records = this.filter({ windowMs, apiKeyId, ...filter });
     const total = records.length;
     const successes = records.filter((record) => record.status === "success").length;
     const errors = records.filter((record) => record.status === "error").length;
@@ -340,7 +342,8 @@ export class MetricsStore {
   timeseries(
     windowMs = 24 * 60 * 60 * 1000,
     bucketMs?: number,
-    apiKeyId?: string
+    apiKeyId?: string,
+    filter: Pick<MetricFilter, "provider" | "model" | "status"> = {}
   ): JsonRecord {
     const now = Date.now();
     const defaultBucket = windowMs <= 60 * 60 * 1000
@@ -353,7 +356,7 @@ export class MetricsStore {
     const firstBucket = Math.floor(from / bucket) * bucket;
     const bucketCount = Math.min(744, Math.ceil((now - firstBucket) / bucket));
     const points: JsonRecord[] = [];
-    const records = this.filter({ windowMs, apiKeyId });
+    const records = this.filter({ windowMs, apiKeyId, ...filter });
 
     for (let index = 0; index < bucketCount; index += 1) {
       const start = firstBucket + index * bucket;
@@ -389,10 +392,12 @@ export class MetricsStore {
   recent(filter: MetricFilter = {}): JsonRecord {
     const records = this.filter(filter).sort((left, right) => right.startedAt - left.startedAt);
     const limit = Math.min(200, Math.max(1, filter.limit ?? 50));
+    const offset = Math.max(0, filter.offset ?? 0);
     return {
       object: "llm-gateway.metrics.requests",
-      data: records.slice(0, limit),
+      data: records.slice(offset, offset + limit),
       limit,
+      offset,
       total: records.length
     };
   }
@@ -526,4 +531,3 @@ export class MetricsStore {
     }
   }
 }
-

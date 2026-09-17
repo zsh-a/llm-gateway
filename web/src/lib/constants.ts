@@ -82,7 +82,18 @@ export const navigation: Array<{ key: PageKey; icon: typeof LayoutDashboard }> =
   { key: "settings", icon: Settings2 },
 ];
 
+export interface AppLocation {
+  page: PageKey;
+  modelId?: string;
+}
+
+export function resolveLocation(hash: string): AppLocation {
+  const [pageValue, query = ""] = hash.replace(/^#/, "").split("?", 2);
+  const page = pageValue in pageMeta ? (pageValue as PageKey) : "overview";
+  const modelId = new URLSearchParams(query).get("model") || undefined;
+  return { page, modelId: page === "playground" ? modelId : undefined };
+}
+
 export function resolvePage(hash: string): PageKey {
-  const value = hash.replace(/^#/, "") as PageKey;
-  return value in pageMeta ? value : "overview";
+  return resolveLocation(hash).page;
 }

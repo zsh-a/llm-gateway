@@ -20,15 +20,9 @@ import { RequestTable } from "../components/usage";
 import { formatCompact, formatDuration, formatNumber, formatTime } from "../lib/format";
 import { modelSupportsReasoning } from "../lib/models";
 import { cn } from "../lib/utils";
-import type { AuthProviderStatus, DashboardData, GatewayModel, PageKey } from "../types";
+import type { AuthProviderStatus, DashboardData, GatewayModel, Navigate } from "../types";
 
-export function OverviewPage({
-  data,
-  onNavigate,
-}: {
-  data: DashboardData;
-  onNavigate: (page: PageKey) => void;
-}) {
+export function OverviewPage({ data, onNavigate }: { data: DashboardData; onNavigate: Navigate }) {
   const summary = data.summary;
   const requestValues = data.timeseries.map((point) => point.requests);
   const providerEntries = Object.entries(data.auth.providers);
@@ -36,10 +30,8 @@ export function OverviewPage({
     `${formatCompact(summary.tokens.cachedTokens)} 缓存`,
     `${formatCompact(summary.tokens.reasoningTokens)} 思考`,
   ].join(" · ");
-  const heroDescription = [
-    "统一管理 Provider、模型路由、访问密钥和调用指标。",
-    "控制台与 Gateway 共用一个运行时。",
-  ].join("");
+  const heroDescription = "统一管理 Provider、模型路由、访问密钥和调用指标。";
+  const gatewayOnline = data.health.status === "ok" || data.health.status === "ready";
   return (
     <div className="space-y-6">
       <div
@@ -86,16 +78,12 @@ export function OverviewPage({
             <div
               className={cn(
                 "flex size-9 items-center justify-center rounded-full",
-                data.health.status === "offline"
+                !gatewayOnline
                   ? "bg-red-400/10 text-red-300"
                   : "bg-emerald-400/10 text-emerald-300",
               )}
             >
-              {data.health.status === "offline" ? (
-                <Wifi className="size-4" />
-              ) : (
-                <CheckCircle2 className="size-4" />
-              )}
+              {!gatewayOnline ? <Wifi className="size-4" /> : <CheckCircle2 className="size-4" />}
             </div>
             <div>
               <div className="text-xs text-muted-foreground">Gateway 状态</div>
@@ -217,7 +205,11 @@ export function OverviewPage({
               <EmptyState icon={Bot} title="没有可用模型" description="认证成功后刷新模型目录" />
             )}
             {data.models.slice(0, 8).map((model) => (
-              <ModelRow key={model.id} model={model} onClick={() => onNavigate("playground")} />
+              <ModelRow
+                key={model.id}
+                model={model}
+                onClick={() => onNavigate("playground", { modelId: model.id })}
+              />
             ))}
           </CardContent>
         </Card>
