@@ -18,7 +18,7 @@
       ▼
 同一个 Perry 编译二进制
   serve   → OpenAI Client → ModelCatalog → Provider → LLM 上游
-  desktop → 托管 serve 子进程 + 嵌入式 Web 控制台
+  desktop → 托管 serve 子进程 + 系统托盘 + 浏览器 Web 控制台
 ```
 
 核心代码：
@@ -34,7 +34,8 @@ src/infrastructure/ 文件存储和 Responses 会话存储
 src/observability/  请求指标和用量归一化
 src/transport/http/ HTTP 类型、工具、协议处理器和服务器装配
 src/embedded-ui/    Web 控制台嵌入入口及生成资源声明
-src/cli/main.ts     serve / desktop 模式入口
+src/cli/main.ts     serve / desktop / 管理模式入口
+src/cli/desktop.ts  Perry 托盘和 Gateway 子进程管理
 src/cli/management.ts doctor / models / export 管理命令
 web/src/            React + Tailwind + shadcn/ui 控制台源码
 scripts/auth.ts         一次性认证引导工具
@@ -44,7 +45,7 @@ tests/                  Node 原生回归测试（编译后使用 node:test）
 .build/                 构建阶段临时目录（不发布、不提交）
 ```
 
-`serve` 模式只运行网关；`desktop` 模式由同一个入口托管 Gateway 子进程并打开同源 Web 控制台。控制台直接由 Gateway 提供，不需要额外的静态服务器、前端运行时或 CORS 配置。
+`serve` 模式只运行网关；`desktop` 模式由同一个入口托管 Gateway 子进程、创建系统托盘并打开浏览器控制台。托盘菜单可以打开控制台、启动、停止、重启 Gateway 或退出应用。控制台直接由 Gateway 提供，不需要额外的静态服务器、前端运行时或 CORS 配置。
 Web 控制台使用 Tailwind CSS v4 和 shadcn/ui 风格的本地组件，资源由 Vite 在构建阶段编译并打入二进制，运行时不依赖 CDN 或额外静态服务器。
 认证工具仍然独立，不会被网关或桌面模式自动启动。
 
@@ -162,7 +163,7 @@ npm run start
 # ./dist/llm-gateway serve
 ```
 
-桌面端一键启动 Gateway 和控制面板：
+桌面端一键启动 Gateway、系统托盘和控制面板：
 
 ```bash
 npm run desktop
@@ -170,7 +171,17 @@ npm run desktop
 # ./dist/llm-gateway desktop
 ```
 
-`desktop` 会由同一个二进制托管 Gateway 子进程并打开浏览器控制台：`http://127.0.0.1:3000/ui`。控制台按“概览 / Playground / 统计 / 渠道与 Key / 设置”分成独立页面：概览查看网关、Provider、认证和模型状态，Playground 发送真实流式测试请求并支持停止、重试、复制和模型上下文跳转，统计支持 1 小时、24 小时、7 天、30 天以及 Provider、模型、状态筛选和请求分页；“渠道与 Key”页面在输入管理员或复用的 Gateway Key 后维护 Channel（默认只需选择 Provider，高级设置可配置上游、认证引用、模型映射、优先级和权重）以及虚拟 API Key（默认只需填写名称，高级设置可配置模型权限和限额）。新 Key 的完整 secret 只在创建成功时显示一次。控制台默认连接当前托管实例；设置页默认使用同一个 Gateway Key 进行调用和管理，只有远程部署使用不同凭证时才需要分别填写。也可以通过 `GATEWAY_URL` 指定其他网关地址。页面使用同源 `fetch` 访问网关，不需要额外安装依赖。
+macOS 可以生成可双击启动的应用包：
+
+```bash
+npm run package:macos
+open "dist/LLM Gateway.app"
+```
+
+
+`desktop` 会由同一个二进制托管 Gateway 子进程、创建系统托盘并打开浏览器控制台，同时显示一个轻量启动状态窗口，避免后台启动时没有可见反馈。控制台地址为 `http://127.0.0.1:3000/ui`。托盘左键（Windows/Linux）会打开控制台，右键显示管理菜单；macOS 使用原生菜单栏行为。控制台按“概览 / Playground / 统计 / 渠道与 Key / 设置”分成独立页面：概览查看网关、Provider、认证和模型状态，Playground 发送真实流式测试请求并支持停止、重试、复制和模型上下文跳转，统计支持 1 小时、24 小时、7 天、30 天以及 Provider、模型、状态筛选和请求分页；“渠道与 Key”页面在输入管理员或复用的 Gateway Key 后维护 Channel（默认只需选择 Provider，高级设置可配置上游、认证引用、模型映射、优先级和权重）以及虚拟 API Key（默认只需填写名称，高级设置可配置模型权限和限额）。新 Key 的完整 secret 只在创建成功时显示一次。控制台默认连接当前托管实例；设置页默认使用同一个 Gateway Key 进行调用和管理，只有远程部署使用不同凭证时才需要分别填写。也可以通过 `GATEWAY_URL` 指定其他网关地址。页面使用同源 `fetch` 访问网关，不需要额外安装依赖。
+
+托盘默认使用 Perry 的占位图标；发布包可以设置 `TRAY_ICON_PATH` 指向 PNG、ICNS 或 ICO 图标。macOS 若需要显式指定浏览器，可设置 `BROWSER_BUNDLE_ID`（例如 `com.google.Chrome`）。桌面模式未显式设置 `RUNTIME_DIR` 时，如果当前目录存在 `.runtime` 会继续使用它，否则使用系统用户数据目录：macOS 为 `~/Library/Application Support/LLM Gateway`，Windows 为 `%APPDATA%/LLM Gateway`，Linux 为 `$XDG_DATA_HOME/llm-gateway` 或 `~/.local/share/llm-gateway`。这样从 Finder、开始菜单或桌面快捷方式启动时不会依赖命令行当前目录。
 
 网关不会启动 mitmproxy，也不会启动桌面客户端。之后可以关闭 MiMo、WorkBuddy 和 mitmweb。
 

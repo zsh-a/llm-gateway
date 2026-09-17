@@ -15,6 +15,7 @@
     "start": "./dist/llm-gateway serve",
     "dev": "npm run build && npm run start",
     "desktop": "./dist/llm-gateway desktop",
+    "package:macos": "npm run build && node scripts/package-macos.mjs",
     "doctor": "./dist/llm-gateway doctor",
     "models": "./dist/llm-gateway models",
     "export:harness": "./dist/llm-gateway export deepseek-harness",
