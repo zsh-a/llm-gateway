@@ -73,6 +73,7 @@ function normalizeChannel(
   const provider = registry.get(providerId);
   if (!id || !provider) return null;
 
+  const hasUpstreamUrl = Object.hasOwn(record, "upstreamUrl");
   const rawUrl = asTrimmedString(record.upstreamUrl) ?? "";
   let upstreamUrl: string | undefined;
   if (rawUrl) {
@@ -85,7 +86,9 @@ function normalizeChannel(
     }
   }
 
-  const mergedMappings = record.modelMappings ?? current?.modelMappings;
+  const mergedMappings = Object.hasOwn(record, "modelMappings")
+    ? record.modelMappings
+    : current?.modelMappings;
   const result: ChannelConfig = {
     id,
     name: asTrimmedString(record.name) || current?.name || id,
@@ -98,7 +101,7 @@ function normalizeChannel(
     modelMappings: modelMappings(mergedMappings)
   };
   if (upstreamUrl) result.upstreamUrl = upstreamUrl;
-  else if (current?.upstreamUrl) result.upstreamUrl = current.upstreamUrl;
+  else if (!hasUpstreamUrl && current?.upstreamUrl) result.upstreamUrl = current.upstreamUrl;
   return result;
 }
 

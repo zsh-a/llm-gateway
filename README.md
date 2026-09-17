@@ -170,7 +170,7 @@ npm run desktop
 # ./dist/llm-gateway desktop
 ```
 
-`desktop` 会由同一个二进制托管 Gateway 子进程并打开浏览器控制台：`http://127.0.0.1:3000/ui`。控制台按“概览 / Playground / 统计 / 渠道与 Key / 设置”分成独立页面：概览查看网关、Provider、认证和模型状态，Playground 发送真实流式测试请求并支持停止、重试、复制和模型上下文跳转，统计支持 1 小时、24 小时、7 天、30 天以及 Provider、模型、状态筛选和请求分页；“渠道与 Key”页面在输入 `PROXY_ADMIN_KEY` 后维护 Channel（上游、认证引用、模型映射、优先级、权重、编辑和启停）以及虚拟 API Key（模型权限、RPM、TPM、Token 配额、编辑、启停和撤销）。新 Key 的完整 secret 只在创建成功时显示一次。控制台默认连接当前托管实例；如果配置了 `PROXY_API_KEY` 或启用了虚拟 API Key，在设置页输入可用的 Key 即可。也可以通过 `GATEWAY_URL` 指定其他网关地址。页面使用同源 `fetch` 访问网关，不需要额外安装依赖。
+`desktop` 会由同一个二进制托管 Gateway 子进程并打开浏览器控制台：`http://127.0.0.1:3000/ui`。控制台按“概览 / Playground / 统计 / 渠道与 Key / 设置”分成独立页面：概览查看网关、Provider、认证和模型状态，Playground 发送真实流式测试请求并支持停止、重试、复制和模型上下文跳转，统计支持 1 小时、24 小时、7 天、30 天以及 Provider、模型、状态筛选和请求分页；“渠道与 Key”页面在输入管理员或复用的 Gateway Key 后维护 Channel（默认只需选择 Provider，高级设置可配置上游、认证引用、模型映射、优先级和权重）以及虚拟 API Key（默认只需填写名称，高级设置可配置模型权限和限额）。新 Key 的完整 secret 只在创建成功时显示一次。控制台默认连接当前托管实例；设置页默认使用同一个 Gateway Key 进行调用和管理，只有远程部署使用不同凭证时才需要分别填写。也可以通过 `GATEWAY_URL` 指定其他网关地址。页面使用同源 `fetch` 访问网关，不需要额外安装依赖。
 
 网关不会启动 mitmproxy，也不会启动桌面客户端。之后可以关闭 MiMo、WorkBuddy 和 mitmweb。
 

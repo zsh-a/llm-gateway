@@ -56,7 +56,7 @@ export function PlaygroundPage({
   onRefresh: () => void;
 }) {
   const [modelId, setModelId] = useState(initialModelId ?? data.models[0]?.id ?? "");
-  const [effort, setEffort] = useState("off");
+  const [effort, setEffort] = useState("auto");
   const [prompt, setPrompt] = useState("请用一句话介绍当前 Gateway 的能力。");
   const [content, setContent] = useState("");
   const [reasoning, setReasoning] = useState("");
@@ -99,14 +99,16 @@ export function PlaygroundPage({
   useEffect(() => {
     const efforts = modelEfforts(model);
     if (!modelSupportsReasoning(model)) {
-      setEffort("off");
+      setEffort("auto");
       return;
     }
     setEffort((current) => {
-      if (current === "off" || Object.hasOwn(efforts, current)) return current;
+      if (current === "auto" || current === "off" || Object.hasOwn(efforts, current)) {
+        return current;
+      }
       return model.defaultReasoningEffort && Object.hasOwn(efforts, model.defaultReasoningEffort)
         ? model.defaultReasoningEffort
-        : (Object.keys(efforts)[0] ?? "off");
+        : "auto";
     });
   }, [model]);
 
@@ -265,55 +267,65 @@ function PlaygroundForm({
       </CardHeader>
       <CardContent>
         <form className="space-y-5" onSubmit={onSubmit}>
-          <div className="space-y-2">
-            <label htmlFor="playground-model" className="text-xs font-medium text-foreground">
-              模型
-            </label>
-            <Select
-              id="playground-model"
-              value={model?.id ?? modelId}
-              onChange={(event) => onModelChange(event.target.value)}
-              disabled={!models.length}
-            >
-              <option value="">{models.length ? "选择模型" : "暂无模型"}</option>
-              {models.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name || item.id}
-                </option>
-              ))}
-            </Select>
-            {model && (
-              <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                <span className="font-mono">{model.id}</span>
-                {model.provider && <Badge variant="muted">{model.provider}</Badge>}
-              </div>
-            )}
-          </div>
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label htmlFor="playground-effort" className="text-xs font-medium text-foreground">
-                思考强度
+          {models.length > 1 ? (
+            <div className="space-y-2">
+              <label htmlFor="playground-model" className="text-xs font-medium text-foreground">
+                模型
               </label>
-              {modelSupportsReasoning(model) ? (
-                <Badge variant="info">模型支持</Badge>
-              ) : (
-                <span className="text-[11px] text-muted-foreground">模型未声明</span>
+              <Select
+                id="playground-model"
+                value={model?.id ?? modelId}
+                onChange={(event) => onModelChange(event.target.value)}
+                disabled={!models.length}
+              >
+                <option value="">选择模型</option>
+                {models.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name || item.id}
+                  </option>
+                ))}
+              </Select>
+              {model && (
+                <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                  <span className="font-mono">{model.id}</span>
+                  {model.provider && <Badge variant="muted">{model.provider}</Badge>}
+                </div>
               )}
             </div>
-            <Select
-              id="playground-effort"
-              value={effort}
-              onChange={(event) => onEffortChange(event.target.value)}
-              disabled={!modelSupportsReasoning(model)}
-            >
-              <option value="off">关闭思考</option>
-              {Object.keys(efforts).map((key) => (
-                <option key={key} value={key}>
-                  {key}
-                </option>
-              ))}
-            </Select>
-          </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="text-xs font-medium text-foreground">模型</div>
+              <div className="flex min-h-10 items-center justify-between gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 text-sm">
+                <span className="truncate">{model?.name || model?.id || "暂无模型"}</span>
+                {model?.provider && <Badge variant="muted">{model.provider}</Badge>}
+              </div>
+            </div>
+          )}
+          {modelSupportsReasoning(model) && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label htmlFor="playground-effort" className="text-xs font-medium text-foreground">
+                  思考强度
+                </label>
+                <Badge variant="info">模型支持</Badge>
+              </div>
+              <Select
+                id="playground-effort"
+                value={effort}
+                onChange={(event) => onEffortChange(event.target.value)}
+              >
+                <option value="auto">自动（模型默认）</option>
+                <option value="off">关闭思考</option>
+                {Object.keys(efforts)
+                  .filter((key) => key !== "off")
+                  .map((key) => (
+                    <option key={key} value={key}>
+                      {key}
+                    </option>
+                  ))}
+              </Select>
+            </div>
+          )}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <label htmlFor="playground-prompt" className="text-xs font-medium text-foreground">
@@ -423,7 +435,7 @@ function ResponsePreview({
   onRetry: () => void;
 }) {
   const title = model
-    ? `${model.name || model.id} · ${effort === "off" ? "思考关闭" : effort}`
+    ? `${model.name || model.id} · ${effort === "auto" ? "自动思考" : effort === "off" ? "思考关闭" : effort}`
     : "选择模型开始测试";
   return (
     <Card className="min-h-[560px] overflow-hidden">

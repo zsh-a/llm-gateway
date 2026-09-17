@@ -30,12 +30,19 @@ export function SettingsPage({
 }) {
   const [apiKey, setApiKey] = useState(credentials.apiKey);
   const [adminKey, setAdminKey] = useState(credentials.adminKey);
+  const [useSameKey, setUseSameKey] = useState(
+    !credentials.adminKey || credentials.adminKey === credentials.apiKey,
+  );
   const [showApiKey, setShowApiKey] = useState(false);
   const [showAdminKey, setShowAdminKey] = useState(false);
 
   const save = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
-    const next = { apiKey: apiKey.trim(), adminKey: adminKey.trim() };
+    const nextApiKey = apiKey.trim();
+    const next = {
+      apiKey: nextApiKey,
+      adminKey: useSameKey ? nextApiKey : adminKey.trim(),
+    };
     saveCredentials(next);
     onCredentials(next);
     onNotice("设置已保存");
@@ -44,6 +51,7 @@ export function SettingsPage({
   const clear = (): void => {
     setApiKey("");
     setAdminKey("");
+    setUseSameKey(true);
     saveCredentials({ apiKey: "", adminKey: "" });
     onCredentials({ apiKey: "", adminKey: "" });
     onNotice("访问凭证已清除");
@@ -63,7 +71,7 @@ export function SettingsPage({
         </CardHeader>
         <CardContent>
           <form className="space-y-4" onSubmit={save}>
-            <Field label="普通调用 API Key" htmlFor="settings-api-key">
+            <Field label="Gateway Key" htmlFor="settings-api-key">
               <div className="relative">
                 <Input
                   id="settings-api-key"
@@ -80,37 +88,52 @@ export function SettingsPage({
                   size="icon"
                   className="absolute right-1 top-1 size-8"
                   onClick={() => setShowApiKey((current) => !current)}
-                  aria-label={showApiKey ? "隐藏普通调用 API Key" : "显示普通调用 API Key"}
+                  aria-label={showApiKey ? "隐藏 Gateway Key" : "显示 Gateway Key"}
                   title={showApiKey ? "隐藏" : "显示"}
                 >
                   {showApiKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
                 </Button>
               </div>
             </Field>
-            <Field label="管理员 API Key" htmlFor="settings-admin-key">
-              <div className="relative">
-                <Input
-                  id="settings-admin-key"
-                  type={showAdminKey ? "text" : "password"}
-                  value={adminKey}
-                  onChange={(event) => setAdminKey(event.target.value)}
-                  placeholder="PROXY_ADMIN_KEY"
-                  className="pr-10"
-                  autoComplete="off"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="absolute right-1 top-1 size-8"
-                  onClick={() => setShowAdminKey((current) => !current)}
-                  aria-label={showAdminKey ? "隐藏管理员 API Key" : "显示管理员 API Key"}
-                  title={showAdminKey ? "隐藏" : "显示"}
-                >
-                  {showAdminKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-                </Button>
-              </div>
-            </Field>
+            <label className="flex cursor-pointer items-center gap-2 text-xs text-foreground">
+              <input
+                type="checkbox"
+                checked={useSameKey}
+                onChange={(event) => setUseSameKey(event.target.checked)}
+                className="size-3.5 accent-[var(--primary)]"
+              />
+              管理接口复用同一个 Key
+            </label>
+            {useSameKey ? (
+              <p className="text-[11px] leading-4 text-muted-foreground">
+                本地 Gateway 通常只需填写一次；远程部署使用不同管理员 Key 时取消勾选。
+              </p>
+            ) : (
+              <Field label="管理员 API Key" htmlFor="settings-admin-key">
+                <div className="relative">
+                  <Input
+                    id="settings-admin-key"
+                    type={showAdminKey ? "text" : "password"}
+                    value={adminKey}
+                    onChange={(event) => setAdminKey(event.target.value)}
+                    placeholder="PROXY_ADMIN_KEY"
+                    className="pr-10"
+                    autoComplete="off"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="absolute right-1 top-1 size-8"
+                    onClick={() => setShowAdminKey((current) => !current)}
+                    aria-label={showAdminKey ? "隐藏管理员 API Key" : "显示管理员 API Key"}
+                    title={showAdminKey ? "隐藏" : "显示"}
+                  >
+                    {showAdminKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                  </Button>
+                </div>
+              </Field>
+            )}
             <div className="flex items-center gap-2">
               <Button type="submit">
                 <Save className="size-4" />

@@ -53,3 +53,29 @@ test("channel cursor state is bounded for arbitrary model names", () => {
     assert.ok(cursors.size <= 1024);
   });
 });
+
+test("partial channel updates can clear optional routing overrides", () => {
+  withChannelStore([
+    {
+      id: "mimo-primary",
+      providerId: "mimo",
+      authRef: "mimo",
+      upstreamUrl: "https://example.com/v1",
+      modelMappings: { "public-model": "upstream-model" },
+      enabled: true
+    }
+  ], (store) => {
+    const updated = store.upsert({
+      id: "mimo-primary",
+      providerId: "mimo",
+      upstreamUrl: "",
+      modelMappings: {}
+    });
+
+    assert.equal(updated.upstreamUrl, undefined);
+    assert.deepEqual(updated.modelMappings, {});
+    assert.equal(updated.authRef, "mimo");
+    assert.equal(updated.priority, 100);
+    assert.equal(updated.weight, 1);
+  });
+});

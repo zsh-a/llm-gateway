@@ -1,6 +1,7 @@
 import {
   AlertCircle,
   Check,
+  ChevronDown,
   Copy,
   KeyRound,
   Network,
@@ -8,6 +9,7 @@ import {
   Plus,
   Power,
   Save,
+  SlidersHorizontal,
   Trash2,
 } from "lucide-react";
 import { type FormEvent, useState } from "react";
@@ -25,11 +27,24 @@ import {
   Input,
   Select,
   Spinner,
-  Textarea,
 } from "../components/ui";
 import { formatCompact } from "../lib/format";
 import { cn } from "../lib/utils";
-import type { ApiKeyRecord, ChannelConfig, DashboardData, Navigate, NoticeTone } from "../types";
+import type {
+  ApiKeyInput,
+  ApiKeyRecord,
+  ChannelConfig,
+  ChannelInput,
+  DashboardData,
+  Navigate,
+  NoticeTone,
+} from "../types";
+
+interface ModelMappingDraft {
+  id: string;
+  publicModel: string;
+  upstreamModel: string;
+}
 
 interface ChannelDraft {
   id: string;
@@ -39,7 +54,7 @@ interface ChannelDraft {
   upstreamUrl: string;
   priority: string;
   weight: string;
-  modelMappings: string;
+  modelMappings: ModelMappingDraft[];
 }
 
 interface KeyDraft {
@@ -62,7 +77,7 @@ const initialChannel: ChannelDraft = {
   upstreamUrl: "",
   priority: "100",
   weight: "1",
-  modelMappings: "",
+  modelMappings: [],
 };
 
 const initialKey: KeyDraft = {
@@ -82,7 +97,13 @@ function channelDraftFrom(item: ChannelConfig): ChannelDraft {
     upstreamUrl: item.upstreamUrl ?? "",
     priority: String(item.priority ?? 100),
     weight: String(item.weight ?? 1),
-    modelMappings: item.modelMappings ? JSON.stringify(item.modelMappings, null, 2) : "",
+    modelMappings: Object.entries(item.modelMappings ?? {}).map(
+      ([publicModel, upstreamModel], index) => ({
+        id: `${publicModel}-${index}`,
+        publicModel,
+        upstreamModel,
+      }),
+    ),
   };
 }
 
@@ -103,21 +124,24 @@ function optionalInteger(value: string, minimum: number): number | undefined | n
   return number;
 }
 
-function parseMappings(value: string): Record<string, string> | undefined | null {
-  if (!value.trim()) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(value);
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    const entries = Object.entries(parsed);
-    if (
-      entries.some(([key, mapped]) => !key.trim() || typeof mapped !== "string" || !mapped.trim())
-    ) {
-      return null;
-    }
-    return Object.fromEntries(entries.map(([key, mapped]) => [key.trim(), mapped.trim()]));
-  } catch {
-    return null;
+function serializeMappings(value: ModelMappingDraft[]): Record<string, string> | null {
+  const result: Record<string, string> = {};
+  for (const mapping of value) {
+    const publicModel = mapping.publicModel.trim();
+    const upstreamModel = mapping.upstreamModel.trim();
+    if (!publicModel && !upstreamModel) continue;
+    if (!publicModel || !upstreamModel || Object.hasOwn(result, publicModel)) return null;
+    result[publicModel] = upstreamModel;
   }
+  return result;
+}
+
+function suggestedChannelId(providerId: string, channels: ChannelConfig[]): string {
+  const base = `${providerId}-default`;
+  if (!channels.some((item) => item.id === base && item.providerId !== providerId)) return base;
+  let suffix = 2;
+  while (channels.some((item) => item.id === `${providerId}-${suffix}`)) suffix += 1;
+  return `${providerId}-${suffix}`;
 }
 
 export function ManagementPage({
@@ -147,11 +171,26 @@ export function ManagementPage({
   );
 
   const updateChannel = (name: keyof ChannelDraft, value: string): void => {
-    setChannel((current) => ({ ...current, [name]: value }));
+    setChannel((current) => {
+      if (name === "providerId") {
+        return {
+          ...current,
+          providerId: value,
+          id: editingChannelId ? current.id : value ? suggestedChannelId(value, data.channels) : "",
+          name: editingChannelId ? current.name : "",
+          authRef: editingChannelId ? current.authRef : "",
+        };
+      }
+      return { ...current, [name]: value };
+    });
   };
 
   const updateKey = (name: keyof KeyDraft, value: string): void => {
     setKey((current) => ({ ...current, [name]: value }));
+  };
+
+  const updateChannelMappings = (modelMappings: ModelMappingDraft[]): void => {
+    setChannel((current) => ({ ...current, modelMappings }));
   };
 
   const resetChannel = (): void => {
@@ -166,8 +205,8 @@ export function ManagementPage({
 
   const saveChannel = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    if (!channel.id.trim() || !channel.providerId || !channel.authRef.trim()) {
-      onNotice("渠道 ID、Provider 和认证引用不能为空", "error");
+    if (!channel.id.trim() || !channel.providerId) {
+      onNotice("请选择 Provider", "error");
       return;
     }
     const priority = optionalInteger(channel.priority, 0);
@@ -189,27 +228,36 @@ export function ManagementPage({
         return;
       }
     }
-    const modelMappings = parseMappings(channel.modelMappings);
+    const modelMappings = serializeMappings(channel.modelMappings);
     if (modelMappings === null) {
-      onNotice("模型映射必须是键和值均为字符串的合法 JSON 对象", "error");
+      onNotice("模型映射需要同时填写公开模型和上游模型，且公开模型不能重复", "error");
       return;
+    }
+
+    const id = channel.id.trim();
+    const editing = Boolean(editingChannelId);
+    const input: ChannelInput = { id, providerId: channel.providerId };
+    const name = channel.name.trim();
+    const authRef = channel.authRef.trim();
+    if (name || editing) input.name = name || id;
+    if (authRef || editing) input.authRef = authRef || channel.providerId;
+    if (editing) {
+      input.enabled = data.channels.find((item) => item.id === editingChannelId)?.enabled !== false;
+      input.upstreamUrl = channel.upstreamUrl.trim();
+      input.priority = priority ?? 100;
+      input.weight = weight ?? 1;
+      input.modelMappings = modelMappings;
+    } else {
+      if (channel.upstreamUrl.trim()) input.upstreamUrl = channel.upstreamUrl.trim();
+      if (priority !== undefined && priority !== 100) input.priority = priority;
+      if (weight !== undefined && weight !== 1) input.weight = weight;
+      if (Object.keys(modelMappings).length > 0) input.modelMappings = modelMappings;
     }
 
     setSaving("channel");
     try {
-      const existing = data.channels.find((item) => item.id === editingChannelId);
-      await api.saveChannel({
-        id: channel.id.trim(),
-        name: channel.name.trim() || channel.id.trim(),
-        providerId: channel.providerId,
-        authRef: channel.authRef.trim(),
-        upstreamUrl: channel.upstreamUrl.trim() || undefined,
-        enabled: existing?.enabled !== false,
-        priority: priority ?? 100,
-        weight: weight ?? 1,
-        modelMappings,
-      });
-      onNotice(editingChannelId ? "渠道已更新" : "渠道已保存");
+      await api.saveChannel(input);
+      onNotice(editing ? "渠道已更新" : "渠道已保存");
       resetChannel();
       onRefresh();
     } catch (error) {
@@ -232,16 +280,24 @@ export function ManagementPage({
       onNotice("RPM、TPM 和 Token 配额必须是大于等于 1 的整数", "error");
       return;
     }
-    const body = {
+    const body: ApiKeyInput = {
       name: key.name.trim(),
-      allowedModels: key.allowedModels
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean),
-      rpmLimit,
-      tpmLimit,
-      quotaTokens,
     };
+    const allowedModels = key.allowedModels
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (editingKeyId) {
+      body.allowedModels = allowedModels;
+      body.rpmLimit = rpmLimit ?? null;
+      body.tpmLimit = tpmLimit ?? null;
+      body.quotaTokens = quotaTokens ?? null;
+    } else {
+      if (allowedModels.length > 0) body.allowedModels = allowedModels;
+      if (rpmLimit !== undefined) body.rpmLimit = rpmLimit;
+      if (tpmLimit !== undefined) body.tpmLimit = tpmLimit;
+      if (quotaTokens !== undefined) body.quotaTokens = quotaTokens;
+    }
 
     setSaving("key");
     try {
@@ -362,37 +418,13 @@ export function ManagementPage({
         >
           <div className="flex items-start gap-2">
             <AlertCircle className="mt-0.5 size-4 shrink-0" />
-            {data.adminError}。在设置中保存管理员 API Key 后即可进行写操作。
+            {data.adminError}。在设置中保存 Gateway Key，或配置单独的管理员 Key 后即可进行写操作。
           </div>
           <Button variant="outline" size="sm" onClick={() => onNavigate("settings")}>
             前往设置
           </Button>
         </div>
       )}
-      <div className="grid items-start gap-6 xl:grid-cols-2">
-        <ChannelForm
-          providers={providerOptions}
-          draft={channel}
-          saving={saving === "channel"}
-          disabled={adminDisabled}
-          editing={Boolean(editingChannelId)}
-          onChange={updateChannel}
-          onCancel={resetChannel}
-          onSubmit={saveChannel}
-        />
-        <KeyForm
-          draft={key}
-          saving={saving === "key"}
-          disabled={adminDisabled}
-          editing={Boolean(editingKeyId)}
-          secret={secret}
-          copyState={copyState}
-          onChange={updateKey}
-          onCancel={resetKey}
-          onSubmit={saveKey}
-          onCopy={() => void copySecret()}
-        />
-      </div>
       <div className="grid items-start gap-6 xl:grid-cols-2">
         <ChannelList
           items={data.channels}
@@ -409,6 +441,33 @@ export function ManagementPage({
           onToggle={(item) => void toggleKey(item)}
           onRevoke={requestRevokeKey}
           isBusy={actionBusy}
+        />
+      </div>
+      <div className="grid items-start gap-6 xl:grid-cols-2">
+        <ChannelForm
+          providers={providerOptions}
+          models={data.models.map((item) => item.id)}
+          draft={channel}
+          saving={saving === "channel"}
+          disabled={adminDisabled}
+          editing={Boolean(editingChannelId)}
+          onChange={updateChannel}
+          onMappingsChange={updateChannelMappings}
+          onCancel={resetChannel}
+          onSubmit={saveChannel}
+        />
+        <KeyForm
+          models={data.models.map((item) => item.id)}
+          draft={key}
+          saving={saving === "key"}
+          disabled={adminDisabled}
+          editing={Boolean(editingKeyId)}
+          secret={secret}
+          copyState={copyState}
+          onChange={updateKey}
+          onCancel={resetKey}
+          onSubmit={saveKey}
+          onCopy={() => void copySecret()}
         />
       </div>
       <ConfirmDialog
@@ -431,24 +490,37 @@ export function ManagementPage({
 
 function ChannelForm({
   providers,
+  models,
   draft,
   saving,
   disabled,
   editing,
   onChange,
+  onMappingsChange,
   onCancel,
   onSubmit,
 }: {
   providers: string[];
+  models: string[];
   draft: ChannelDraft;
   saving: boolean;
   disabled: boolean;
   editing: boolean;
   onChange: (name: keyof ChannelDraft, value: string) => void;
+  onMappingsChange: (value: ModelMappingDraft[]) => void;
   onCancel: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const providerOptions = Array.from(new Set([...providers, draft.providerId].filter(Boolean)));
+  const advancedCount = [
+    editing && draft.id,
+    editing && draft.name,
+    editing && draft.authRef,
+    draft.upstreamUrl,
+    draft.priority !== "100" ? draft.priority : "",
+    draft.weight !== "1" ? draft.weight : "",
+    draft.modelMappings.length > 0 ? "mapping" : "",
+  ].filter(Boolean).length;
   return (
     <Card>
       <CardHeader>
@@ -459,108 +531,132 @@ function ChannelForm({
         <CardDescription>
           {editing
             ? "更新路由参数，已有渠道 ID 不会改变。"
-            : "通过 Provider、认证引用和优先级组成统一路由。"}
+            : "选择 Provider 即可使用默认渠道；复杂路由再展开高级设置。"}
         </CardDescription>
       </CardHeader>
       <CardContent>
         <form className="space-y-4" onSubmit={onSubmit}>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="渠道 ID" htmlFor="channel-id">
-              <Input
-                id="channel-id"
-                required
-                value={draft.id}
-                onChange={(event) => onChange("id", event.target.value)}
-                placeholder="mimo-primary"
-                disabled={editing || disabled}
-              />
-            </Field>
-            <Field label="显示名称" htmlFor="channel-name">
-              <Input
-                id="channel-name"
-                value={draft.name}
-                onChange={(event) => onChange("name", event.target.value)}
-                placeholder="MiMo 主渠道"
-                disabled={disabled}
-              />
-            </Field>
-            <Field label="Provider" htmlFor="channel-provider">
-              <Select
-                id="channel-provider"
-                required
-                value={draft.providerId}
-                onChange={(event) => onChange("providerId", event.target.value)}
-                disabled={!providerOptions.length || disabled}
-              >
-                <option value="">
-                  {providerOptions.length ? "选择 Provider" : "暂无可用 Provider"}
+          <Field label="Provider" htmlFor="channel-provider">
+            <Select
+              id="channel-provider"
+              required
+              value={draft.providerId}
+              onChange={(event) => onChange("providerId", event.target.value)}
+              disabled={!providerOptions.length || disabled}
+            >
+              <option value="">
+                {providerOptions.length ? "选择 Provider" : "暂无可用 Provider"}
+              </option>
+              {providerOptions.map((provider) => (
+                <option key={provider} value={provider}>
+                  {provider}
                 </option>
-                {providerOptions.map((provider) => (
-                  <option key={provider} value={provider}>
-                    {provider}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <Field label="认证引用" htmlFor="channel-auth-ref">
-              <Input
-                id="channel-auth-ref"
-                required
-                value={draft.authRef}
-                onChange={(event) => onChange("authRef", event.target.value)}
-                placeholder="mimo"
-                disabled={disabled}
-              />
-            </Field>
-            <Field label="优先级" htmlFor="channel-priority">
-              <Input
-                id="channel-priority"
-                type="number"
-                min="0"
-                step="1"
-                inputMode="numeric"
-                value={draft.priority}
-                onChange={(event) => onChange("priority", event.target.value)}
-                placeholder="100"
-                disabled={disabled}
-              />
-            </Field>
-            <Field label="权重" htmlFor="channel-weight">
-              <Input
-                id="channel-weight"
-                type="number"
-                min="1"
-                step="1"
-                inputMode="numeric"
-                value={draft.weight}
-                onChange={(event) => onChange("weight", event.target.value)}
-                placeholder="1"
-                disabled={disabled}
-              />
-            </Field>
-          </div>
-          <Field label="上游 URL（可选）" htmlFor="channel-upstream-url">
-            <Input
-              id="channel-upstream-url"
-              type="url"
-              value={draft.upstreamUrl}
-              onChange={(event) => onChange("upstreamUrl", event.target.value)}
-              placeholder="留空使用 Provider 默认地址"
-              disabled={disabled}
-            />
+              ))}
+            </Select>
           </Field>
-          <Field label="模型映射 JSON（可选）" htmlFor="channel-model-mappings">
-            <Textarea
-              id="channel-model-mappings"
-              rows={2}
-              spellCheck={false}
-              value={draft.modelMappings}
-              onChange={(event) => onChange("modelMappings", event.target.value)}
-              placeholder={'{"public-model":"upstream-model"}'}
-              className="min-h-20 font-mono text-xs"
-              disabled={disabled}
-            />
-          </Field>
+          {draft.providerId && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-primary/15 bg-primary/5 px-3.5 py-3 text-xs">
+              <div className="flex items-center gap-2 text-foreground">
+                <Network className="size-3.5 text-primary" />
+                <span>将使用 Provider 默认地址和认证</span>
+                <Badge variant="success">默认路由</Badge>
+              </div>
+              <span className="font-mono text-[11px] text-muted-foreground">{draft.id}</span>
+            </div>
+          )}
+          <details className="group rounded-xl border border-border/70 bg-muted/10">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3.5 py-3 text-xs font-medium text-foreground [&::-webkit-details-marker]:hidden">
+              <span className="flex items-center gap-2">
+                <SlidersHorizontal className="size-3.5 text-primary" />
+                高级路由设置
+              </span>
+              <span className="flex items-center gap-2 text-[11px] font-normal text-muted-foreground">
+                {advancedCount ? `${advancedCount} 项已配置` : "使用默认值"}
+                <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+              </span>
+            </summary>
+            <div className="space-y-4 border-t border-border/60 px-3.5 py-4">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field label={editing ? "渠道 ID" : "渠道 ID（可选）"} htmlFor="channel-id">
+                  <Input
+                    id="channel-id"
+                    required
+                    value={draft.id}
+                    onChange={(event) => onChange("id", event.target.value)}
+                    placeholder="自动生成"
+                    disabled={editing || disabled}
+                  />
+                  {!editing && (
+                    <p className="text-[11px] leading-4 text-muted-foreground">
+                      默认按 Provider 生成；需要多条同类渠道时再修改。
+                    </p>
+                  )}
+                </Field>
+                <Field label="显示名称（可选）" htmlFor="channel-name">
+                  <Input
+                    id="channel-name"
+                    value={draft.name}
+                    onChange={(event) => onChange("name", event.target.value)}
+                    placeholder="默认使用渠道 ID"
+                    disabled={disabled}
+                  />
+                </Field>
+                <Field label="认证引用（可选）" htmlFor="channel-auth-ref">
+                  <Input
+                    id="channel-auth-ref"
+                    value={draft.authRef}
+                    onChange={(event) => onChange("authRef", event.target.value)}
+                    placeholder={draft.providerId || "默认使用 Provider ID"}
+                    disabled={disabled}
+                  />
+                </Field>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="优先级" htmlFor="channel-priority">
+                    <Input
+                      id="channel-priority"
+                      type="number"
+                      min="0"
+                      step="1"
+                      inputMode="numeric"
+                      value={draft.priority}
+                      onChange={(event) => onChange("priority", event.target.value)}
+                      placeholder="100"
+                      disabled={disabled}
+                    />
+                  </Field>
+                  <Field label="权重" htmlFor="channel-weight">
+                    <Input
+                      id="channel-weight"
+                      type="number"
+                      min="1"
+                      step="1"
+                      inputMode="numeric"
+                      value={draft.weight}
+                      onChange={(event) => onChange("weight", event.target.value)}
+                      placeholder="1"
+                      disabled={disabled}
+                    />
+                  </Field>
+                </div>
+              </div>
+              <Field label="上游 URL（可选）" htmlFor="channel-upstream-url">
+                <Input
+                  id="channel-upstream-url"
+                  type="url"
+                  value={draft.upstreamUrl}
+                  onChange={(event) => onChange("upstreamUrl", event.target.value)}
+                  placeholder="留空使用 Provider 默认地址"
+                  disabled={disabled}
+                />
+              </Field>
+              <ModelMappingEditor
+                models={models}
+                mappings={draft.modelMappings}
+                disabled={disabled}
+                onChange={onMappingsChange}
+              />
+            </div>
+          </details>
           <div className="flex flex-wrap items-center gap-2">
             <Button type="submit" disabled={saving || disabled}>
               {saving ? <Spinner className="size-3.5" /> : <Save className="size-4" />}
@@ -578,7 +674,94 @@ function ChannelForm({
   );
 }
 
+function ModelMappingEditor({
+  models,
+  mappings,
+  disabled,
+  onChange,
+}: {
+  models: string[];
+  mappings: ModelMappingDraft[];
+  disabled: boolean;
+  onChange: (value: ModelMappingDraft[]) => void;
+}) {
+  const update = (id: string, field: "publicModel" | "upstreamModel", value: string): void => {
+    onChange(
+      mappings.map((mapping) => (mapping.id === id ? { ...mapping, [field]: value } : mapping)),
+    );
+  };
+
+  const add = (): void => {
+    onChange([...mappings, { id: `mapping-${Date.now()}`, publicModel: "", upstreamModel: "" }]);
+  };
+
+  const remove = (id: string): void => {
+    onChange(mappings.filter((mapping) => mapping.id !== id));
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-xs font-medium text-foreground">模型映射（可选）</div>
+          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+            将公开模型名映射到 Provider 的上游模型；不配置时保持原模型名。
+          </p>
+        </div>
+        <Button type="button" variant="outline" size="sm" onClick={add} disabled={disabled}>
+          <Plus className="size-3.5" />
+          添加映射
+        </Button>
+      </div>
+      {mappings.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-border/70 px-3 py-2.5 text-[11px] text-muted-foreground">
+          暂无映射，默认直接使用请求中的模型名。
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {mappings.map((mapping) => (
+            <div key={mapping.id} className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+              <Input
+                list="channel-model-options"
+                value={mapping.publicModel}
+                onChange={(event) => update(mapping.id, "publicModel", event.target.value)}
+                placeholder="公开模型名"
+                disabled={disabled}
+                aria-label="公开模型名"
+              />
+              <Input
+                value={mapping.upstreamModel}
+                onChange={(event) => update(mapping.id, "upstreamModel", event.target.value)}
+                placeholder="上游模型名"
+                disabled={disabled}
+                aria-label="上游模型名"
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => remove(mapping.id)}
+                disabled={disabled}
+                title="删除映射"
+                aria-label="删除映射"
+              >
+                <Trash2 className="size-3.5 text-red-300" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+      <datalist id="channel-model-options">
+        {models.map((model) => (
+          <option key={model} value={model} />
+        ))}
+      </datalist>
+    </div>
+  );
+}
+
 function KeyForm({
+  models,
   draft,
   saving,
   disabled,
@@ -590,6 +773,7 @@ function KeyForm({
   onSubmit,
   onCopy,
 }: {
+  models: string[];
   draft: KeyDraft;
   saving: boolean;
   disabled: boolean;
@@ -601,6 +785,12 @@ function KeyForm({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onCopy: () => void;
 }) {
+  const advancedCount = [
+    draft.allowedModels.trim(),
+    draft.rpmLimit,
+    draft.tpmLimit,
+    draft.quotaTokens,
+  ].filter(Boolean).length;
   return (
     <Card>
       <CardHeader>
@@ -611,7 +801,7 @@ function KeyForm({
         <CardDescription>
           {editing
             ? "调整名称、模型权限和限额，不会重新生成 Secret。"
-            : "为不同客户端分配独立凭证和访问限额。"}
+            : "填写名称即可创建；默认允许全部模型且不限制用量。"}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -626,56 +816,85 @@ function KeyForm({
               disabled={disabled}
             />
           </Field>
-          <Field label="允许模型" htmlFor="key-allowed-models">
-            <Input
-              id="key-allowed-models"
-              value={draft.allowedModels}
-              onChange={(event) => onChange("allowedModels", event.target.value)}
-              placeholder="留空表示全部模型，多个模型用逗号分隔"
-              disabled={disabled}
-            />
-          </Field>
-          <div className="grid gap-4 sm:grid-cols-3">
-            <Field label="RPM" htmlFor="key-rpm">
-              <Input
-                id="key-rpm"
-                type="number"
-                min="1"
-                step="1"
-                inputMode="numeric"
-                value={draft.rpmLimit}
-                onChange={(event) => onChange("rpmLimit", event.target.value)}
-                placeholder="不限"
-                disabled={disabled}
-              />
-            </Field>
-            <Field label="TPM" htmlFor="key-tpm">
-              <Input
-                id="key-tpm"
-                type="number"
-                min="1"
-                step="1"
-                inputMode="numeric"
-                value={draft.tpmLimit}
-                onChange={(event) => onChange("tpmLimit", event.target.value)}
-                placeholder="不限"
-                disabled={disabled}
-              />
-            </Field>
-            <Field label="Token 配额" htmlFor="key-quota">
-              <Input
-                id="key-quota"
-                type="number"
-                min="1"
-                step="1"
-                inputMode="numeric"
-                value={draft.quotaTokens}
-                onChange={(event) => onChange("quotaTokens", event.target.value)}
-                placeholder="不限"
-                disabled={disabled}
-              />
-            </Field>
+          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-primary/15 bg-primary/5 px-3.5 py-3 text-xs">
+            <KeyRound className="size-3.5 text-primary" />
+            <span>默认访问策略</span>
+            <Badge variant="success">全部模型</Badge>
+            <Badge variant="muted">不限用量</Badge>
           </div>
+          <details className="group rounded-xl border border-border/70 bg-muted/10">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3.5 py-3 text-xs font-medium text-foreground [&::-webkit-details-marker]:hidden">
+              <span className="flex items-center gap-2">
+                <SlidersHorizontal className="size-3.5 text-primary" />
+                访问策略（可选）
+              </span>
+              <span className="flex items-center gap-2 text-[11px] font-normal text-muted-foreground">
+                {advancedCount ? `${advancedCount} 项已配置` : "全部模型 · 不限用量"}
+                <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+              </span>
+            </summary>
+            <div className="space-y-4 border-t border-border/60 px-3.5 py-4">
+              <Field label="允许模型（可选）" htmlFor="key-allowed-models">
+                <Input
+                  id="key-allowed-models"
+                  list="key-model-options"
+                  value={draft.allowedModels}
+                  onChange={(event) => onChange("allowedModels", event.target.value)}
+                  placeholder="留空表示全部模型；多个模型用逗号分隔"
+                  disabled={disabled}
+                />
+                <p className="text-[11px] leading-4 text-muted-foreground">
+                  可直接输入模型名，或从浏览器提示中选择。
+                </p>
+                <datalist id="key-model-options">
+                  {models.map((model) => (
+                    <option key={model} value={model} />
+                  ))}
+                </datalist>
+              </Field>
+              <div className="grid gap-4 sm:grid-cols-3">
+                <Field label="RPM（可选）" htmlFor="key-rpm">
+                  <Input
+                    id="key-rpm"
+                    type="number"
+                    min="1"
+                    step="1"
+                    inputMode="numeric"
+                    value={draft.rpmLimit}
+                    onChange={(event) => onChange("rpmLimit", event.target.value)}
+                    placeholder="不限"
+                    disabled={disabled}
+                  />
+                </Field>
+                <Field label="TPM（可选）" htmlFor="key-tpm">
+                  <Input
+                    id="key-tpm"
+                    type="number"
+                    min="1"
+                    step="1"
+                    inputMode="numeric"
+                    value={draft.tpmLimit}
+                    onChange={(event) => onChange("tpmLimit", event.target.value)}
+                    placeholder="不限"
+                    disabled={disabled}
+                  />
+                </Field>
+                <Field label="Token 配额（可选）" htmlFor="key-quota">
+                  <Input
+                    id="key-quota"
+                    type="number"
+                    min="1"
+                    step="1"
+                    inputMode="numeric"
+                    value={draft.quotaTokens}
+                    onChange={(event) => onChange("quotaTokens", event.target.value)}
+                    placeholder="不限"
+                    disabled={disabled}
+                  />
+                </Field>
+              </div>
+            </div>
+          </details>
           <div className="flex flex-wrap items-center gap-2">
             <Button type="submit" disabled={saving || disabled}>
               {saving ? (

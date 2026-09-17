@@ -1,12 +1,14 @@
 import {
   Activity,
   AlertCircle,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Database,
   Gauge,
   RefreshCw,
   ShieldCheck,
+  SlidersHorizontal,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { GatewayApi } from "../api";
@@ -118,6 +120,9 @@ export function MetricsPage({
   );
   const hasFilters =
     filters.window !== "24h" || Boolean(filters.provider || filters.model || filters.status);
+  const advancedFilterCount = [filters.provider, filters.model, filters.status].filter(
+    Boolean,
+  ).length;
   const summary = metrics.summary;
   const tokenDetail = [
     `${formatCompact(summary.tokens.inputTokens)} 输入`,
@@ -159,72 +164,80 @@ export function MetricsPage({
                 </Select>
               </Field>
             </div>
-            <div className="w-full sm:w-44">
-              <Field label="Provider" htmlFor="metrics-provider">
-                <Select
-                  id="metrics-provider"
-                  value={filters.provider ?? ""}
-                  onChange={(event) =>
-                    setFilters((current) => ({
-                      ...current,
-                      provider: event.target.value || undefined,
-                      offset: 0,
-                    }))
-                  }
-                >
-                  <option value="">全部 Provider</option>
-                  {providers.map((provider) => (
-                    <option key={provider} value={provider}>
-                      {provider}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-            </div>
-            <div className="w-full sm:w-52">
-              <Field label="模型" htmlFor="metrics-model">
-                <Select
-                  id="metrics-model"
-                  value={filters.model ?? ""}
-                  onChange={(event) =>
-                    setFilters((current) => ({
-                      ...current,
-                      model: event.target.value || undefined,
-                      offset: 0,
-                    }))
-                  }
-                >
-                  <option value="">全部模型</option>
-                  {models.map((model) => (
-                    <option key={model} value={model}>
-                      {model}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-            </div>
-            <div className="w-full sm:w-36">
-              <Field label="状态" htmlFor="metrics-status">
-                <Select
-                  id="metrics-status"
-                  value={filters.status ?? "all"}
-                  onChange={(event) => {
-                    const value = event.target.value as MetricsStatus;
-                    setFilters((current) => ({
-                      ...current,
-                      status: value === "all" ? undefined : value,
-                      offset: 0,
-                    }));
-                  }}
-                >
-                  {statusOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-            </div>
+            <details className="group w-full sm:w-auto sm:flex-1">
+              <summary className="flex min-h-10 cursor-pointer list-none items-center justify-between gap-2 rounded-lg border border-border/70 bg-muted/15 px-3 text-xs font-medium text-foreground [&::-webkit-details-marker]:hidden">
+                <span className="flex items-center gap-2">
+                  <SlidersHorizontal className="size-3.5 text-primary" />
+                  更多筛选
+                  {advancedFilterCount > 0 && (
+                    <Badge variant="info">{advancedFilterCount} 项</Badge>
+                  )}
+                </span>
+                <ChevronDown className="size-3.5 text-muted-foreground transition-transform group-open:rotate-180" />
+              </summary>
+              <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                <Field label="Provider" htmlFor="metrics-provider">
+                  <Select
+                    id="metrics-provider"
+                    value={filters.provider ?? ""}
+                    onChange={(event) =>
+                      setFilters((current) => ({
+                        ...current,
+                        provider: event.target.value || undefined,
+                        offset: 0,
+                      }))
+                    }
+                  >
+                    <option value="">全部 Provider</option>
+                    {providers.map((provider) => (
+                      <option key={provider} value={provider}>
+                        {provider}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="模型" htmlFor="metrics-model">
+                  <Select
+                    id="metrics-model"
+                    value={filters.model ?? ""}
+                    onChange={(event) =>
+                      setFilters((current) => ({
+                        ...current,
+                        model: event.target.value || undefined,
+                        offset: 0,
+                      }))
+                    }
+                  >
+                    <option value="">全部模型</option>
+                    {models.map((model) => (
+                      <option key={model} value={model}>
+                        {model}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="状态" htmlFor="metrics-status">
+                  <Select
+                    id="metrics-status"
+                    value={filters.status ?? "all"}
+                    onChange={(event) => {
+                      const value = event.target.value as MetricsStatus;
+                      setFilters((current) => ({
+                        ...current,
+                        status: value === "all" ? undefined : value,
+                        offset: 0,
+                      }));
+                    }}
+                  >
+                    {statusOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
+            </details>
             {hasFilters && (
               <Button variant="ghost" size="sm" onClick={resetFilters}>
                 清除筛选

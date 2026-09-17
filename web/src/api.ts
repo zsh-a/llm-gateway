@@ -1,7 +1,10 @@
 import type {
+  ApiKeyInput,
   ApiKeyRecord,
+  ApiKeyUpdate,
   AuthStatus,
   ChannelConfig,
+  ChannelInput,
   ChatResult,
   ChatStreamUpdate,
   DashboardData,
@@ -81,8 +84,8 @@ export class GatewayApi {
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
     if (path.startsWith("/admin/")) {
-      if (this.credentials.adminKey)
-        headers.set("Authorization", `Bearer ${this.credentials.adminKey}`);
+      const adminCredential = this.credentials.adminKey || this.credentials.apiKey;
+      if (adminCredential) headers.set("Authorization", `Bearer ${adminCredential}`);
     } else if (this.credentials.apiKey) {
       headers.set("Authorization", `Bearer ${this.credentials.apiKey}`);
     }
@@ -199,7 +202,7 @@ export class GatewayApi {
   }
 
   private reasoningOptions(model: GatewayModel, effort?: string): Record<string, unknown> {
-    if (!effort) return {};
+    if (!effort || effort === "auto") return {};
     const levels = model.reasoningEfforts ?? {};
     const upstreamEffort = levels[effort];
     if (upstreamEffort === null || effort === "off") {
@@ -321,7 +324,7 @@ export class GatewayApi {
     if (!ended) onUpdate({ done: true });
   }
 
-  saveChannel(channel: ChannelConfig): Promise<unknown> {
+  saveChannel(channel: ChannelInput): Promise<unknown> {
     return this.request("/admin/channels", { method: "POST", body: JSON.stringify(channel) });
   }
 
@@ -329,14 +332,14 @@ export class GatewayApi {
     return this.request(`/admin/channels/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
-  createKey(body: Record<string, unknown>): Promise<{ secret: string }> {
+  createKey(body: ApiKeyInput): Promise<{ secret: string }> {
     return this.request<{ secret: string }>("/admin/keys", {
       method: "POST",
       body: JSON.stringify(body),
     });
   }
 
-  updateKey(id: string, body: Record<string, unknown>): Promise<unknown> {
+  updateKey(id: string, body: ApiKeyUpdate): Promise<unknown> {
     return this.request(`/admin/keys/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify(body),

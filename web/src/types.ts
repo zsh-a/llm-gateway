@@ -155,6 +155,9 @@ export interface ChannelConfig {
   modelMappings?: Record<string, string>;
 }
 
+export type ChannelInput = Pick<ChannelConfig, "id" | "providerId"> &
+  Partial<Omit<ChannelConfig, "id" | "providerId">>;
+
 export interface ApiKeyRecord {
   id: string;
   name: string;
@@ -167,6 +170,11 @@ export interface ApiKeyRecord {
   usedTokens: number;
   remainingTokens: number | null;
 }
+
+export type ApiKeyInput = Pick<ApiKeyRecord, "name"> &
+  Partial<Pick<ApiKeyRecord, "allowedModels" | "rpmLimit" | "tpmLimit" | "quotaTokens">>;
+
+export type ApiKeyUpdate = Partial<ApiKeyInput> & { enabled?: boolean };
 
 export interface DashboardData {
   health: { status: string; service?: string; providers?: string[] };
