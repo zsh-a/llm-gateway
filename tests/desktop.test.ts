@@ -157,8 +157,8 @@ test("desktop endpoint handles IPv6 and rejects unsafe remote URL components", (
 });
 
 test("desktop resolves all file paths before changing the child working directory", () => {
-  const config = resolveDesktopConfig({ ...loadConfig(), runtimeDir: ".runtime", authCacheDir: ".runtime/auth", modelFiles: { demo: "models.json" } });
-  for (const path of [config.runtimeDir, config.authCacheDir, config.modelCacheDir, config.channelsFile, config.apiKeysFile, config.metricsFile, config.modelFiles!.demo]) {
+  const config = resolveDesktopConfig({ ...loadConfig(), runtimeDir: ".runtime", authCacheDir: ".runtime/auth", modelFiles: { demo: "models.json" }, modelFileFallbacks: { demo: ["cache/models.json"] } });
+  for (const path of [config.runtimeDir, config.authCacheDir, config.modelCacheDir, config.channelsFile, config.apiKeysFile, config.metricsFile, config.modelFiles!.demo, ...config.modelFileFallbacks!.demo!]) {
     assert.equal(isAbsolute(path), true);
   }
 });

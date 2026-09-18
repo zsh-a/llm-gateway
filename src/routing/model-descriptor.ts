@@ -24,6 +24,21 @@ function reasoningEffortsValue(value: unknown): ReasoningEfforts | undefined {
   return Object.keys(efforts).length > 0 ? efforts : undefined;
 }
 
+function supportedReasoningEfforts(record: JsonRecord): ReasoningEfforts | undefined {
+  const reasoning = asRecord(record.reasoning);
+  if (!Array.isArray(reasoning.supportedEfforts)) return undefined;
+  const efforts: ReasoningEfforts = {};
+  for (const value of reasoning.supportedEfforts) {
+    const effort = asTrimmedString(value);
+    if (effort) efforts[effort] = effort;
+  }
+  if (Object.keys(efforts).length === 0) return undefined;
+  if (asBool(reasoning.canDisableThinking) === true && asBool(record.onlyReasoning) !== true) {
+    efforts.off = null;
+  }
+  return efforts;
+}
+
 const GENERIC_REASONING_EFFORTS: ReasoningEfforts = {
   off: null,
   minimal: "minimal",
@@ -84,7 +99,7 @@ function modelDescriptor(
     record.reasoningEfforts ?? record.reasoning_efforts ??
       recordCapabilities.reasoningEfforts ?? recordCapabilities.reasoning_efforts ??
       nestedReasoning.efforts
-  );
+  ) ?? supportedReasoningEfforts(record);
   const reasoningEnabled = reasoning ?? (
     rawReasoning !== undefined && typeof rawReasoning === "object"
       ? true

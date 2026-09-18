@@ -169,12 +169,18 @@ export class ModelCatalog {
       return [];
     }
     const ownedBy = provider.name;
-    const modelFile = this.config.modelFiles?.[provider.id] ?? provider.modelFile;
-    const local = filterModels(
-      readModelsFile(modelFile, ownedBy),
-      this.config.modelAllowlist
-    );
-    if (local.length > 0) return this.withProvider(local, provider);
+    const modelFiles = [
+      this.config.modelFiles?.[provider.id] ?? provider.modelFile,
+      ...(this.config.modelFileFallbacks?.[provider.id] ?? [])
+    ];
+    for (const file of modelFiles) {
+      const local = readModelsFile(file, ownedBy);
+      // Select the source before filtering: an allowlist must not resurrect
+      // models removed from the current desktop configuration via a stale file.
+      if (local.length > 0) {
+        return this.withProvider(filterModels(local, this.config.modelAllowlist), provider);
+      }
+    }
 
     if (
       this.config.modelDiscoveryEnabled &&

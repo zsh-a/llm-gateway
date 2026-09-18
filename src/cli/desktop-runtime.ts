@@ -11,11 +11,15 @@ export function resolveDesktopConfig(config: GatewayConfig): GatewayConfig {
   for (const [provider, file] of Object.entries(config.modelFiles || {})) {
     modelFiles[provider] = file ? resolve(file) : "";
   }
+  const modelFileFallbacks: { [providerId: string]: string[] } = {};
+  for (const [provider, files] of Object.entries(config.modelFileFallbacks || {})) {
+    modelFileFallbacks[provider] = files.map((file) => file ? resolve(file) : "");
+  }
   return {
     ...config, runtimeDir: resolve(config.runtimeDir),
     authCacheDir: resolve(config.authCacheDir), modelCacheDir: resolve(config.modelCacheDir),
     channelsFile: resolve(config.channelsFile), apiKeysFile: resolve(config.apiKeysFile),
-    metricsFile: resolve(config.metricsFile), modelFiles
+    metricsFile: resolve(config.metricsFile), modelFiles, modelFileFallbacks
   };
 }
 

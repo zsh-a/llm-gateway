@@ -224,6 +224,8 @@ curl http://127.0.0.1:3000/v1/chat/completions \
 
 网关会根据模型目录自动选择 MiMo 或 WorkBuddy，并把冲突模型的前缀去掉后再发送给上游。
 
+WorkBuddy 按顺序读取模型目录：显式指定的 `WORKBUDDY_MODEL_FILE` → 桌面端动态缓存 `~/.workbuddy/cache/acc-product-config-v3.json` → macOS 安装包内的 `cli/product.json`。文件缺失、损坏或不含有效模型时才尝试下一来源，避免安装包中的旧列表遮蔽 HY4 等新模型。桌面端更新缓存后，网关在模型缓存到期后的下一次查询重新读取（`MODEL_CACHE_TTL_MS` 默认 5 分钟）；重启网关也会立即重新读取。网关只读取该文件，不修改 WorkBuddy 配置。
+
 ### DeepSeek Harness
 
 DeepSeek Harness 的自定义 Provider 表单只保存模型基础信息，思考档位需要写入它的配置文件。对于 WorkBuddy 中的 DeepSeek V4，推荐使用 Chat Completions 协议：

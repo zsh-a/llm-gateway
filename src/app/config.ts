@@ -1,3 +1,6 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 export interface GatewayConfig {
   port: number;
   bindHost: string;
@@ -13,6 +16,7 @@ export interface GatewayConfig {
   modelCacheTtlMs: number;
   modelCacheDir: string;
   modelFiles?: { [providerId: string]: string };
+  modelFileFallbacks?: { [providerId: string]: string[] };
   defaultModel: string;
   responseStoreMaxEntries: number;
   responseStoreTtlMs: number;
@@ -70,12 +74,15 @@ export function loadConfig(): GatewayConfig {
     modelCacheTtlMs: positiveInt("MODEL_CACHE_TTL_MS", 5 * 60 * 1000),
     modelCacheDir: env("MODEL_CACHE_DIR", `${runtimeDir}/models`),
     modelFiles: {
-      workbuddy: env(
-        "WORKBUDDY_MODEL_FILE",
-        process.platform === "darwin"
-          ? "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/product.json"
-          : ""
-      )
+      workbuddy: env("WORKBUDDY_MODEL_FILE", "")
+    },
+    modelFileFallbacks: {
+      workbuddy: [
+        join(homedir(), ".workbuddy", "cache", "acc-product-config-v3.json"),
+        ...(process.platform === "darwin"
+          ? ["/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/product.json"]
+          : [])
+      ]
     },
     defaultModel: env("DEFAULT_MODEL", ""),
     responseStoreMaxEntries: positiveInt("RESPONSE_STORE_MAX_ENTRIES", 128),
