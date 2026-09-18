@@ -8,21 +8,26 @@ import {
   Gauge,
   Network,
   Play,
+  Search,
   Settings2,
   ShieldCheck,
   TrendingUp,
   Wifi,
   Zap,
 } from "lucide-react";
+import { useState } from "react";
 import { EmptyState, MetricChart, Sparkline, StatCard, StatusBadge } from "../components/common";
+import { ModelSearch } from "../components/ModelSearch";
 import { Badge, Button, Card, CardContent, CardDescription, CardHeader } from "../components/ui";
 import { RequestTable } from "../components/usage";
 import { formatCompact, formatDuration, formatNumber, formatTime } from "../lib/format";
-import { modelSupportsReasoning } from "../lib/models";
+import { modelSupportsReasoning, searchModels } from "../lib/models";
 import { cn } from "../lib/utils";
 import type { AuthProviderStatus, DashboardData, GatewayModel, Navigate } from "../types";
 
 export function OverviewPage({ data, onNavigate }: { data: DashboardData; onNavigate: Navigate }) {
+  const [modelQuery, setModelQuery] = useState("");
+  const filteredModels = searchModels(data.models, modelQuery);
   const summary = data.summary;
   const requestValues = data.timeseries.map((point) => point.requests);
   const providerEntries = Object.entries(data.auth.providers);
@@ -201,16 +206,35 @@ export function OverviewPage({ data, onNavigate }: { data: DashboardData; onNavi
             </div>
           </CardHeader>
           <CardContent className="space-y-2">
-            {data.models.length === 0 && (
+            <ModelSearch
+              value={modelQuery}
+              onChange={setModelQuery}
+              descriptionId="overview-model-results"
+            />
+            <p id="overview-model-results" role="status" className="text-xs text-muted-foreground">
+              {modelQuery.trim()
+                ? `找到 ${filteredModels.length} / ${data.models.length} 个模型`
+                : `共 ${data.models.length} 个模型`}
+            </p>
+            {data.models.length === 0 ? (
               <EmptyState icon={Bot} title="没有可用模型" description="认证成功后刷新模型目录" />
-            )}
-            {data.models.slice(0, 8).map((model) => (
-              <ModelRow
-                key={model.id}
-                model={model}
-                onClick={() => onNavigate("playground", { modelId: model.id })}
+            ) : filteredModels.length === 0 ? (
+              <EmptyState
+                icon={Search}
+                title="没有匹配的模型"
+                description="试试其他名称、ID 或 Provider，或清除搜索。"
               />
-            ))}
+            ) : (
+              <div className="max-h-[32rem] space-y-2 overflow-y-auto p-1 scrollbar-thin">
+                {filteredModels.map((model) => (
+                  <ModelRow
+                    key={model.id}
+                    model={model}
+                    onClick={() => onNavigate("playground", { modelId: model.id })}
+                  />
+                ))}
+              </div>
+            )}
           </CardContent>
         </Card>
         <Card>

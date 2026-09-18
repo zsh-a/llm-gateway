@@ -15,6 +15,7 @@ import {
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import type { GatewayApi } from "../api";
 import { CopyButton } from "../components/common";
+import { ModelSearch } from "../components/ModelSearch";
 import {
   Badge,
   Button,
@@ -30,7 +31,7 @@ import {
   Textarea,
 } from "../components/ui";
 import { formatNumber, toFiniteNumber, usageTotal } from "../lib/format";
-import { modelEfforts, modelSupportsReasoning } from "../lib/models";
+import { modelEfforts, modelSupportsReasoning, searchModels } from "../lib/models";
 import { cn } from "../lib/utils";
 import type { DashboardData, GatewayModel, Navigate, Usage } from "../types";
 
@@ -256,6 +257,9 @@ function PlaygroundForm({
   onStop: () => void;
 }) {
   const efforts = modelEfforts(model);
+  const [modelQuery, setModelQuery] = useState("");
+  const filteredModels = searchModels(models, modelQuery);
+  const selectedOutsideSearch = model && !filteredModels.some((item) => item.id === model.id);
   return (
     <Card className="h-fit">
       <CardHeader>
@@ -272,6 +276,22 @@ function PlaygroundForm({
               <label htmlFor="playground-model" className="text-xs font-medium text-foreground">
                 模型
               </label>
+              <ModelSearch
+                value={modelQuery}
+                onChange={setModelQuery}
+                descriptionId="playground-model-results"
+              />
+              <p
+                id="playground-model-results"
+                role="status"
+                className="text-xs text-muted-foreground"
+              >
+                {modelQuery.trim()
+                  ? filteredModels.length
+                    ? `找到 ${filteredModels.length} / ${models.length} 个模型，请从下方选择`
+                    : "没有匹配的模型，当前选择保持不变"
+                  : `共 ${models.length} 个模型`}
+              </p>
               <Select
                 id="playground-model"
                 value={model?.id ?? modelId}
@@ -279,9 +299,16 @@ function PlaygroundForm({
                 disabled={!models.length}
               >
                 <option value="">选择模型</option>
-                {models.map((item) => (
+                {selectedOutsideSearch && (
+                  <optgroup label="当前选择（不匹配搜索）">
+                    <option value={model.id}>
+                      {model.name || model.id} · {model.id}
+                    </option>
+                  </optgroup>
+                )}
+                {filteredModels.map((item) => (
                   <option key={item.id} value={item.id}>
-                    {item.name || item.id}
+                    {item.name && item.name !== item.id ? `${item.name} · ${item.id}` : item.id}
                   </option>
                 ))}
               </Select>
