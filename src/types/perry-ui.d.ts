@@ -19,6 +19,8 @@ declare module "perry/ui" {
   }): void;
 
   export function Text(content: string, id?: string): Widget;
+  export function setText(id: string, value: string): void;
+  export function clipboardWrite(text: string): void;
 
   export function Window(
     title: string,

@@ -15,6 +15,7 @@ import {
 } from "../../observability/metrics.js";
 import { modelsResponse } from "../../protocols/chat.js";
 import { handleChat, handleResponses } from "./protocol-handlers.js";
+import { closeGatewayServer } from "./shutdown.js";
 
 function authenticateRequest(c: Context, apiKeys: ApiKeyStore): ApiKeyIdentity | null {
   const credential = requestCredential(c);
@@ -241,6 +242,7 @@ function registerPublicRoutes(app: Hono<GatewayEnv>, deps: GatewayDeps): void {
     status: "ok",
     service: "llm-gateway",
     mode: "live",
+    instanceId: process.env.LLM_GATEWAY_INSTANCE_ID || "",
     providers: deps.providers.list().map((provider) => provider.id)
   });
   for (const path of ["/", "/health", "/health/live"]) app.get(path, live);
@@ -350,11 +352,26 @@ export function createGatewayApp(
 }
 
 let gatewayServer: ServerType | null = null;
+let gatewayDeps: GatewayDeps | null = null;
+let shutdownPromise: Promise<boolean> | null = null;
+
+export function stopGateway(): Promise<boolean> {
+  if (shutdownPromise) return shutdownPromise;
+  if (!gatewayServer || !gatewayDeps) return Promise.resolve(true);
+  const deps = gatewayDeps;
+  shutdownPromise = closeGatewayServer(gatewayServer, () => {
+    deps.apiKeys.flush();
+    deps.metrics.flush();
+  });
+  return shutdownPromise;
+}
 
 export function startGateway(
   deps: GatewayDeps = createGatewayDeps(loadConfig())
 ): ServerType {
   if (gatewayServer) return gatewayServer;
+  shutdownPromise = null;
+  gatewayDeps = deps;
 
   const { config } = deps;
   const app = createGatewayApp(deps);

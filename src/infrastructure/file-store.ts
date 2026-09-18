@@ -1,11 +1,13 @@
 import {
   chmodSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   unlinkSync,
-  writeFileSync
+  writeSync
 } from "node:fs";
 import { dirname } from "node:path";
 
@@ -25,8 +27,13 @@ export function writeJsonFileAtomic(file: string, value: unknown): void {
   const temporary = `${file}.${process.pid}.${Date.now()}.${Math.random()
     .toString(36).slice(2, 8)}.tmp`;
   try {
-    writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 });
-    chmodSync(temporary, 0o600);
+    const fd = openSync(temporary, "wx", 0o600);
+    try {
+      chmodSync(temporary, 0o600);
+      writeSync(fd, `${JSON.stringify(value)}\n`);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(temporary, file);
     chmodSync(file, 0o600);
   } finally {
@@ -45,4 +52,3 @@ export function removeFile(file: string): void {
     // Optional cache cleanup must not prevent the next request/auth attempt.
   }
 }
-

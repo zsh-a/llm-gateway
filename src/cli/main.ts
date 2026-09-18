@@ -4,7 +4,8 @@ import {
   runDoctor
 } from "./management.js";
 import { runDesktop } from "./desktop.js";
-import { startGateway } from "../transport/http/server.js";
+import { requestHealth } from "./desktop-runtime.js";
+import { startGateway, stopGateway } from "../transport/http/server.js";
 
 type GatewayMode = "serve" | "desktop" | "doctor" | "models" | "export";
 
@@ -52,9 +53,37 @@ function resolveMode(argument: string | undefined): GatewayMode {
 }
 
 async function runMode(): Promise<void> {
+  // Internal desktop helper. App() owns the native UI loop, so bounded network
+  // probes run in a short-lived CLI process instead of blocking tray actions.
+  if (process.argv[2] === "desktop-probe") {
+    const url = new URL(process.argv[3]);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash ||
+      (!url.pathname.endsWith("/health/live") && !url.pathname.endsWith("/health/ready"))) {
+      throw new Error("无效的健康检查地址");
+    }
+    const timeout = Math.min(5000, Math.max(100, Number(process.argv[4]) || 1500));
+    const result = await requestHealth(url.toString(), timeout);
+    console.log(JSON.stringify(result));
+    return;
+  }
   const mode = resolveMode(process.argv[2]);
   if (mode === "serve") {
-    startGateway();
+    const server = startGateway();
+    server.once("error", (error) => {
+      console.error("Gateway 无法监听：" + error.message);
+      process.exit(1);
+    });
+    let stopping = false;
+    const shutdown = () => {
+      if (stopping) return;
+      stopping = true;
+      void stopGateway().then((graceful) => process.exit(graceful ? 0 : 1)).catch((error) => {
+        console.error("Gateway 关闭失败：" + String(error));
+        process.exit(1);
+      });
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
     return;
   }
   if (mode === "desktop") {

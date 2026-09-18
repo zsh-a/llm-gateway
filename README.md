@@ -56,6 +56,8 @@ npm install
 npm run typecheck
 npm test
 npm run build
+# macOS 图形会话下，可额外验证真实原生托盘与服务生命周期
+npm run test:desktop
 ```
 
 构建和运行已拆开：日常启动不会重复编译原生二进制；源码变更后再执行 `npm run build`，或使用 `npm run dev` 一次完成构建和启动。
@@ -179,13 +181,17 @@ open "dist/LLM Gateway.app"
 ```
 
 
-`desktop` 会由同一个二进制托管 Gateway 子进程、创建系统托盘并打开浏览器控制台，同时显示一个轻量启动状态窗口，避免后台启动时没有可见反馈。控制台地址为 `http://127.0.0.1:3000/ui`。托盘左键（Windows/Linux）会打开控制台，右键显示管理菜单；macOS 使用原生菜单栏行为。控制台按“概览 / Playground / 统计 / 渠道与 Key / 设置”分成独立页面：概览查看网关、Provider、认证和模型状态，Playground 发送真实流式测试请求并支持停止、重试、复制和模型上下文跳转，统计支持 1 小时、24 小时、7 天、30 天以及 Provider、模型、状态筛选和请求分页；“渠道与 Key”页面在输入管理员或复用的 Gateway Key 后维护 Channel（默认只需选择 Provider，高级设置可配置上游、认证引用、模型映射、优先级和权重）以及虚拟 API Key（默认只需填写名称，高级设置可配置模型权限和限额）。新 Key 的完整 secret 只在创建成功时显示一次。控制台默认连接当前托管实例；设置页默认使用同一个 Gateway Key 进行调用和管理，只有远程部署使用不同凭证时才需要分别填写。也可以通过 `GATEWAY_URL` 指定其他网关地址。页面使用同源 `fetch` 访问网关，不需要额外安装依赖。
+`desktop` 会由同一个二进制托管 Gateway 子进程并创建系统托盘，健康检查确认 HTTP 服务可访问后才打开控制台。首次启动会打开控制台，后续默认静默启动；可在托盘切换“启动时打开控制台”。启动失败时显示具体原因和日志目录。控制台地址为 `http://127.0.0.1:3000/ui`。托盘左键（Windows/Linux）会打开控制台，右键显示管理菜单；macOS 使用原生菜单栏行为。控制台按“概览 / Playground / 统计 / 渠道与 Key / 设置”分成独立页面：概览查看网关、Provider、认证和模型状态，Playground 发送真实流式测试请求并支持停止、重试、复制和模型上下文跳转，统计支持 1 小时、24 小时、7 天、30 天以及 Provider、模型、状态筛选和请求分页；“渠道与 Key”页面在输入管理员或复用的 Gateway Key 后维护 Channel（默认只需选择 Provider，高级设置可配置上游、认证引用、模型映射、优先级和权重）以及虚拟 API Key（默认只需填写名称，高级设置可配置模型权限和限额）。新 Key 的完整 secret 只在创建成功时显示一次。控制台默认连接当前托管实例；设置页默认使用同一个 Gateway Key 进行调用和管理，只有远程部署使用不同凭证时才需要分别填写。也可以通过 `GATEWAY_URL` 指定其他网关根地址（HTTP/HTTPS，可含路径前缀，不含凭证或查询参数）；此时仅连接远程服务，不创建本地子进程，也不提供远程启停。页面使用同源 `fetch` 访问网关，不需要额外安装依赖。
 
-托盘默认使用 Perry 的占位图标；发布包可以设置 `TRAY_ICON_PATH` 指向 PNG、ICNS 或 ICO 图标。macOS 若需要显式指定浏览器，可设置 `BROWSER_BUNDLE_ID`（例如 `com.google.Chrome`）。桌面模式未显式设置 `RUNTIME_DIR` 时，如果当前目录存在 `.runtime` 会继续使用它，否则使用系统用户数据目录：macOS 为 `~/Library/Application Support/LLM Gateway`，Windows 为 `%APPDATA%/LLM Gateway`，Linux 为 `$XDG_DATA_HOME/llm-gateway` 或 `~/.local/share/llm-gateway`。这样从 Finder、开始菜单或桌面快捷方式启动时不会依赖命令行当前目录。
+macOS 发布包内置托盘图标；未打包的 CLI 桌面模式使用 Perry 占位图标。可设置 `TRAY_ICON_PATH` 指向 PNG、ICNS 或 ICO 图标，自定义路径不存在会明确报错。macOS 若需要显式指定浏览器，可设置 `BROWSER_BUNDLE_ID`（例如 `com.google.Chrome`）。桌面模式未显式设置 `RUNTIME_DIR` 时，如果当前目录存在 `.runtime` 会继续使用它，否则使用系统用户数据目录：macOS 为 `~/Library/Application Support/LLM Gateway`，Windows 为 `%APPDATA%/LLM Gateway`，Linux 为 `$XDG_DATA_HOME/llm-gateway` 或 `~/.local/share/llm-gateway`。这样从 Finder、开始菜单或桌面快捷方式启动时不会依赖命令行当前目录。
 
 网关不会启动 mitmproxy，也不会启动桌面客户端。之后可以关闭 MiMo、WorkBuddy 和 mitmweb。
 
-`desktop` 模式的生命周期由入口进程管理：退出桌面进程会自动结束托管的 Gateway 子进程。需要让 Gateway 独立常驻时，请使用 `serve` 模式。
+`desktop` 模式的生命周期由入口进程管理：正常停止或退出会等待活动请求结束并保存数据，服务端最多等待 10 秒，桌面端在 12 秒后强制终止仍未退出的托管子进程。需要让 Gateway 独立常驻时，请使用 `serve` 模式。操作系统强制杀死应用不属于正常退出流程。
+
+托盘按状态显示可执行操作，提供状态诊断、复制 API 地址、日志目录、数据目录和启动偏好。`/health/live` 用于判断 HTTP 可访问性，`/health/ready` 用于判断认证缓存和模型目录是否就绪；未认证时仍可打开控制台，缓存就绪不代表上游实时连接已验证。每个数据目录只允许一个桌面实例，重复启动会请求已有实例显示状态。若端口上已有 LLM Gateway，托盘仅连接它，停止连接和退出不会终止该外部服务；其他 HTTP 服务占用端口会明确报错。
+
+桌面状态和子进程日志保存在 `RUNTIME_DIR/logs/desktop.log`，超过 2 MiB 时轮换并保留上一份。意外退出会显示错误并提供手动重试，不会无限重启。启动偏好保存在 `RUNTIME_DIR/desktop-preferences.json`。
 
 客户端统一配置为：
 

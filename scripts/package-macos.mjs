@@ -3,6 +3,8 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  readFileSync,
+  rmSync,
   writeFileSync
 } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
@@ -29,6 +31,16 @@ if (!existsSync(binary)) {
   process.exit(1);
 }
 
+const configuredIcon = process.env.TRAY_ICON_PATH?.trim();
+const configuredIconSource = configuredIcon ? resolve(projectRoot, configuredIcon) : null;
+if (configuredIconSource && !existsSync(configuredIconSource)) {
+  throw new Error("自定义托盘图标不存在：" + configuredIconSource);
+}
+if (configuredIconSource && ![".png", ".icns", ".ico"].includes(extname(configuredIconSource).toLowerCase())) {
+  throw new Error("托盘图标仅支持 PNG、ICNS 或 ICO");
+}
+const configuredIconData = configuredIconSource ? readFileSync(configuredIconSource) : null;
+
 mkdirSync(macOsDir, { recursive: true });
 mkdirSync(resourcesDir, { recursive: true });
 copyFileSync(binary, appBinary);
@@ -46,21 +58,24 @@ for (const size of [16, 32, 128, 256, 512]) {
 execFileSync("/usr/bin/iconutil", ["-c", "icns", iconset,
   "-o", join(resourcesDir, "AppIcon.icns")]);
 
-const configuredIcon = process.env.TRAY_ICON_PATH?.trim();
+// Only one tray resource may remain: runtime resolves PNG before ICNS/ICO.
+for (const name of ["tray.png", "tray.icns", "tray.ico"]) {
+  rmSync(join(resourcesDir, name), { force: true });
+}
 if (!configuredIcon) {
   execFileSync("/usr/bin/sips", ["-z", "36", "36",
     "-s", "dpiWidth", "144", "-s", "dpiHeight", "144",
     join(projectRoot, "assets/icons/llm-gateway-tray-v4.png"),
     "--out", join(resourcesDir, "tray.png")], { stdio: "pipe" });
 }
-if (configuredIcon && existsSync(resolve(projectRoot, configuredIcon))) {
+if (configuredIcon && configuredIconSource) {
   const extension = extname(configuredIcon).toLowerCase();
   const iconName = extension === ".icns"
     ? "tray.icns"
     : extension === ".ico"
       ? "tray.ico"
       : "tray.png";
-  copyFileSync(resolve(projectRoot, configuredIcon), join(resourcesDir, iconName));
+  writeFileSync(join(resourcesDir, iconName), configuredIconData);
 }
 
 const plist = [

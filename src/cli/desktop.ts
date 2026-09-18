@@ -1,277 +1,248 @@
-import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { execFile, spawn } from "node:child_process";
+import { chmodSync, existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
-  App,
-  Window,
-  Text,
-  menuAddItem,
-  menuAddSeparator,
-  menuCreate,
-  onActivate,
-  onTerminate,
-  trayAttachMenu,
-  trayCreate,
-  trayDestroy,
-  trayOnClick,
-  traySetTooltip,
-  type Widget
+  App, Window, Text, clipboardWrite, menuAddItem, menuAddSeparator, menuCreate,
+  onActivate, onTerminate, setText, trayAttachMenu, trayCreate, trayDestroy,
+  trayOnClick, traySetTooltip, type Widget, type WindowHandle
 } from "perry/ui";
 import { loadConfig, type GatewayConfig } from "../app/config.js";
-
-type GatewayManager = {
-  start: () => void;
-  stop: () => void;
-  restart: () => void;
-  isRunning: () => boolean;
-};
-
-type DesktopWindow = {
-  setBody: (body: Widget) => void;
-  show: () => void;
-  close: () => void;
-};
+import { readJsonFile, writeJsonFileAtomic } from "../infrastructure/file-store.js";
+import { GatewayManager, type GatewaySnapshot } from "./gateway-manager.js";
+import { acquireDesktopLease, desktopEndpoint, desktopLogger, probeLive, probeReady, resolveDesktopConfig } from "./desktop-runtime.js";
 
 function defaultRuntimeDir(): string {
-  if (process.platform === "darwin") {
-    return join(homedir(), "Library", "Application Support", "LLM Gateway");
-  }
-  if (process.platform === "win32") {
-    const appData = process.env.APPDATA?.trim();
-    return join(appData || join(homedir(), "AppData", "Roaming"), "LLM Gateway");
-  }
-  const dataHome = process.env.XDG_DATA_HOME?.trim();
-  return join(dataHome || join(homedir(), ".local", "share"), "llm-gateway");
+  if (process.platform === "darwin") return join(homedir(), "Library", "Application Support", "LLM Gateway");
+  if (process.platform === "win32") return join(process.env.APPDATA?.trim() || join(homedir(), "AppData", "Roaming"), "LLM Gateway");
+  return join(process.env.XDG_DATA_HOME?.trim() || join(homedir(), ".local", "share"), "llm-gateway");
 }
 
 function loadDesktopConfig(): GatewayConfig {
   if (!process.env.RUNTIME_DIR?.trim()) {
     const localRuntime = resolve(process.cwd(), ".runtime");
-    process.env.RUNTIME_DIR = existsSync(localRuntime)
-      ? localRuntime
-      : defaultRuntimeDir();
+    process.env.RUNTIME_DIR = existsSync(localRuntime) ? localRuntime : defaultRuntimeDir();
   }
-  return loadConfig();
-}
-
-function webUiUrl(config: GatewayConfig): string {
-  const configured = process.env.GATEWAY_URL?.trim();
-  if (configured) return configured.replace(/\/$/, "") + "/ui";
-  const host = config.bindHost === "0.0.0.0" || config.bindHost === "::"
-    ? "127.0.0.1"
-    : config.bindHost;
-  return "http://" + host + ":" + String(config.port) + "/ui";
-}
-
-function openWebUi(config: GatewayConfig): void {
-  const url = webUiUrl(config);
-  const configured = process.platform === "darwin"
-    ? process.env.BROWSER_BUNDLE_ID?.trim()
-    : "";
-  const command = process.platform === "darwin"
-    ? "open"
-    : process.platform === "win32"
-      ? "cmd"
-      : "xdg-open";
-  const args = process.platform === "darwin" && configured
-    ? ["-b", configured, url]
-    : process.platform === "win32"
-      ? ["/c", "start", "", url]
-      : [url];
-  execFile(command, args, (error) => {
-    if (error) console.error("无法打开 Web 控制台，请手动访问: " + url);
-  });
+  return resolveDesktopConfig(loadConfig());
 }
 
 function trayIconPath(): string {
   const configured = process.env.TRAY_ICON_PATH?.trim();
-  if (configured) return configured;
-  if (process.platform !== "darwin") return "";
-
+  if (configured) {
+    const file = resolve(configured);
+    if (!existsSync(file)) throw new Error("托盘图标不存在：" + file);
+    return file;
+  }
   const resourcesDir = resolve(dirname(process.execPath), "..", "Resources");
-  const png = join(resourcesDir, "tray.png");
-  if (existsSync(png)) return png;
-  const icns = join(resourcesDir, "tray.icns");
-  if (existsSync(icns)) return icns;
-  const ico = join(resourcesDir, "tray.ico");
-  return existsSync(ico) ? ico : "";
+  for (const name of ["tray.png", "tray.icns", "tray.ico"]) {
+    const file = join(resourcesDir, name);
+    if (existsSync(file)) return file;
+  }
+  return "";
 }
 
-function createGatewayManager(config: GatewayConfig): GatewayManager {
-  let child: ChildProcess | null = null;
-  let stopping = false;
-  let restartRequested = false;
-
-  function start(): void {
-    if (child !== null) {
-      console.log("Gateway 已在运行");
-      return;
-    }
-
-    stopping = false;
-    const nextChild = spawn(process.execPath, ["serve"], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        LLM_GATEWAY_RESOLVED_CONFIG: JSON.stringify(config)
-      },
-      stdio: "inherit"
-    });
-    child = nextChild;
-
-    nextChild.on("error", (error) => {
-      if (child !== nextChild) return;
-      child = null;
-      console.error("无法启动 Gateway 子进程: " + error.message);
-      if (restartRequested) {
-        restartRequested = false;
-        setTimeout(start, 250);
-      }
-    });
-    nextChild.on("exit", (code, signal) => {
-      if (child !== nextChild) return;
-      child = null;
-      const shouldRestart = restartRequested;
-      restartRequested = false;
-      const wasStopping = stopping;
-      stopping = false;
-      if (!wasStopping && (code !== 0 || signal)) {
-        console.error(
-          "Gateway 子进程已退出（code=" + String(code) +
-          ", signal=" + String(signal) + "）"
-        );
-      }
-      if (shouldRestart) setTimeout(start, 250);
-    });
-  }
-
-  function stop(): void {
-    restartRequested = false;
-    if (child === null) return;
-    stopping = true;
-    child.kill("SIGTERM");
-  }
-
-  function restart(): void {
-    restartRequested = true;
-    if (child === null) {
-      restartRequested = false;
-      start();
-      return;
-    }
-    stopping = true;
-    child.kill("SIGTERM");
-  }
-
-  return {
-    start,
-    stop,
-    restart,
-    isRunning: () => child !== null
-  };
-}
+const stateLabels = {
+  stopped: "已停止", starting: "启动 / 连接中", running: "已就绪",
+  degraded: "需要处理", stopping: "正在停止", error: "连接 / 服务异常"
+};
 
 export function runDesktop(): void {
   const config = loadDesktopConfig();
-  const gateway = createGatewayManager(config);
-  let tray: Widget | null = null;
-  let launchWindow: DesktopWindow | null = null;
-  let quitting = false;
+  const remote = Boolean(process.env.GATEWAY_URL?.trim());
+  const endpoint = desktopEndpoint(config, process.env.GATEWAY_URL);
+  const icon = trayIconPath();
+  const lease = acquireDesktopLease(config.runtimeDir);
+  const activationFile = join(config.runtimeDir, "desktop.activate");
+  if (!lease.acquired) {
+    writeFileSync(activationFile, String(Date.now()));
+    chmodSync(activationFile, 0o600);
+    console.log("桌面实例已在运行，已请求显示状态窗口");
+    return;
+  }
+  process.once("exit", lease.release);
 
-  function showLaunchWindow(): void {
-    if (launchWindow === null) {
-      launchWindow = Window("LLM Gateway", 460, 180);
-      launchWindow.setBody(Text(
-        "LLM Gateway 已启动\n\n" +
-        "控制台地址：" + webUiUrl(config) + "\n" +
-        "可从菜单栏托盘图标管理 Gateway"
-      ));
+  const log = desktopLogger(config.runtimeDir);
+  const preferencesFile = join(config.runtimeDir, "desktop-preferences.json");
+  const firstLaunch = !existsSync(preferencesFile);
+  const stored = readJsonFile(preferencesFile) as { openOnStartup?: boolean } | null;
+  let openOnStartup = stored?.openOnStartup === true;
+  if (firstLaunch) writeJsonFileAtomic(preferencesFile, { openOnStartup });
+  let pendingOpen = firstLaunch || openOnStartup;
+  let tray: Widget | null = null;
+  let statusWindow: WindowHandle | null = null;
+  let quitting = false;
+  let lastError = "";
+  let activationTimer: ReturnType<typeof setInterval> | null = null;
+  const menus = new Map<string, Widget>();
+
+  function openTarget(target: string, browser = false): void {
+    const bundle = browser ? process.env.BROWSER_BUNDLE_ID?.trim() : "";
+    const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer.exe" : "xdg-open";
+    const args = process.platform === "darwin" && bundle ? ["-b", bundle, target] : [target];
+    execFile(command, args, (error) => {
+      if (error) {
+        log.write("打开失败：" + error.message);
+        showStatus("无法打开，请手动访问：\n" + target);
+      }
+    });
+  }
+
+  const gateway = new GatewayManager({
+    remote,
+    live: () => probeLive(endpoint, true),
+    ready: () => probeReady(endpoint, true),
+    spawn: (instanceId, onExit) => {
+      const child = spawn(process.execPath, ["serve"], {
+        cwd: config.runtimeDir,
+        env: { ...process.env, LLM_GATEWAY_RESOLVED_CONFIG: JSON.stringify(config), LLM_GATEWAY_INSTANCE_ID: instanceId },
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      let reason = "";
+      let finished = false;
+      function finish(message: string): void {
+        if (finished) return;
+        finished = true;
+        onExit(message);
+      }
+      child.stdout?.on("data", (chunk) => log.write(String(chunk).trim()));
+      child.stderr?.on("data", (chunk) => {
+        const text = String(chunk).trim();
+        log.write(text);
+        if (text.includes("EADDRINUSE") || text.includes("address already in use")) reason = "端口已被占用，请修改端口或关闭占用程序";
+      });
+      child.on("error", (error) => finish("无法启动 Gateway：" + error.message));
+      child.on("exit", (code, signal) => finish(reason || `Gateway 已退出（code=${code}, signal=${signal}），请查看日志`));
+      return { kill: (signal) => { child.kill(signal); } };
+    },
+    onChange: (snapshot) => {
+      log.write(`${snapshot.ownership} ${snapshot.state}: ${snapshot.detail}`);
+      render(snapshot);
+      if (!quitting && pendingOpen && snapshot.available) {
+        pendingOpen = false;
+        openTarget(endpoint + "/ui", true);
+      }
+      if (!quitting && snapshot.state === "error" && snapshot.detail !== lastError) {
+        lastError = snapshot.detail;
+        pendingOpen = false;
+        showStatus();
+      }
+      if (snapshot.available) lastError = "";
     }
-    launchWindow.show();
+  });
+
+  function statusText(snapshot: GatewaySnapshot): string {
+    const mode = snapshot.ownership === "remote" ? "远程连接" : snapshot.ownership === "external" ? "连接已有服务（只读管理）" : "本地托管";
+    return `LLM Gateway · ${stateLabels[snapshot.state]}\n\n${mode}\n${endpoint}\n\n${snapshot.detail}\n\n日志：${log.directory}`;
+  }
+
+  function showStatus(message = ""): void {
+    if (quitting) return;
+    if (!statusWindow) {
+      statusWindow = Window("LLM Gateway 状态", 620, 280);
+      statusWindow.setBody(Text("", "gateway-status"));
+    }
+    setText("gateway-status", message || statusText(gateway.snapshot()));
+    statusWindow.show();
   }
 
   function openConsole(): void {
-    if (!gateway.isRunning()) {
-      gateway.start();
-      setTimeout(() => openWebUi(config), 500);
-      return;
-    }
-    openWebUi(config);
-  }
-
-  function requestQuit(): void {
     if (quitting) return;
-    quitting = true;
-    gateway.stop();
-    if (!gateway.isRunning()) {
-      process.exit(0);
-      return;
-    }
-    setTimeout(() => process.exit(0), 750);
+    const snapshot = gateway.snapshot();
+    if (snapshot.available) { openTarget(endpoint + "/ui", true); return; }
+    pendingOpen = true;
+    if (snapshot.state !== "stopping") void gateway.start();
+    showStatus();
   }
 
-  function cleanup(): void {
-    if (tray !== null) {
-      trayDestroy(tray);
-      tray = null;
+  function stop(): void { pendingOpen = false; void gateway.stop(); }
+
+  function toggleOpenOnStartup(): void {
+    const next = !openOnStartup;
+    try {
+      writeJsonFileAtomic(preferencesFile, { openOnStartup: next });
+      openOnStartup = next;
+      render(gateway.snapshot());
+    } catch {
+      showStatus("无法保存启动偏好，请检查数据目录写入权限");
     }
-    if (launchWindow !== null) {
-      launchWindow.close();
-      launchWindow = null;
+  }
+
+  function render(snapshot: GatewaySnapshot): void {
+    if (statusWindow) setText("gateway-status", statusText(snapshot));
+    if (tray === null) return;
+    traySetTooltip(tray, `LLM Gateway · ${stateLabels[snapshot.state]}\n${endpoint}\n${snapshot.detail}`);
+    // Cache finite state menus: this backend retains native callback objects.
+    const hasProcess = gateway.hasProcess();
+    const key = `${snapshot.ownership}:${snapshot.state}:${hasProcess}:${openOnStartup}`;
+    let menu = menus.get(key);
+    if (menu === undefined) {
+      menu = menuCreate();
+      menuAddItem(menu, `LLM Gateway · ${stateLabels[snapshot.state]}`, () => showStatus());
+      menuAddItem(menu, snapshot.ownership === "managed" ? "本地托管 · 查看状态" : "外部连接 · 查看状态", () => showStatus());
+      menuAddSeparator(menu);
+      if (snapshot.state !== "stopping") menuAddItem(menu, "打开控制台", openConsole);
+      menuAddItem(menu, "复制 API 地址", () => { clipboardWrite(endpoint + "/v1"); });
+      menuAddSeparator(menu);
+      if (snapshot.ownership === "managed") {
+        if (!hasProcess && (snapshot.state === "stopped" || snapshot.state === "error")) menuAddItem(menu, "启动 / 重试 Gateway", () => { void gateway.start(); });
+        if (snapshot.state !== "stopped" && snapshot.state !== "stopping") menuAddItem(menu, "停止 Gateway", stop);
+        if (["running", "degraded", "error"].includes(snapshot.state)) menuAddItem(menu, "重启 Gateway", () => { void gateway.restart(); });
+      } else {
+        if (snapshot.state === "stopped" || snapshot.state === "error") menuAddItem(menu, "重新连接", () => { void gateway.start(); });
+        if (snapshot.state !== "stopped") menuAddItem(menu, "断开连接（保留服务）", stop);
+      }
+      menuAddSeparator(menu);
+      menuAddItem(menu, "查看状态与诊断", () => { showStatus(); });
+      menuAddItem(menu, "打开日志目录", () => openTarget(log.directory));
+      menuAddItem(menu, "打开数据目录", () => openTarget(config.runtimeDir));
+      menuAddItem(menu, `${openOnStartup ? "✓ " : ""}启动时打开控制台`, toggleOpenOnStartup);
+      menuAddSeparator(menu);
+      menuAddItem(menu, snapshot.ownership === "managed" ? "退出并停止 Gateway" : "退出（保留外部服务）", () => { void requestQuit(); });
+      menus.set(key, menu);
     }
-    gateway.stop();
+    trayAttachMenu(tray, menu);
   }
 
   function ensureTray(): void {
-    if (tray !== null) return;
-
-    // Empty path uses Perry's documented placeholder icon. Packaged builds
-    // can provide a real PNG/ICNS/ICO through TRAY_ICON_PATH.
-    const created = trayCreate(trayIconPath());
-    if (created === 0) return;
+    if (tray !== null || quitting) return;
+    const created = trayCreate(icon);
+    if (created === 0) { showStatus("托盘创建失败，可关闭应用后重新启动；服务状态可在控制台查看"); return; }
     tray = created;
-    traySetTooltip(tray, "LLM Gateway");
-
-    const menu = menuCreate();
-    menuAddItem(menu, "打开控制台", openConsole);
-    menuAddSeparator(menu);
-    menuAddItem(menu, "启动 Gateway", gateway.start);
-    menuAddItem(menu, "停止 Gateway", gateway.stop);
-    menuAddItem(menu, "重启 Gateway", gateway.restart);
-    menuAddSeparator(menu);
-    menuAddItem(menu, "退出", requestQuit);
-    trayAttachMenu(tray, menu);
-    trayOnClick(tray, openConsole);
+    if (process.platform !== "darwin") trayOnClick(tray, openConsole);
+    render(gateway.snapshot());
   }
 
-  gateway.start();
-  process.once("exit", cleanup);
-  process.once("SIGINT", () => {
-    cleanup();
-    process.exit(130);
-  });
-  process.once("SIGTERM", () => {
-    cleanup();
-    process.exit(143);
-  });
-  onTerminate(cleanup);
+  function cleanup(): void {
+    if (activationTimer !== null) clearInterval(activationTimer);
+    gateway.terminate();
+    lease.release();
+    if (tray !== null) { trayDestroy(tray); tray = null; }
+    if (statusWindow) { statusWindow.close(); statusWindow = null; }
+  }
 
-  // Windows needs the App-created HWND before trayCreate can succeed.
-  // Deferred initialization also handles backends that start their event loop
-  // after App() is evaluated.
-  setTimeout(ensureTray, 0);
+  async function requestQuit(): Promise<void> {
+    if (quitting) return;
+    quitting = true;
+    pendingOpen = false;
+    await gateway.dispose();
+    cleanup();
+    process.exit(0);
+  }
+
+  process.once("exit", cleanup);
+  process.once("SIGINT", () => { void requestQuit(); });
+  process.once("SIGTERM", () => { void requestQuit(); });
+  onTerminate(cleanup);
   onActivate(ensureTray);
   setTimeout(() => {
-    showLaunchWindow();
-    openWebUi(config);
-  }, 500);
-
-  App({
-    title: "LLM Gateway",
-    width: 1,
-    height: 1,
-    activationPolicy: "accessory",
-    body: Text("LLM Gateway")
-  });
+    ensureTray();
+    activationTimer = setInterval(() => {
+      if (existsSync(activationFile)) {
+        try { unlinkSync(activationFile); } catch { return; }
+        showStatus();
+      }
+    }, 1000);
+    void gateway.start();
+  }, 0);
+  App({ title: "LLM Gateway", width: 1, height: 1, activationPolicy: "accessory", body: Text("LLM Gateway") });
 }

@@ -21,6 +21,7 @@
     "export:harness": "./dist/llm-gateway export deepseek-harness",
     "auth": "npm run build:auth && node dist/auth/scripts/auth.js",
     "test": "tsc -p tsconfig.test.json && node --test .test-dist/tests/*.test.js",
+    "test:desktop": "node scripts/smoke-desktop.mjs",
     "typecheck": "tsc --noEmit && tsc -p web/tsconfig.json --noEmit",
     "format": "biome format --write web/src",
     "format:check": "biome format web/src",
