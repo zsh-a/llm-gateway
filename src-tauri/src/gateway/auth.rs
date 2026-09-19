@@ -47,7 +47,7 @@ pub(super) fn read_auth_captured_at(path: &PathBuf) -> Option<i64> {
         .and_then(Value::as_i64)
 }
 
-fn is_forwarded_header(name: &str) -> bool {
+pub(super) fn is_forwarded_header(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     matches!(
         name.as_str(),

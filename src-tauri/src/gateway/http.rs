@@ -175,8 +175,8 @@ async fn capabilities(State(state): State<AppState>) -> impl IntoResponse {
             "responses": { "path": "/v1/responses", "stream": true, "reasoningText": true, "functionCalls": true }
         },
         "providers": [
-            { "id": "mimo", "name": "MiMo", "authenticated": state.auth.contains_key("mimo") },
-            { "id": "workbuddy", "name": "WorkBuddy", "authenticated": state.auth.contains_key("workbuddy") }
+            { "id": "mimo", "name": "MiMo", "authenticated": state.has_auth("mimo") },
+            { "id": "workbuddy", "name": "WorkBuddy", "authenticated": state.has_auth("workbuddy") }
         ],
         "models": models
     }))
@@ -263,7 +263,7 @@ async fn proxy_chat(
     for (index, route) in routes.iter().enumerate() {
         metric.set_route(route, &model);
         let upstream_body = build_upstream_body(body, route, responses_mode);
-        let auth_headers = state.auth.get(&route.auth_ref).cloned().unwrap_or_default();
+        let auth_headers = state.auth_headers(&route.auth_ref).unwrap_or_default();
         let request = state
             .client
             .post(&route.upstream_url)

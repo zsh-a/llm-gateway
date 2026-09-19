@@ -21,6 +21,12 @@ pub fn run() {
     init_tracing();
 
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            desktop::get_service_settings,
+            desktop::save_service_settings,
+            desktop::remote_sync_status,
+            desktop::remote_sync_pull
+        ])
         .setup(desktop::setup)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

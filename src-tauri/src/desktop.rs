@@ -1,12 +1,57 @@
-use crate::config::Config;
-use crate::gateway::{AppState, serve};
+use crate::config::{Config, ServiceSettings};
+use crate::gateway::{AppState, RemoteSyncPullResult, RemoteSyncSettings, RemoteSyncStatus, serve};
 use std::error::Error;
 use tauri::menu::{Menu, MenuEvent, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{App, AppHandle, Emitter, Manager, Runtime};
+use tauri::{App, AppHandle, Emitter, Manager, Runtime, State};
 use tracing::{error, info};
 
 const TRAY_ICON: tauri::image::Image<'static> = tauri::include_image!("icons/tray.png");
+
+#[tauri::command]
+pub fn get_service_settings(state: State<'_, AppState>) -> ServiceSettings {
+    state.config.service_settings()
+}
+
+#[tauri::command]
+pub fn save_service_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: ServiceSettings,
+) -> Result<(), String> {
+    state
+        .config
+        .save_service_settings(&settings)
+        .map_err(|error| error.to_string())?;
+    app.request_restart();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remote_sync_status(
+    state: State<'_, AppState>,
+    settings: RemoteSyncSettings,
+) -> Result<RemoteSyncStatus, String> {
+    state
+        .inner()
+        .remote_sync_status(settings)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn remote_sync_pull(
+    state: State<'_, AppState>,
+    settings: RemoteSyncSettings,
+    passphrase: String,
+    force: bool,
+) -> Result<RemoteSyncPullResult, String> {
+    state
+        .inner()
+        .remote_sync_pull(settings, passphrase, force)
+        .await
+        .map_err(|error| error.to_string())
+}
 
 pub fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> {
     let config = Config::from_env();

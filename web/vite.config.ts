@@ -9,6 +9,7 @@ const projectRoot = resolve(webRoot, "..");
 
 export default defineConfig({
   root: webRoot,
+  envPrefix: ["VITE_", "SYNC_URL"],
   plugins: [react(), tailwindcss()],
   build: {
     outDir: resolve(projectRoot, ".build/web"),

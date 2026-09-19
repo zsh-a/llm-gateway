@@ -85,9 +85,7 @@ Headless 服务默认监听 `127.0.0.1:3000`。如果需要远程访问，请设
 
 ```text
 Windows x64       .msi / .exe
-Linux x64         .AppImage / .deb / .rpm
 macOS arm64       .dmg
-macOS x64         .dmg
 ```
 
 发布版本时创建并推送 `v*` 标签：
@@ -150,8 +148,15 @@ npm run sync -- push
 npm run sync -- pull --force
 ```
 
+桌面控制台的“同步服务地址”会优先使用已保存的地址；首次打开时也可以通过构建环境变量
+`VITE_SYNC_URL`（或 `SYNC_URL`）预填。同步地址不是密钥，可以写入前端构建配置。
+
 `push` 默认使用本机保存的远端版本进行冲突检测；确认覆盖远端时使用
 `--force`。不要同步整个 `.runtime` 或 SQLite 文件。
+
+桌面应用也支持在“设置 → 远端认证同步”中检查远端版本并拉取认证。同步 Token
+只保存在当前桌面会话中，加密密码不会保存；拉取成功后网关会立即重新加载认证缓存。
+普通浏览器页面不具备本地解密和写入权限，仍需使用桌面应用完成拉取。
 
 认证工具的代理、客户端入口和证书参数见 [.env.example](./.env.example)。
 
@@ -175,7 +180,10 @@ METRICS_MAX_RECORDS=2000
 # CORS_ORIGIN=http://localhost:1420
 ```
 
-debug 模式默认使用项目下的 `.runtime`；release 应用默认使用系统用户数据目录。macOS 路径为 `~/Library/Application Support/LLM Gateway`。设置 `RUNTIME_DIR` 可以固定到其他目录。
+桌面应用可以在“设置 → 服务监听”中配置 Host 和 Port，保存后自动重启并写入
+`RUNTIME_DIR/service.json`。环境变量 `BIND_HOST` 和 `PORT` 优先级更高，适合 headless、容器和
+systemd/launchd 服务。debug 模式默认使用项目下的 `.runtime`；release 应用默认使用系统用户数据目录。
+macOS 路径为 `~/Library/Application Support/LLM Gateway`。设置 `RUNTIME_DIR` 可以固定到其他目录。
 
 SQLite 默认路径为 `RUNTIME_DIR/gateway.sqlite3`。启动时会从旧的 `channels.json` 和 `api-keys.json` 做一次性导入；后续管理数据以 SQLite 为准。
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, GatewayApi, loadCredentials } from "./api";
+import { ApiError, GatewayApi, gatewayBaseUrl, loadCredentials } from "./api";
 import { DashboardLayout } from "./components/layout";
 import { ManagementPage } from "./features/management/ManagementPage";
 import { MetricsPage } from "./features/metrics/MetricsPage";
@@ -7,13 +7,18 @@ import { OverviewPage } from "./features/overview/OverviewPage";
 import { PlaygroundPage } from "./features/playground/PlaygroundPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { emptyDashboard, resolveLocation } from "./lib/constants";
+import { isTauriRuntime } from "./remote-sync";
+import { getServiceSettings, serviceBaseUrl } from "./service-settings";
 import type { DashboardData, Navigate, Notice, NoticeTone } from "./types";
 
 export function App() {
+  const tauriRuntime = isTauriRuntime();
   const [location, setLocation] = useState(() => resolveLocation(window.location.hash));
   const [mobileNav, setMobileNav] = useState(false);
   const [data, setData] = useState<DashboardData>(emptyDashboard);
   const [credentials, setCredentials] = useState(loadCredentials);
+  const [gatewayUrl, setGatewayUrl] = useState(gatewayBaseUrl);
+  const [serviceReady, setServiceReady] = useState(!tauriRuntime);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
@@ -21,11 +26,31 @@ export function App() {
     document.documentElement.classList.contains("dark") ? "dark" : "light",
   );
   const refreshController = useRef<AbortController | null>(null);
-  const api = useMemo(() => new GatewayApi(credentials), [credentials]);
+  const api = useMemo(() => new GatewayApi(credentials, gatewayUrl), [credentials, gatewayUrl]);
 
   const showNotice = useCallback((message: string, tone: NoticeTone = "success"): void => {
     setNotice({ message, tone });
   }, []);
+
+  useEffect(() => {
+    if (!tauriRuntime) return;
+    let active = true;
+    void getServiceSettings()
+      .then((settings) => {
+        if (!active) return;
+        setGatewayUrl(serviceBaseUrl(settings));
+        setServiceReady(true);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          showNotice(error instanceof Error ? error.message : "读取服务监听配置失败", "error");
+          setServiceReady(true);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [showNotice, tauriRuntime]);
 
   const navigate = useCallback<Navigate>((next, options = {}): void => {
     const params = new URLSearchParams();
@@ -67,6 +92,7 @@ export function App() {
   );
 
   useEffect(() => {
+    if (!serviceReady) return;
     const onLocationChange = (): void => setLocation(resolveLocation(window.location.hash));
     window.addEventListener("hashchange", onLocationChange);
     window.addEventListener("popstate", onLocationChange);
@@ -78,7 +104,7 @@ export function App() {
       window.clearInterval(timer);
       refreshController.current?.abort();
     };
-  }, [refresh]);
+  }, [refresh, serviceReady]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -135,6 +161,8 @@ export function App() {
           theme={theme}
           onTheme={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
           onNotice={showNotice}
+          onRefresh={() => void refresh(true)}
+          gatewayUrl={gatewayUrl}
         />
       )}
     </DashboardLayout>

@@ -27,10 +27,6 @@ export const gatewayBaseUrl = (
   import.meta.env.VITE_GATEWAY_BASE_URL ?? "http://127.0.0.1:3000"
 ).replace(/\/+$/, "");
 
-function gatewayUrl(path: string): string {
-  return `${gatewayBaseUrl}${path}`;
-}
-
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -83,7 +79,18 @@ export function saveCredentials(credentials: Credentials): void {
 }
 
 export class GatewayApi {
-  constructor(private readonly credentials: Credentials) {}
+  readonly baseUrl: string;
+
+  constructor(
+    private readonly credentials: Credentials,
+    baseUrl = gatewayBaseUrl,
+  ) {
+    this.baseUrl = baseUrl.replace(/\/+$/, "");
+  }
+
+  private gatewayUrl(path: string): string {
+    return `${this.baseUrl}${path}`;
+  }
 
   private metricsPrefix(): "/metrics" | "/admin/metrics" {
     return this.credentials.adminKey ? "/admin/metrics" : "/metrics";
@@ -100,7 +107,7 @@ export class GatewayApi {
     }
     if (init.body !== undefined) headers.set("Content-Type", "application/json");
 
-    const response = await fetch(gatewayUrl(path), { ...init, headers });
+    const response = await fetch(this.gatewayUrl(path), { ...init, headers });
     const raw = await response.text();
     let body: Record<string, unknown> = {};
     try {
@@ -252,7 +259,7 @@ export class GatewayApi {
       "Content-Type": "application/json",
     });
     if (this.credentials.apiKey) headers.set("Authorization", `Bearer ${this.credentials.apiKey}`);
-    const response = await fetch(gatewayUrl("/v1/chat/completions"), {
+    const response = await fetch(this.gatewayUrl("/v1/chat/completions"), {
       method: "POST",
       headers,
       body: this.chatBody(model, prompt, effort, true),

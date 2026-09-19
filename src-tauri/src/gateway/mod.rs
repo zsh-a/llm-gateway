@@ -15,8 +15,10 @@ mod http;
 mod metrics;
 mod model_catalog;
 mod protocols;
+mod sync;
 
 pub(crate) use http::serve;
+pub(crate) use sync::{RemoteSyncPullResult, RemoteSyncSettings, RemoteSyncStatus};
 
 use auth::{
     GatewayError, error_response, hash_secret, now_ms, read_auth_captured_at, read_auth_headers,
@@ -28,12 +30,39 @@ const MIMO_URL: &str = "https://mimo-server-cn.xiaomimimo.com/api/route/chat/com
 const MIMO_MODELS_URL: &str = "https://mimo-server-cn.xiaomimimo.com/api/model/list";
 const WORKBUDDY_URL: &str = "https://copilot.tencent.com/v2/chat/completions";
 
+fn load_auth_cache(config: &Config) -> HashMap<String, HeaderMap> {
+    let mut auth = HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(&config.auth_cache_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if let Some(headers) = read_auth_headers(&path) {
+                auth.insert(name.to_string(), headers);
+            }
+        }
+    }
+    for provider in ["mimo", "workbuddy"] {
+        let path = config.auth_path(provider);
+        if !auth.contains_key(provider) {
+            if let Some(headers) = read_auth_headers(&path) {
+                auth.insert(provider.to_string(), headers);
+            }
+        }
+    }
+    auth
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Config,
     pub db: Db,
     pub client: Client,
-    auth: Arc<HashMap<String, HeaderMap>>,
+    auth: Arc<RwLock<HashMap<String, HeaderMap>>>,
     model_cache: Arc<RwLock<Option<ModelCache>>>,
 }
 
@@ -111,29 +140,7 @@ impl AppState {
             })?;
         }
 
-        let mut auth = HashMap::new();
-        if let Ok(entries) = std::fs::read_dir(&config.auth_cache_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                    continue;
-                }
-                let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
-                    continue;
-                };
-                if let Some(headers) = read_auth_headers(&path) {
-                    auth.insert(name.to_string(), headers);
-                }
-            }
-        }
-        for provider in ["mimo", "workbuddy"] {
-            let path = config.auth_path(provider);
-            if !auth.contains_key(provider) {
-                if let Some(headers) = read_auth_headers(&path) {
-                    auth.insert(provider.to_string(), headers);
-                }
-            }
-        }
+        let auth = load_auth_cache(&config);
         let client = Client::builder()
             .user_agent("llm-gateway-rust/1.0")
             .connect_timeout(Duration::from_secs(15))
@@ -143,9 +150,52 @@ impl AppState {
             config,
             db,
             client,
-            auth: Arc::new(auth),
+            auth: Arc::new(RwLock::new(auth)),
             model_cache: Arc::new(RwLock::new(None)),
         })
+    }
+
+    pub(crate) async fn remote_sync_status(
+        &self,
+        settings: RemoteSyncSettings,
+    ) -> anyhow::Result<RemoteSyncStatus> {
+        sync::status(self, settings).await
+    }
+
+    pub(crate) async fn remote_sync_pull(
+        &self,
+        settings: RemoteSyncSettings,
+        passphrase: String,
+        force: bool,
+    ) -> anyhow::Result<RemoteSyncPullResult> {
+        sync::pull(self, settings, passphrase, force).await
+    }
+
+    pub(crate) fn reload_auth_cache(&self) -> anyhow::Result<()> {
+        let auth = load_auth_cache(&self.config);
+        let mut current = self
+            .auth
+            .write()
+            .map_err(|_| anyhow::anyhow!("认证缓存锁已失效"))?;
+        *current = auth;
+        if let Ok(mut cache) = self.model_cache.write() {
+            *cache = None;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn auth_headers(&self, auth_ref: &str) -> Option<HeaderMap> {
+        self.auth
+            .read()
+            .ok()
+            .and_then(|auth| auth.get(auth_ref).cloned())
+    }
+
+    fn has_auth(&self, auth_ref: &str) -> bool {
+        self.auth
+            .read()
+            .ok()
+            .is_some_and(|auth| auth.contains_key(auth_ref))
     }
 
     fn metric(&self, protocol: &str, identity: &Identity) -> MetricContext {
@@ -171,7 +221,7 @@ impl AppState {
                 (
                     provider.to_string(),
                     json!({
-                        "ready": self.auth.contains_key(provider),
+                    "ready": self.has_auth(provider),
                         "capturedAt": captured_at,
                         "source": "cache"
                     }),
@@ -350,7 +400,7 @@ impl AppState {
         let routes = candidates
             .into_iter()
             .filter_map(|channel| {
-                if !self.auth.contains_key(&channel.auth_ref) {
+                if !self.has_auth(&channel.auth_ref) {
                     return None;
                 }
                 let mapped_model = channel
@@ -437,7 +487,7 @@ impl AppState {
     }
 
     async fn fetch_mimo_models(&self) -> Option<Vec<ModelInfo>> {
-        let headers = self.auth.get("mimo")?;
+        let headers = self.auth_headers("mimo")?;
         let request = self.client.get(MIMO_MODELS_URL).headers(headers.clone());
         let response = timeout(
             Duration::from_millis(self.config.model_discovery_timeout_ms),

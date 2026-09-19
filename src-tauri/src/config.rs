@@ -1,5 +1,36 @@
+use serde::{Deserialize, Serialize};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+const SERVICE_SETTINGS_FILE: &str = "service.json";
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceSettings {
+    pub host: String,
+    pub port: u16,
+}
+
+impl ServiceSettings {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let host = self.host.trim();
+        anyhow::ensure!(!host.is_empty(), "服务 Host 不能为空");
+        anyhow::ensure!(host.len() <= 255, "服务 Host 过长");
+        anyhow::ensure!(
+            !host.chars().any(char::is_whitespace) && !host.contains(['/', '\\']),
+            "服务 Host 格式无效"
+        );
+        anyhow::ensure!(self.port > 0, "服务 Port 必须在 1-65535 范围内");
+        Ok(())
+    }
+
+    pub fn normalized(&self) -> Self {
+        Self {
+            host: self.host.trim().to_string(),
+            port: self.port,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -21,19 +52,32 @@ pub struct Config {
     pub metrics_max_records: i64,
 }
 
-fn env_string(name: &str, fallback: impl Into<String>) -> String {
-    env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| fallback.into())
-}
-
 fn env_u64(name: &str, fallback: u64) -> u64 {
     env::var(name)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(fallback)
+}
+
+fn env_port(name: &str) -> Option<u16> {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn load_service_settings(runtime_dir: &Path) -> Option<ServiceSettings> {
+    let path = runtime_dir.join(SERVICE_SETTINGS_FILE);
+    let raw = std::fs::read_to_string(path).ok()?;
+    let settings = serde_json::from_str::<ServiceSettings>(&raw)
+        .ok()?
+        .normalized();
+    if settings.validate().is_ok() {
+        Some(settings)
+    } else {
+        None
+    }
 }
 
 fn env_bool(name: &str, fallback: bool) -> bool {
@@ -70,10 +114,19 @@ impl Config {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from);
+        let persisted_service = load_service_settings(&runtime_dir);
+        let bind_host = env::var("BIND_HOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| persisted_service.as_ref().map(|value| value.host.clone()))
+            .unwrap_or_else(|| "127.0.0.1".into());
+        let port = env_port("PORT")
+            .or_else(|| persisted_service.as_ref().map(|value| value.port))
+            .unwrap_or(3000);
 
         Self {
-            bind_host: env_string("BIND_HOST", "127.0.0.1"),
-            port: env_u64("PORT", 3000).min(u16::MAX as u64) as u16,
+            bind_host,
+            port,
             request_timeout_ms: env_u64("REQUEST_TIMEOUT_MS", 180_000),
             max_body_bytes: env_u64("MAX_BODY_BYTES", 1024 * 1024) as usize,
             proxy_api_key: env::var("PROXY_API_KEY").unwrap_or_default(),
@@ -102,7 +155,11 @@ impl Config {
     }
 
     pub fn bind_address(&self) -> String {
-        format!("{}:{}", self.bind_host, self.port)
+        if self.bind_host.contains(':') && !self.bind_host.starts_with('[') {
+            format!("[{}]:{}", self.bind_host, self.port)
+        } else {
+            format!("{}:{}", self.bind_host, self.port)
+        }
     }
 
     pub fn is_loopback(&self) -> bool {
@@ -123,5 +180,27 @@ impl Config {
 
     pub fn auth_path(&self, provider: &str) -> PathBuf {
         self.auth_cache_dir.join(format!("{provider}.json"))
+    }
+
+    pub fn service_settings(&self) -> ServiceSettings {
+        ServiceSettings {
+            host: self.bind_host.clone(),
+            port: self.port,
+        }
+    }
+
+    pub fn save_service_settings(&self, settings: &ServiceSettings) -> anyhow::Result<()> {
+        let settings = settings.normalized();
+        settings.validate()?;
+        self.ensure_runtime_dir()?;
+        let path = self.runtime_dir.join(SERVICE_SETTINGS_FILE);
+        let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+        std::fs::write(&temporary, serde_json::to_vec_pretty(&settings)?)?;
+        #[cfg(windows)]
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+        std::fs::rename(temporary, path)?;
+        Ok(())
     }
 }
