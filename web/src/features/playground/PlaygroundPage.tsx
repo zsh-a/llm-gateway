@@ -6,7 +6,6 @@ import {
   Loader2,
   MessageSquareText,
   RefreshCw,
-  TerminalSquare,
   Trash2,
   X,
   XCircle,
@@ -22,7 +21,6 @@ import {
   Card,
   CardContent,
   CardDescription,
-  CardFooter,
   CardHeader,
   CardTitle,
   Kbd,
@@ -36,6 +34,22 @@ import { cn } from "../../lib/utils";
 import type { DashboardData, GatewayModel, Navigate, Usage } from "../../types";
 
 type PlaygroundState = "idle" | "streaming" | "success" | "error" | "canceled";
+
+type PlaygroundResponse = {
+  state: PlaygroundState;
+  content: string;
+  reasoning: string;
+  usage?: Usage;
+  error: string;
+};
+
+const emptyResponse: PlaygroundResponse = {
+  state: "idle",
+  content: "",
+  reasoning: "",
+  usage: undefined,
+  error: "",
+};
 
 const examplePrompts = [
   "用一句话介绍当前 Gateway 的能力。",
@@ -59,11 +73,7 @@ export function PlaygroundPage({
   const [modelId, setModelId] = useState(initialModelId ?? data.models[0]?.id ?? "");
   const [effort, setEffort] = useState("auto");
   const [prompt, setPrompt] = useState("请用一句话介绍当前 Gateway 的能力。");
-  const [content, setContent] = useState("");
-  const [reasoning, setReasoning] = useState("");
-  const [usage, setUsage] = useState<Usage | undefined>();
-  const [state, setState] = useState<PlaygroundState>("idle");
-  const [error, setError] = useState("");
+  const [response, setResponse] = useState<PlaygroundResponse>(emptyResponse);
   const abortRef = useRef<AbortController | null>(null);
   const lastRequestRef = useRef<{
     model: GatewayModel;
@@ -116,11 +126,7 @@ export function PlaygroundPage({
   const clearOutput = (): void => {
     abortRef.current?.abort();
     abortRef.current = null;
-    setState("idle");
-    setContent("");
-    setReasoning("");
-    setUsage(undefined);
-    setError("");
+    setResponse(emptyResponse);
   };
 
   const send = useCallback(
@@ -129,63 +135,74 @@ export function PlaygroundPage({
       requestPrompt: string,
       requestEffort: string,
     ): Promise<void> => {
-      if (state === "streaming") return;
+      if (abortRef.current) return;
       const controller = new AbortController();
       abortRef.current = controller;
-      setState("streaming");
-      setContent("");
-      setReasoning("");
-      setUsage(undefined);
-      setError("");
+      setResponse({ ...emptyResponse, state: "streaming" });
       try {
         await api.streamChat(
           requestModel,
           requestPrompt,
           requestEffort,
           (update) => {
-            if (update.content) setContent((current) => current + update.content);
-            if (update.reasoning) setReasoning((current) => current + update.reasoning);
-            if (update.usage) setUsage(update.usage);
+            if (!update.content && !update.reasoning && !update.usage) return;
+            setResponse((current) => ({
+              ...current,
+              content: update.content ? current.content + update.content : current.content,
+              reasoning: update.reasoning
+                ? current.reasoning + update.reasoning
+                : current.reasoning,
+              usage: update.usage ?? current.usage,
+            }));
           },
           controller.signal,
         );
         if (controller.signal.aborted) {
-          if (abortRef.current === controller) setState("canceled");
+          if (abortRef.current === controller) {
+            setResponse((current) => ({ ...current, state: "canceled" }));
+          }
           return;
         }
-        setState("success");
+        setResponse((current) => ({ ...current, state: "success" }));
         onRefresh();
       } catch (caught) {
         if (controller.signal.aborted) {
-          if (abortRef.current === controller) setState("canceled");
+          if (abortRef.current === controller) {
+            setResponse((current) => ({ ...current, state: "canceled" }));
+          }
           return;
         }
-        setState("error");
-        setError(caught instanceof Error ? caught.message : "请求失败");
+        setResponse((current) => ({
+          ...current,
+          state: "error",
+          error: caught instanceof Error ? caught.message : "请求失败",
+        }));
       } finally {
         if (abortRef.current === controller) abortRef.current = null;
       }
     },
-    [api, onRefresh, state],
+    [api, onRefresh],
   );
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    if (!model || !prompt.trim() || state === "streaming") return;
+    if (!model || !prompt.trim() || response.state === "streaming") return;
     const requestPrompt = prompt.trim();
     lastRequestRef.current = { model, prompt: requestPrompt, effort };
     await send(model, requestPrompt, effort);
   };
 
   const stop = (): void => {
-    if (!abortRef.current) return;
-    abortRef.current.abort();
-    setState("canceled");
+    const controller = abortRef.current;
+    if (!controller) return;
+    controller.abort();
+    abortRef.current = null;
+    setResponse((current) => ({ ...current, state: "canceled" }));
   };
 
   const retry = (): void => {
     const request = lastRequestRef.current;
-    if (!request || state === "streaming") return;
+    if (!request || response.state === "streaming") return;
     void send(request.model, request.prompt, request.effort);
   };
 
@@ -203,10 +220,9 @@ export function PlaygroundPage({
       <PlaygroundForm
         models={data.models}
         model={model}
-        modelId={modelId}
         effort={effort}
         prompt={prompt}
-        state={state}
+        state={response.state}
         onModelChange={changeModel}
         onEffortChange={setEffort}
         onPromptChange={setPrompt}
@@ -217,11 +233,7 @@ export function PlaygroundPage({
       <ResponsePreview
         model={model}
         effort={effort}
-        state={state}
-        error={error}
-        reasoning={reasoning}
-        content={content}
-        usage={usage}
+        response={response}
         onClear={clearOutput}
         onRetry={retry}
       />
@@ -232,7 +244,6 @@ export function PlaygroundPage({
 function PlaygroundForm({
   models,
   model,
-  modelId,
   effort,
   prompt,
   state,
@@ -245,7 +256,6 @@ function PlaygroundForm({
 }: {
   models: GatewayModel[];
   model?: GatewayModel;
-  modelId: string;
   effort: string;
   prompt: string;
   state: PlaygroundState;
@@ -259,42 +269,47 @@ function PlaygroundForm({
   const efforts = modelEfforts(model);
   const [modelQuery, setModelQuery] = useState("");
   const filteredModels = searchModels(models, modelQuery);
+  const searchable = models.length > 6;
   const selectedOutsideSearch = model && !filteredModels.some((item) => item.id === model.id);
   return (
     <Card className="h-fit">
       <CardHeader>
         <div className="flex items-center gap-2">
           <MessageSquareText className="size-4 text-primary" />
-          <CardTitle>请求配置</CardTitle>
+          <CardTitle>发送请求</CardTitle>
         </div>
-        <CardDescription>使用与 OpenAI Chat Completions 兼容的请求格式</CardDescription>
+        <CardDescription>选择模型，输入消息并查看真实的流式响应</CardDescription>
       </CardHeader>
       <CardContent>
-        <form className="space-y-5" onSubmit={onSubmit}>
+        <form className="space-y-5" aria-label="模型请求" onSubmit={onSubmit}>
           {models.length > 1 ? (
             <div className="space-y-2">
               <label htmlFor="playground-model" className="text-xs font-medium text-foreground">
                 模型
               </label>
-              <ModelSearch
-                value={modelQuery}
-                onChange={setModelQuery}
-                descriptionId="playground-model-results"
-              />
-              <p
-                id="playground-model-results"
-                role="status"
-                className="text-xs text-muted-foreground"
-              >
-                {modelQuery.trim()
-                  ? filteredModels.length
-                    ? `找到 ${filteredModels.length} / ${models.length} 个模型，请从下方选择`
-                    : "没有匹配的模型，当前选择保持不变"
-                  : `共 ${models.length} 个模型`}
-              </p>
+              {searchable && (
+                <>
+                  <ModelSearch
+                    value={modelQuery}
+                    onChange={setModelQuery}
+                    descriptionId="playground-model-results"
+                  />
+                  <p
+                    id="playground-model-results"
+                    role="status"
+                    className="text-xs text-muted-foreground"
+                  >
+                    {modelQuery.trim()
+                      ? filteredModels.length
+                        ? `找到 ${filteredModels.length} / ${models.length} 个模型`
+                        : "没有匹配的模型，当前选择保持不变"
+                      : `共 ${models.length} 个模型，可搜索名称、ID 或 Provider`}
+                  </p>
+                </>
+              )}
               <Select
                 id="playground-model"
-                value={model?.id ?? modelId}
+                value={model?.id ?? ""}
                 onChange={(event) => onModelChange(event.target.value)}
                 disabled={!models.length}
               >
@@ -432,10 +447,6 @@ function PlaygroundForm({
           </div>
         </form>
       </CardContent>
-      <CardFooter className="border-t border-border/60 pt-4 text-[11px] text-muted-foreground">
-        <TerminalSquare className="mr-1.5 size-3.5" />
-        响应通过本地 Gateway 流式转发
-      </CardFooter>
     </Card>
   );
 }
@@ -443,29 +454,22 @@ function PlaygroundForm({
 function ResponsePreview({
   model,
   effort,
-  state,
-  error,
-  reasoning,
-  content,
-  usage,
+  response,
   onClear,
   onRetry,
 }: {
   model?: GatewayModel;
   effort: string;
-  state: PlaygroundState;
-  error: string;
-  reasoning: string;
-  content: string;
-  usage?: Usage;
+  response: PlaygroundResponse;
   onClear: () => void;
   onRetry: () => void;
 }) {
+  const { state, error, reasoning, content, usage } = response;
   const title = model
     ? `${model.name || model.id} · ${effort === "auto" ? "自动思考" : effort === "off" ? "思考关闭" : effort}`
     : "选择模型开始测试";
   return (
-    <Card className="min-h-[560px] overflow-hidden">
+    <Card className="min-h-[480px] overflow-hidden sm:min-h-[560px]">
       <CardHeader className="border-b border-border/60 bg-muted/15">
         <div className="flex items-center justify-between gap-3">
           <div>
@@ -524,12 +528,12 @@ function ResponsePreview({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="space-y-4 p-5">
+      <CardContent className="max-h-[min(44rem,calc(100vh-12rem))] space-y-4 overflow-y-auto p-5 scrollbar-thin">
         {error && (
           <div
             className={cn(
               "flex items-start gap-2 rounded-xl border border-red-400/25",
-              "bg-red-400/10 p-3 text-sm text-red-200",
+              "bg-red-400/10 p-3 text-sm text-red-700 dark:text-red-200",
             )}
           >
             <AlertCircle className="mt-0.5 size-4 shrink-0" />
@@ -550,7 +554,7 @@ function ResponsePreview({
             <div
               className={cn(
                 "max-h-64 overflow-y-auto whitespace-pre-wrap px-4 py-3 font-mono text-xs leading-6",
-                "text-violet-100/70 scrollbar-thin",
+                "text-violet-700/80 scrollbar-thin dark:text-violet-100/70",
               )}
             >
               {reasoning}

@@ -19,7 +19,7 @@ Tauri 2
 ```text
 src-tauri/src/gateway/ Rust 网关 HTTP、协议、认证、指标和模型目录
 src-tauri/src/desktop.rs Tauri 启动与系统托盘
-web/src/               React 控制台页面与通用组件
+web/src/               React + Vite + Tailwind 控制台、shadcn 风格组件和 TanStack Query 状态管理
 web/src/features/      按功能组织的页面与业务组件
 cloudflare/sync-worker/ Cloudflare 加密认证同步 Worker
 scripts/auth.ts        一次性认证捕获工具

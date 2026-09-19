@@ -1,3 +1,4 @@
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import {
   Activity,
   AlertCircle,
@@ -10,7 +11,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type { GatewayApi } from "../../api";
 import { DistributionList, Field, MetricChart, StatCard } from "../../components/common";
 import {
@@ -26,6 +27,7 @@ import {
 } from "../../components/ui";
 import { RequestTable } from "../../components/usage";
 import { formatCompact, formatDuration, formatNumber } from "../../lib/format";
+import { gatewayQueryKeys, queryErrorMessage } from "../../lib/query";
 import type {
   DashboardData,
   MetricsQuery,
@@ -57,46 +59,22 @@ function snapshotFromDashboard(data: DashboardData): MetricsSnapshot {
   };
 }
 
-export function MetricsPage({
-  data,
-  api,
-  refreshKey,
-}: {
-  data: DashboardData;
-  api: GatewayApi;
-  refreshKey: number;
-}) {
+export function MetricsPage({ data, api }: { data: DashboardData; api: GatewayApi }) {
   const [filters, setFilters] = useState<MetricsQuery>({
     window: "24h",
     limit: 50,
     offset: 0,
   });
-  const [metrics, setMetrics] = useState<MetricsSnapshot>(() => snapshotFromDashboard(data));
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [retryKey, setRetryKey] = useState(0);
-  const reloadToken = `${refreshKey}:${retryKey}`;
-
-  useEffect(() => {
-    void reloadToken;
-    const controller = new AbortController();
-    setLoading(true);
-    setError("");
-    void api
-      .metrics(filters, controller.signal)
-      .then((next) => {
-        if (!controller.signal.aborted) setMetrics(next);
-      })
-      .catch((caught: unknown) => {
-        if (!controller.signal.aborted) {
-          setError(caught instanceof Error ? caught.message : "统计数据加载失败");
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
-  }, [api, filters, reloadToken]);
+  const metricsQuery = useQuery({
+    queryKey: gatewayQueryKeys.metrics(api.baseUrl, filters),
+    queryFn: ({ signal }) => api.metrics(filters, signal),
+    placeholderData: keepPreviousData,
+    refetchInterval: 10000,
+    refetchIntervalInBackground: false,
+  });
+  const metrics: MetricsSnapshot = metricsQuery.data ?? snapshotFromDashboard(data);
+  const loading = metricsQuery.isFetching;
+  const error = metricsQuery.error ? queryErrorMessage(metricsQuery.error, "统计数据加载失败") : "";
 
   const providers = useMemo(
     () =>
@@ -266,7 +244,7 @@ export function MetricsPage({
             <AlertCircle className="size-4 shrink-0" />
             统计加载失败：{error}
           </div>
-          <Button variant="outline" size="sm" onClick={() => setRetryKey((value) => value + 1)}>
+          <Button variant="outline" size="sm" onClick={() => void metricsQuery.refetch()}>
             <RefreshCw className="size-3.5" />
             重试
           </Button>

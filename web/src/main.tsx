@@ -1,5 +1,7 @@
+import { QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
+import { queryClient } from "./lib/query";
 import "./styles.css";
 
 const storedTheme = localStorage.getItem("llm-gateway.theme");
@@ -14,4 +16,8 @@ document.documentElement.classList.toggle("dark", initialTheme === "dark");
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing application root element");
 
-createRoot(root).render(<App />);
+createRoot(root).render(
+  <QueryClientProvider client={queryClient}>
+    <App />
+  </QueryClientProvider>,
+);

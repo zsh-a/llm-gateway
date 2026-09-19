@@ -1,11 +1,14 @@
+import { useMutation } from "@tanstack/react-query";
 import { AlertCircle } from "lucide-react";
 import { type FormEvent, useState } from "react";
 import type { GatewayApi } from "../../api";
 import { Button, ConfirmDialog } from "../../components/ui";
+import { gatewayQueryKeys, queryClient } from "../../lib/query";
 import { cn } from "../../lib/utils";
 import type {
   ApiKeyInput,
   ApiKeyRecord,
+  ApiKeyUpdate,
   ChannelConfig,
   ChannelInput,
   DashboardData,
@@ -34,13 +37,11 @@ import {
 export function ManagementPage({
   data,
   api,
-  onRefresh,
   onNotice,
   onNavigate,
 }: {
   data: DashboardData;
   api: GatewayApi;
-  onRefresh: () => void;
   onNotice: (message: string, tone?: NoticeTone) => void;
   onNavigate: Navigate;
 }) {
@@ -53,6 +54,22 @@ export function ManagementPage({
   const [saving, setSaving] = useState<SavingForm>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const invalidateGateway = (): Promise<void> =>
+    queryClient.invalidateQueries({ queryKey: gatewayQueryKeys.all });
+  const channelMutation = useMutation({
+    mutationFn: (input: ChannelInput) => api.saveChannel(input),
+    onSuccess: invalidateGateway,
+  });
+  const keyMutation = useMutation({
+    mutationFn: ({ id, input }: { id?: string; input: ApiKeyInput | ApiKeyUpdate }) =>
+      id ? api.updateKey(id, input) : api.createKey(input as ApiKeyInput),
+    onSuccess: invalidateGateway,
+  });
+  const removeMutation = useMutation({
+    mutationFn: ({ kind, id }: { kind: "channel" | "key"; id: string }) =>
+      kind === "channel" ? api.deleteChannel(id) : api.revokeKey(id),
+    onSuccess: invalidateGateway,
+  });
   const providerOptions = Array.from(
     new Set([...(data.health.providers ?? []), ...Object.keys(data.auth.providers)]),
   );
@@ -143,10 +160,9 @@ export function ManagementPage({
 
     setSaving("channel");
     try {
-      await api.saveChannel(input);
+      await channelMutation.mutateAsync(input);
       onNotice(editing ? "渠道已更新" : "渠道已保存");
       resetChannel();
-      onRefresh();
     } catch (error) {
       onNotice(error instanceof Error ? error.message : "保存渠道失败", "error");
     } finally {
@@ -188,17 +204,19 @@ export function ManagementPage({
 
     setSaving("key");
     try {
+      const result = await keyMutation.mutateAsync({
+        id: editingKeyId ?? undefined,
+        input: body,
+      });
       if (editingKeyId) {
-        await api.updateKey(editingKeyId, body);
         onNotice("Key 已更新");
       } else {
-        const created = await api.createKey(body);
+        const created = result as { secret: string };
         setSecret(created.secret);
         setCopyState(false);
         onNotice("Key 已创建，请立即保存 Secret");
       }
       resetKey();
-      onRefresh();
     } catch (error) {
       onNotice(error instanceof Error ? error.message : "保存 Key 失败", "error");
     } finally {
@@ -221,9 +239,8 @@ export function ManagementPage({
     const action = `channel-toggle:${item.id}`;
     setPendingAction(action);
     try {
-      await api.saveChannel({ ...item, enabled: item.enabled === false });
+      await channelMutation.mutateAsync({ ...item, enabled: item.enabled === false });
       onNotice(item.enabled === false ? "渠道已启用" : "渠道已停用");
-      onRefresh();
     } catch (error) {
       onNotice(error instanceof Error ? error.message : "更新渠道失败", "error");
     } finally {
@@ -235,9 +252,8 @@ export function ManagementPage({
     const action = `key-toggle:${item.id}`;
     setPendingAction(action);
     try {
-      await api.updateKey(item.id, { enabled: !item.enabled });
+      await keyMutation.mutateAsync({ id: item.id, input: { enabled: !item.enabled } });
       onNotice(item.enabled ? "Key 已停用" : "Key 已启用");
-      onRefresh();
     } catch (error) {
       onNotice(error instanceof Error ? error.message : "更新 Key 失败", "error");
     } finally {
@@ -259,14 +275,12 @@ export function ManagementPage({
     const action = `${current.kind}-remove:${current.item.id}`;
     setPendingAction(action);
     try {
+      await removeMutation.mutateAsync({ kind: current.kind, id: current.item.id });
       if (current.kind === "channel") {
-        await api.deleteChannel(current.item.id);
         onNotice("渠道已删除");
       } else {
-        await api.revokeKey(current.item.id);
         onNotice("Key 已撤销");
       }
-      onRefresh();
       setConfirmation(null);
     } catch (error) {
       onNotice(error instanceof Error ? error.message : "操作失败", "error");

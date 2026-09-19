@@ -1,3 +1,4 @@
+import { useMutation } from "@tanstack/react-query";
 import {
   CloudDownload,
   Eye,
@@ -62,7 +63,43 @@ export function RemoteAuthSyncCard({
   const [showToken, setShowToken] = useState(false);
   const [showPassphrase, setShowPassphrase] = useState(false);
   const [status, setStatus] = useState<RemoteSyncStatus | null>(null);
-  const [busy, setBusy] = useState<"status" | "pull" | null>(null);
+  const statusMutation = useMutation({
+    mutationFn: remoteSyncStatus,
+    onSuccess: (next) => {
+      setStatus(next);
+      onNotice(
+        next.exists ? `远端版本 ${next.revision}` : "远端保险库尚不存在",
+        next.exists ? "success" : "warning",
+      );
+    },
+    onError: (error: unknown) => onNotice(errorMessage(error), "error"),
+  });
+  const pullMutation = useMutation({
+    mutationFn: ({
+      settings,
+      passphrase,
+      force,
+    }: {
+      settings: RemoteSyncSettings;
+      passphrase: string;
+      force: boolean;
+    }) => remoteSyncPull(settings, passphrase, force),
+    onSuccess: (result) => {
+      setStatus({
+        vaultId: result.vaultId,
+        exists: true,
+        revision: result.revision,
+        updatedAt: result.updatedAt,
+        localRevision: result.revision,
+        localProviders: result.providers,
+      });
+      setPassphrase("");
+      onNotice(`已拉取并应用 ${result.providers.join("、")} 认证`);
+      onRefresh?.();
+    },
+    onError: (error: unknown) => onNotice(errorMessage(error), "error"),
+  });
+  const busy = statusMutation.isPending ? "status" : pullMutation.isPending ? "pull" : null;
 
   const updateDraft = (field: keyof RemoteSyncSettings, value: string): void => {
     setDraft((current) => ({ ...current, [field]: value }));
@@ -93,19 +130,7 @@ export function RemoteAuthSyncCard({
   const checkStatus = async (): Promise<void> => {
     const settings = normalizedSettings();
     if (!settings) return;
-    setBusy("status");
-    try {
-      const next = await remoteSyncStatus(settings);
-      setStatus(next);
-      onNotice(
-        next.exists ? `远端版本 ${next.revision}` : "远端保险库尚不存在",
-        next.exists ? "success" : "warning",
-      );
-    } catch (error) {
-      onNotice(errorMessage(error), "error");
-    } finally {
-      setBusy(null);
-    }
+    statusMutation.mutate(settings);
   };
 
   const pullAuth = async (): Promise<void> => {
@@ -115,25 +140,7 @@ export function RemoteAuthSyncCard({
       onNotice("同步加密密码至少需要 8 个字符", "error");
       return;
     }
-    setBusy("pull");
-    try {
-      const result = await remoteSyncPull(settings, passphrase, force);
-      setStatus({
-        vaultId: result.vaultId,
-        exists: true,
-        revision: result.revision,
-        updatedAt: result.updatedAt,
-        localRevision: result.revision,
-        localProviders: result.providers,
-      });
-      setPassphrase("");
-      onNotice(`已拉取并应用 ${result.providers.join("、")} 认证`);
-      onRefresh?.();
-    } catch (error) {
-      onNotice(errorMessage(error), "error");
-    } finally {
-      setBusy(null);
-    }
+    pullMutation.mutate({ settings, passphrase, force });
   };
 
   return (

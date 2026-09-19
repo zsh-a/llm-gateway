@@ -2,11 +2,6 @@ export type PageKey = "overview" | "playground" | "metrics" | "management" | "se
 
 export type NoticeTone = "success" | "error" | "warning" | "info";
 
-export interface Notice {
-  message: string;
-  tone: NoticeTone;
-}
-
 export interface NavigateOptions {
   modelId?: string;
   replace?: boolean;
