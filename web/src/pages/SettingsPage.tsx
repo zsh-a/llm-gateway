@@ -1,7 +1,6 @@
 import { Eye, EyeOff, KeyRound, Moon, Save, Server, Settings2, Sun } from "lucide-react";
 import { type FormEvent, useState } from "react";
-import type { Credentials } from "../api";
-import { saveCredentials } from "../api";
+import { type Credentials, gatewayBaseUrl, saveCredentials } from "../api";
 import { Field, InfoRow } from "../components/common";
 import {
   Button,
@@ -180,14 +179,26 @@ export function SettingsPage({
             <CardDescription>当前控制台和 API 地址</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 text-xs">
-            <InfoRow label="控制台" value={`${location.origin}/ui`} copyable />
             <InfoRow
-              label="Chat Completions"
-              value={`${location.origin}/v1/chat/completions`}
+              label="Gateway"
+              value={`${gatewayBaseUrl || location.origin}/health`}
               copyable
             />
-            <InfoRow label="Responses" value={`${location.origin}/v1/responses`} copyable />
-            <InfoRow label="Models" value={`${location.origin}/v1/models`} copyable />
+            <InfoRow
+              label="Chat Completions"
+              value={`${gatewayBaseUrl || location.origin}/v1/chat/completions`}
+              copyable
+            />
+            <InfoRow
+              label="Responses"
+              value={`${gatewayBaseUrl || location.origin}/v1/responses`}
+              copyable
+            />
+            <InfoRow
+              label="Models"
+              value={`${gatewayBaseUrl || location.origin}/v1/models`}
+              copyable
+            />
           </CardContent>
           <CardFooter className="border-t border-border/60 pt-4 text-[11px] text-muted-foreground">
             <Server className="mr-1.5 size-3.5" />

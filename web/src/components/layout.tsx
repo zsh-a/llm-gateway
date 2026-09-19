@@ -91,11 +91,12 @@ export function Sidebar({
         <div className="rounded-xl border border-border/70 bg-muted/20 p-3">
           <div className="flex items-center gap-2 text-xs font-medium">
             <span className="size-2 animate-pulse rounded-full bg-emerald-400" />
-            Perry Runtime
+            Rust Gateway
           </div>
           <div className="mt-2 text-[11px] leading-5 text-muted-foreground">
-            Web 资源已内嵌
-            <br />在 Gateway 二进制中。
+            Tokio + Axum 服务已启动
+            <br />
+            控制台由 Tauri 2 承载。
           </div>
         </div>
       </div>

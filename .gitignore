@@ -1,8 +1,8 @@
 dist/
 .build/
-.generated/
 node_modules/
-.test-dist/
-cookie.txt
 .env
 .runtime/
+.DS_Store
+src-tauri/target/
+src-tauri/gen/

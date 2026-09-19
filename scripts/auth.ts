@@ -2,17 +2,19 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 
 import {
+  asRecord,
   credentialHeaders,
   AuthStore,
-  type AuthHeaders
-} from "../src/auth/auth-store.js";
-import { ChannelStore } from "../src/routing/channels.js";
-import { loadConfig } from "../src/app/config.js";
-import { asRecord } from "../src/domain/json.js";
-import { getProvider, getProviders, type ProviderAdapter } from "../src/providers/index.js";
+  channelAuthRef,
+  defaultCaCertFile,
+  getProvider,
+  getProviders,
+  loadAuthConfig,
+  type AuthHeaders,
+  type AuthProvider
+} from "./auth-support.js";
 
 interface FlowRequest {
   method?: unknown;
@@ -101,7 +103,7 @@ function bootstrapConfig(): BootstrapConfig {
     ignoreCertificateErrors: booleanEnv("CLIENT_IGNORE_CERT_ERRORS", false),
     caCertFile: env(
       "MITM_CA_CERT",
-      homedir() + "/.mitmproxy/mitmproxy-ca-cert.pem"
+      defaultCaCertFile()
     ),
     proxyBypass: env("CLIENT_PROXY_BYPASS", "<local>;127.0.0.1;localhost"),
     timeoutMs: positiveInt("AUTH_TIMEOUT_MS", 120000)
@@ -323,7 +325,7 @@ function capturedHeaders(
 
 async function findAuth(
   config: BootstrapConfig,
-  provider: ProviderAdapter
+  provider: AuthProvider
 ): Promise<AuthHeaders | null> {
   const response = await fetch(config.mitmUrl, {
     headers: { Authorization: config.mitmAuth }
@@ -402,7 +404,7 @@ function clientEnvironment(config: BootstrapConfig): NodeJS.ProcessEnv {
   return environment;
 }
 
-function resolveClientBinary(provider: ProviderAdapter): string {
+function resolveClientBinary(provider: AuthProvider): string {
   const configured = process.env.CLIENT_BIN?.trim();
   if (configured) {
     if (configured.includes("/") && !existsSync(configured)) {
@@ -429,7 +431,7 @@ function resolveClientBinary(provider: ProviderAdapter): string {
 
 async function captureProvider(
   config: BootstrapConfig,
-  provider: ProviderAdapter,
+  provider: AuthProvider,
   noClient: boolean
 ): Promise<AuthHeaders> {
   let client: ManagedProcess | null = null;
@@ -490,10 +492,9 @@ async function main(): Promise<void> {
 
   const options = parseOptions(args);
   const config = bootstrapConfig();
-  const gatewayConfig = loadConfig();
+  const gatewayConfig = loadAuthConfig();
   const store = new AuthStore(gatewayConfig.authCacheDir);
-  const channels = new ChannelStore(gatewayConfig.channelsFile);
-  const providers: ProviderAdapter[] = [];
+  const providers: AuthProvider[] = [];
   for (const id of options.providerIds) {
     const provider = getProvider(id);
     if (!provider) throw new Error("未知 Provider: " + id);
@@ -501,18 +502,12 @@ async function main(): Promise<void> {
   }
 
   if (options.channelId) {
-    const channel = channels.list().find((item) => (
-      item.id === options.channelId
-    ));
-    if (!channel) throw new Error("未知 Channel: " + options.channelId);
-    if (channel.providerId !== providers[0].id) {
-      throw new Error(
-        "Channel " + options.channelId + " 不属于 Provider " + providers[0].id
-      );
-    }
+    channelAuthRef(gatewayConfig.channelsFile, options.channelId, providers[0].id);
   }
 
-  const authRef = options.channelId || "";
+  const authRef = options.channelId
+    ? channelAuthRef(gatewayConfig.channelsFile, options.channelId, providers[0].id)
+    : "";
   const pendingProviders = providers.filter((provider) => (
     options.force || !store.get(authRef || provider.id)
   ));

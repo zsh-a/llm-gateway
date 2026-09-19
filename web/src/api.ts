@@ -22,6 +22,13 @@ export interface Credentials {
   adminKey: string;
 }
 
+// Browser development stays same-origin; Tauri builds inject the local Axum address.
+export const gatewayBaseUrl = (import.meta.env.VITE_GATEWAY_BASE_URL ?? "").replace(/\/+$/, "");
+
+function gatewayUrl(path: string): string {
+  return `${gatewayBaseUrl}${path}`;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -91,7 +98,7 @@ export class GatewayApi {
     }
     if (init.body !== undefined) headers.set("Content-Type", "application/json");
 
-    const response = await fetch(path, { ...init, headers });
+    const response = await fetch(gatewayUrl(path), { ...init, headers });
     const raw = await response.text();
     let body: Record<string, unknown> = {};
     try {
@@ -243,7 +250,7 @@ export class GatewayApi {
       "Content-Type": "application/json",
     });
     if (this.credentials.apiKey) headers.set("Authorization", `Bearer ${this.credentials.apiKey}`);
-    const response = await fetch("/v1/chat/completions", {
+    const response = await fetch(gatewayUrl("/v1/chat/completions"), {
       method: "POST",
       headers,
       body: this.chatBody(model, prompt, effort, true),
