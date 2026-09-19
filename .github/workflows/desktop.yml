@@ -158,11 +158,12 @@ jobs:
         run: |
           set -euo pipefail
 
+          version="${GITHUB_REF_NAME#v}"
           mapfile -t assets < <(
             find release-assets -type f \( \
-              -name '*.dmg' -o \
-              -name '*.exe' -o \
-              -name '*.msi' \
+              -name "*_${version}_*.dmg" -o \
+              -name "*_${version}_*.exe" -o \
+              -name "*_${version}_*.msi" \
             \) -print
           )
 
