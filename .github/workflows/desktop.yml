@@ -60,8 +60,11 @@ jobs:
       - name: Check frontend
         run: npm run check:frontend
 
+      - name: Test frontend
+        run: npm run test:frontend
+
       - name: Typecheck and build frontend
-        run: npm run build
+        run: npm run typecheck && npm run build
 
       - name: Test Rust
         run: npm test

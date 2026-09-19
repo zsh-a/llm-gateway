@@ -1,11 +1,11 @@
 import type { LucideIcon } from "lucide-react";
-import { BarChart3, Check, CircleDashed, Copy, Database } from "lucide-react";
+import { AlertCircle, BarChart3, Check, CircleDashed, Copy, Database } from "lucide-react";
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { formatCompact, formatNumber, formatTime, toFiniteNumber } from "../lib/format";
 import { cn } from "../lib/utils";
-import type { MetricGroup, TimeseriesPoint } from "../types";
-import { Badge, Card, CardContent, Progress } from "./ui";
+import type { MetricGroup, ResourceState, TimeseriesPoint } from "../types";
+import { Badge, Card, CardContent, Progress, Spinner } from "./ui";
 
 export function statusVariant(
   status: string | undefined,
@@ -42,33 +42,6 @@ export function StatusBadge({ status, label }: { status: string | undefined; lab
   );
 }
 
-export function SectionHeading({
-  eyebrow,
-  title,
-  description,
-  action,
-}: {
-  eyebrow?: string;
-  title: string;
-  description?: string;
-  action?: ReactNode;
-}) {
-  return (
-    <div className="mb-4 flex items-end justify-between gap-4">
-      <div>
-        {eyebrow && (
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">
-            {eyebrow}
-          </div>
-        )}
-        <h2 className="text-base font-semibold tracking-tight text-foreground">{title}</h2>
-        {description && <p className="mt-1 text-xs text-muted-foreground">{description}</p>}
-      </div>
-      {action}
-    </div>
-  );
-}
-
 export function EmptyState({
   icon: Icon = CircleDashed,
   title = "暂无数据",
@@ -82,7 +55,7 @@ export function EmptyState({
     <div
       className={cn(
         "flex min-h-36 flex-col items-center justify-center rounded-xl",
-        "border border-dashed border-border/80 bg-muted/15 px-5 text-center",
+        "px-5 text-center",
       )}
     >
       <div className="mb-3 flex size-10 items-center justify-center rounded-xl bg-muted text-muted-foreground">
@@ -109,14 +82,13 @@ export function StatCard({
 }) {
   const tones = {
     primary: "bg-primary/12 text-primary",
-    cyan: "bg-cyan-400/12 text-cyan-300",
-    green: "bg-emerald-400/12 text-emerald-300",
-    amber: "bg-amber-400/12 text-amber-300",
+    cyan: "bg-cyan-400/12 text-info",
+    green: "bg-emerald-400/12 text-success",
+    amber: "bg-amber-400/12 text-warning",
   };
   return (
-    <Card className="overflow-hidden border-border/70 bg-card/85 transition-colors hover:border-primary/25">
+    <Card>
       <CardContent className="relative p-5">
-        <div className="absolute -right-7 -top-7 size-24 rounded-full bg-primary/5 blur-2xl" />
         <div className="relative flex items-start justify-between gap-3">
           <div>
             <div className="text-xs text-muted-foreground">{label}</div>
@@ -132,42 +104,10 @@ export function StatCard({
   );
 }
 
-export function Sparkline({
-  values,
-  color = "var(--chart-1)",
-}: {
-  values: number[];
-  color?: string;
-}) {
-  if (values.length < 2) return <div className="h-8 w-24 rounded-md bg-muted/60" />;
-  const max = Math.max(...values, 1);
-  const points = values
-    .map((value, index) => `${(index / (values.length - 1)) * 100},${28 - (value / max) * 24}`)
-    .join(" ");
-  return (
-    <svg
-      viewBox="0 0 100 30"
-      className="h-8 w-24 overflow-visible"
-      preserveAspectRatio="none"
-      aria-hidden="true"
-    >
-      <polyline
-        points={points}
-        fill="none"
-        stroke={color}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="2"
-        vectorEffect="non-scaling-stroke"
-      />
-    </svg>
-  );
-}
-
 export function MetricChart({ points }: { points: TimeseriesPoint[] }) {
   const width = 820;
   const height = 230;
-  const padding = { top: 18, right: 20, bottom: 26, left: 42 };
+  const padding = { top: 18, right: 56, bottom: 26, left: 48 };
   const requests = points.map((point) => toFiniteNumber(point.requests));
   const tokens = points.map((point) => toFiniteNumber(point.tokens?.totalTokens));
   const maxRequest = Math.max(...requests, 1);
@@ -202,7 +142,7 @@ export function MetricChart({ points }: { points: TimeseriesPoint[] }) {
 
   return (
     <div className="space-y-3">
-      <div className="h-64 overflow-hidden rounded-xl border border-border/70 bg-background/50 p-2">
+      <div className="h-56 min-w-0">
         <svg
           viewBox={`0 0 ${width} ${height}`}
           className="h-full w-full"
@@ -226,7 +166,7 @@ export function MetricChart({ points }: { points: TimeseriesPoint[] }) {
                   x={padding.left - 8}
                   y={lineY + 3}
                   fill="var(--muted-foreground)"
-                  fontSize="9"
+                  fontSize="11"
                   textAnchor="end"
                 >
                   {formatCompact(maxRequest * (1 - step / 3))}
@@ -235,7 +175,7 @@ export function MetricChart({ points }: { points: TimeseriesPoint[] }) {
                   x={width - padding.right + 8}
                   y={lineY + 3}
                   fill="var(--muted-foreground)"
-                  fontSize="9"
+                  fontSize="11"
                 >
                   {formatCompact(maxToken * (1 - step / 3))}
                 </text>
@@ -302,7 +242,7 @@ export function MetricChart({ points }: { points: TimeseriesPoint[] }) {
           <span className="size-2 rounded-full bg-chart-2" />
           Token <span className="font-mono text-foreground">{formatCompact(lastToken)}</span>
         </span>
-        <span className="ml-auto text-[10px]">左右刻度分别归一化</span>
+        <span className="ml-auto text-xs">左轴：请求 · 右轴：Token</span>
       </div>
     </div>
   );
@@ -333,18 +273,57 @@ export function Field({
   label,
   htmlFor,
   children,
+  error,
 }: {
   label: string;
   htmlFor: string;
   children: ReactNode;
+  error?: string;
 }) {
   return (
     <div className="block space-y-2">
-      <label htmlFor={htmlFor} className="block text-xs font-medium text-foreground">
+      <label htmlFor={htmlFor} className="block text-sm font-medium text-foreground">
         {label}
       </label>
       {children}
+      {error && (
+        <p id={`${htmlFor}-error`} role="alert" className="text-xs text-destructive">
+          {error}
+        </p>
+      )}
     </div>
+  );
+}
+
+export function ResourceContent({
+  state,
+  children,
+  label = "数据",
+}: {
+  state: ResourceState;
+  children: ReactNode;
+  label?: string;
+}) {
+  if (!state.hasData) {
+    return (
+      <div
+        role={state.error ? "alert" : "status"}
+        className="flex min-h-32 items-center justify-center gap-2 px-4 py-6 text-sm text-muted-foreground"
+      >
+        {state.error ? <AlertCircle className="size-4 shrink-0 text-destructive" /> : <Spinner />}
+        <span>{state.error ? `${label}加载失败：${state.error}` : `正在加载${label}…`}</span>
+      </div>
+    );
+  }
+  return (
+    <>
+      {state.error && (
+        <div role="alert" className="mb-4 rounded-lg bg-warning/10 px-3 py-2 text-sm text-warning">
+          更新失败，当前显示上次的{label}。{state.error}
+        </div>
+      )}
+      {children}
+    </>
   );
 }
 
@@ -374,47 +353,43 @@ export function InfoRow({
 }
 
 export function CopyButton({ value, label = "复制" }: { value: string; label?: string }) {
-  const [copied, setCopied] = useState(false);
-  const [copyError, setCopyError] = useState(false);
-
+  const [status, setStatus] = useState<"idle" | "copied" | "error">("idle");
+  useEffect(() => {
+    if (status === "idle") return;
+    const timer = window.setTimeout(() => setStatus("idle"), 1600);
+    return () => window.clearTimeout(timer);
+  }, [status]);
   const copy = async (): Promise<void> => {
-    if (!navigator.clipboard || !value) {
-      setCopyError(true);
-      window.setTimeout(() => setCopyError(false), 1600);
-      return;
-    }
     try {
+      if (!navigator.clipboard || !value) throw new Error("Clipboard unavailable");
       await navigator.clipboard.writeText(value);
-      setCopied(true);
-      setCopyError(false);
-      window.setTimeout(() => setCopied(false), 1600);
+      setStatus("copied");
     } catch {
-      setCopyError(true);
-      window.setTimeout(() => setCopyError(false), 1600);
+      setStatus("error");
     }
   };
-
+  const feedback = status === "error" ? "复制失败" : status === "copied" ? "已复制" : label;
   return (
     <button
       type="button"
       onClick={() => void copy()}
       className={cn(
         "inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1",
-        "text-[11px] text-muted-foreground transition-colors",
+        "text-xs text-muted-foreground transition-colors",
         "hover:bg-muted hover:text-foreground focus-visible:outline-none",
         "focus-visible:ring-2 focus-visible:ring-ring",
       )}
-      aria-label={copyError ? "复制失败" : copied ? "已复制" : label}
-      title={copyError ? "复制失败，请手动复制" : copied ? "已复制" : label}
+      aria-label={feedback}
+      title={status === "error" ? "复制失败，请手动复制" : feedback}
     >
-      {copyError ? (
-        <Copy className="size-3 text-red-300" />
-      ) : copied ? (
+      {status === "copied" ? (
         <Check className="size-3" />
       ) : (
-        <Copy className="size-3" />
+        <Copy className={cn("size-3", status === "error" && "text-destructive")} />
       )}
-      <span className="hidden sm:inline">{copyError ? "复制失败" : copied ? "已复制" : label}</span>
+      <span className="hidden sm:inline" aria-live="polite">
+        {feedback}
+      </span>
     </button>
   );
 }

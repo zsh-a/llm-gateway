@@ -19,8 +19,9 @@ Tauri 2
 ```text
 src-tauri/src/gateway/ Rust 网关 HTTP、协议、认证、指标和模型目录
 src-tauri/src/desktop.rs Tauri 启动与系统托盘
-web/src/               React + Vite + Tailwind 控制台、shadcn 风格组件和 TanStack Query 状态管理
+web/src/               React + Vite + Tailwind 控制台、Base UI 交互组件和 TanStack Query 状态管理
 web/src/features/      按功能组织的页面与业务组件
+web/tests/             表单、键盘交互、数据查询及流式响应回归测试
 cloudflare/sync-worker/ Cloudflare 加密认证同步 Worker
 scripts/auth.ts        一次性认证捕获工具
 scripts/auth-support.ts 认证缓存、Provider 捕获规则和配置读取
@@ -34,6 +35,7 @@ src-tauri/icons/       应用与托盘图标
 ```bash
 npm install
 npm run typecheck
+npm run test:frontend
 npm test
 npm run build
 npm run desktop
@@ -239,6 +241,8 @@ API Key 只在创建响应中返回一次完整 secret，SQLite 只保存 hash �
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 npm run typecheck
+npm run check:frontend
+npm run test:frontend
 npm test
 npm run build:web:tauri
 npm run package:tauri

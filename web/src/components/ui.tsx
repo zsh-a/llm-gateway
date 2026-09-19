@@ -1,4 +1,7 @@
+import { AlertDialog } from "@base-ui/react/alert-dialog";
+import { Dialog } from "@base-ui/react/dialog";
 import { cva, type VariantProps } from "class-variance-authority";
+import { Eye, EyeOff, X } from "lucide-react";
 import * as React from "react";
 import { cn } from "../lib/utils";
 
@@ -55,11 +58,7 @@ export const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDi
   ({ className, ...props }, ref) => (
     <div
       ref={ref}
-      className={cn(
-        "rounded-2xl border border-border/70 bg-card/90 text-card-foreground",
-        "shadow-sm shadow-slate-950/5",
-        className,
-      )}
+      className={cn("rounded-xl border border-border bg-card text-card-foreground", className)}
       {...props}
     />
   ),
@@ -78,7 +77,7 @@ export function CardDescription({
   className,
   ...props
 }: React.HTMLAttributes<HTMLParagraphElement>) {
-  return <p className={cn("text-xs leading-5 text-muted-foreground", className)} {...props} />;
+  return <p className={cn("text-sm leading-6 text-muted-foreground", className)} {...props} />;
 }
 
 export function CardContent({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
@@ -95,11 +94,11 @@ const badgeVariants = cva(
     variants: {
       variant: {
         default: "border-primary/25 bg-primary/15 text-primary",
-        success: "border-emerald-400/25 bg-emerald-400/10 text-emerald-400",
-        warning: "border-amber-400/25 bg-amber-400/10 text-amber-300",
-        danger: "border-red-400/25 bg-red-400/10 text-red-300",
+        success: "border-success/20 bg-success/8 text-success",
+        warning: "border-warning/20 bg-warning/8 text-warning",
+        danger: "border-destructive/20 bg-destructive/8 text-destructive",
         muted: "border-border bg-muted text-muted-foreground",
-        info: "border-sky-400/25 bg-sky-400/10 text-sky-300",
+        info: "border-info/20 bg-info/8 text-info",
       },
     },
     defaultVariants: { variant: "default" },
@@ -196,14 +195,6 @@ export function Spinner({ className }: { className?: string }) {
   );
 }
 
-export function Kbd({ children }: { children: React.ReactNode }) {
-  return (
-    <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-      {children}
-    </kbd>
-  );
-}
-
 export function ConfirmDialog({
   open,
   title,
@@ -223,59 +214,123 @@ export function ConfirmDialog({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  const confirmButtonRef = React.useRef<HTMLButtonElement>(null);
-
-  React.useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape" && !loading) onCancel();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    confirmButtonRef.current?.focus();
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [loading, onCancel, open]);
-
-  if (!open) return null;
+  const cancelRef = React.useRef<HTMLButtonElement>(null);
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm"
-      role="presentation"
+    <AlertDialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!next && !loading) onCancel();
+      }}
     >
-      <button
-        type="button"
-        aria-label="关闭确认对话框"
-        className="absolute inset-0 cursor-default"
-        onClick={onCancel}
-        disabled={loading}
-      />
-      <Card
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="confirm-dialog-title"
-        aria-describedby="confirm-dialog-description"
-        className="relative w-full max-w-md border-border/80 bg-card shadow-2xl"
-      >
-        <CardHeader>
-          <CardTitle id="confirm-dialog-title" className="text-base">
-            {title}
-          </CardTitle>
-          <CardDescription id="confirm-dialog-description">{description}</CardDescription>
-        </CardHeader>
-        <CardFooter className="justify-end gap-2">
-          <Button variant="ghost" onClick={onCancel} disabled={loading}>
-            取消
-          </Button>
-          <Button
-            ref={confirmButtonRef}
-            variant={destructive ? "destructive" : "default"}
-            onClick={onConfirm}
-            disabled={loading}
-          >
-            {loading ? <Spinner className="size-3.5" /> : null}
-            {loading ? "处理中..." : confirmLabel}
-          </Button>
-        </CardFooter>
-      </Card>
-    </div>
+      <AlertDialog.Portal>
+        <AlertDialog.Backdrop className="fixed inset-0 z-50 bg-black/35 data-ending-style:opacity-0 data-starting-style:opacity-0 transition-opacity" />
+        <AlertDialog.Popup
+          initialFocus={cancelRef}
+          className="fixed left-1/2 top-1/2 z-50 w-[calc(100%_-_2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl border bg-popover p-6 text-popover-foreground shadow-xl"
+        >
+          <AlertDialog.Title className="text-base font-semibold">{title}</AlertDialog.Title>
+          <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">
+            {description}
+          </AlertDialog.Description>
+          <div className="mt-6 flex justify-end gap-2">
+            <Button ref={cancelRef} variant="outline" onClick={onCancel} disabled={loading}>
+              取消
+            </Button>
+            <Button
+              variant={destructive ? "destructive" : "default"}
+              onClick={onConfirm}
+              disabled={loading}
+            >
+              {loading && <Spinner />}
+              {loading ? "处理中…" : confirmLabel}
+            </Button>
+          </div>
+        </AlertDialog.Popup>
+      </AlertDialog.Portal>
+    </AlertDialog.Root>
   );
 }
+
+export function Sheet({
+  open,
+  onClose,
+  title,
+  description,
+  children,
+  className,
+  dismissible = true,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  description?: string;
+  children: React.ReactNode;
+  className?: string;
+  dismissible?: boolean;
+}) {
+  return (
+    <Dialog.Root
+      open={open}
+      disablePointerDismissal={!dismissible}
+      onOpenChange={(next) => {
+        if (!next && dismissible) onClose();
+      }}
+    >
+      <Dialog.Portal>
+        <Dialog.Backdrop className="fixed inset-0 z-40 bg-black/30 transition-opacity data-ending-style:opacity-0 data-starting-style:opacity-0" />
+        <Dialog.Popup
+          className={cn(
+            "fixed inset-y-0 right-0 z-40 flex w-full max-w-xl flex-col border-l bg-background text-foreground shadow-xl transition-transform data-ending-style:translate-x-full data-starting-style:translate-x-full",
+            className,
+          )}
+        >
+          <div className="flex shrink-0 items-start justify-between gap-4 border-b bg-card px-6 py-5">
+            <div>
+              <Dialog.Title className="text-lg font-semibold">{title}</Dialog.Title>
+              {description && (
+                <Dialog.Description className="mt-1 text-sm text-muted-foreground">
+                  {description}
+                </Dialog.Description>
+              )}
+            </div>
+            {dismissible && (
+              <Dialog.Close render={<Button variant="ghost" size="icon" aria-label="关闭面板" />}>
+                <X className="size-4" />
+              </Dialog.Close>
+            )}
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto p-6 scrollbar-thin">{children}</div>
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+export const PasswordInput = React.forwardRef<
+  HTMLInputElement,
+  React.InputHTMLAttributes<HTMLInputElement>
+>(({ className, ...props }, ref) => {
+  const [visible, setVisible] = React.useState(false);
+  return (
+    <div className="relative">
+      <Input
+        {...props}
+        ref={ref}
+        type={visible ? "text" : "password"}
+        className={cn("pr-10", className)}
+      />
+      <Button
+        variant="ghost"
+        size="icon"
+        className="absolute right-1 top-1 size-8"
+        disabled={props.disabled}
+        aria-label={visible ? "隐藏凭证" : "显示凭证"}
+        aria-pressed={visible}
+        onClick={() => setVisible((value) => !value)}
+      >
+        {visible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+      </Button>
+    </div>
+  );
+});
+PasswordInput.displayName = "PasswordInput";

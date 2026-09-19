@@ -1,6 +1,6 @@
 {
   "name": "llm-gateway",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A Rust/Tauri OpenAI-compatible gateway with a React control panel",
   "type": "module",
   "scripts": {
@@ -19,11 +19,12 @@
     "sync:pull": "npm run sync -- pull",
     "sync:status": "npm run sync -- status",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:frontend": "vitest run",
     "typecheck": "tsc -p tsconfig.auth.json --noEmit && tsc -p web/tsconfig.json --noEmit",
-    "format": "biome format --write web/src",
-    "format:check": "biome format web/src",
-    "lint": "biome lint web/src",
-    "check:frontend": "biome check web/src"
+    "format": "biome format --write web/src web/tests vitest.config.ts",
+    "format:check": "biome format web/src web/tests vitest.config.ts",
+    "lint": "biome lint web/src web/tests vitest.config.ts",
+    "check:frontend": "biome check web/src web/tests vitest.config.ts"
   },
   "engines": {
     "node": ">=20.19.0"
@@ -32,12 +33,15 @@
     "@biomejs/biome": "^2.5.14",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.0.0",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
     "@types/node": "^22.15.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "jsdom": "^26.1.0",
     "lucide-react": "^1.46.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
@@ -46,11 +50,18 @@
     "tailwindcss": "^4.3.3",
     "tw-animate-css": "^1.4.0",
     "typescript": "^5.8.3",
-    "vite": "^8.3.0"
+    "vite": "^8.3.0",
+    "vitest": "^4.1.0"
   },
   "dependencies": {
+    "@base-ui/react": "^1.8.0",
+    "@hookform/resolvers": "^5.9.1",
     "@tanstack/react-query": "^5.103.1",
     "@tauri-apps/api": "^2.11.1",
-    "sonner": "^2.0.8"
+    "eventsource-parser": "^4.1.1",
+    "react-hook-form": "^7.88.0",
+    "sonner": "^2.0.8",
+    "streamdown": "^2.6.0",
+    "zod": "^3.25.76"
   }
 }

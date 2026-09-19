@@ -1,18 +1,34 @@
-import { useQuery } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useIsFetching } from "@tanstack/react-query";
+import { AlertCircle } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { type Credentials, GatewayApi, gatewayBaseUrl, loadCredentials } from "./api";
 import { DashboardLayout } from "./components/layout";
-import { ManagementPage } from "./features/management/ManagementPage";
-import { MetricsPage } from "./features/metrics/MetricsPage";
+import { Button, Spinner } from "./components/ui";
 import { OverviewPage } from "./features/overview/OverviewPage";
-import { PlaygroundPage } from "./features/playground/PlaygroundPage";
-import { SettingsPage } from "./features/settings/SettingsPage";
-import { emptyDashboard, resolveLocation } from "./lib/constants";
-import { gatewayQueryKeys, queryClient, queryErrorMessage } from "./lib/query";
+import { resolveLocation } from "./lib/constants";
+import { useGatewayDashboard } from "./lib/gateway-queries";
+import { gatewayQueryKeys, queryClient } from "./lib/query";
 import { isTauriRuntime } from "./remote-sync";
 import { getServiceSettings, serviceBaseUrl } from "./service-settings";
-import type { DashboardData, Navigate, NoticeTone } from "./types";
+import type { Navigate, NoticeTone, ThemePreference } from "./types";
+
+const ManagementPage = lazy(() =>
+  import("./features/management/ManagementPage").then((module) => ({
+    default: module.ManagementPage,
+  })),
+);
+const MetricsPage = lazy(() =>
+  import("./features/metrics/MetricsPage").then((module) => ({ default: module.MetricsPage })),
+);
+const PlaygroundPage = lazy(() =>
+  import("./features/playground/PlaygroundPage").then((module) => ({
+    default: module.PlaygroundPage,
+  })),
+);
+const SettingsPage = lazy(() =>
+  import("./features/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })),
+);
 
 export function App() {
   const tauriRuntime = isTauriRuntime();
@@ -21,20 +37,17 @@ export function App() {
   const [credentials, setCredentials] = useState(loadCredentials);
   const [gatewayUrl, setGatewayUrl] = useState(gatewayBaseUrl);
   const [serviceReady, setServiceReady] = useState(!tauriRuntime);
-  const [theme, setTheme] = useState<"light" | "dark">(() =>
-    document.documentElement.classList.contains("dark") ? "dark" : "light",
-  );
-  const api = useMemo(() => new GatewayApi(credentials, gatewayUrl), [credentials, gatewayUrl]);
-  const dashboardQuery = useQuery({
-    queryKey: gatewayQueryKeys.dashboard(gatewayUrl),
-    queryFn: ({ signal }) => api.dashboard(signal),
-    enabled: serviceReady,
-    refetchInterval: serviceReady ? 10000 : false,
-    refetchIntervalInBackground: false,
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => {
+    const saved = localStorage.getItem("llm-gateway.theme");
+    return saved === "light" || saved === "dark" ? saved : "system";
   });
-  const data: DashboardData = dashboardQuery.data ?? emptyDashboard;
-  const loading = dashboardQuery.isPending;
-  const lastUpdated = dashboardQuery.dataUpdatedAt || null;
+  const [systemDark, setSystemDark] = useState(
+    () => window.matchMedia("(prefers-color-scheme: dark)").matches,
+  );
+  const theme = themePreference === "system" ? (systemDark ? "dark" : "light") : themePreference;
+  const api = useMemo(() => new GatewayApi(credentials, gatewayUrl), [credentials, gatewayUrl]);
+  const { data, healthError } = useGatewayDashboard(api, serviceReady, location.page);
+  const fetching = useIsFetching({ queryKey: gatewayQueryKeys.all });
 
   const showNotice = useCallback((message: string, tone: NoticeTone = "success"): void => {
     const options = { closeButton: true, duration: tone === "error" ? 10000 : 4000 };
@@ -45,8 +58,9 @@ export function App() {
   }, []);
 
   const updateCredentials = useCallback((next: Credentials): void => {
-    setCredentials(next);
+    void queryClient.cancelQueries({ queryKey: gatewayQueryKeys.all });
     queryClient.removeQueries({ queryKey: gatewayQueryKeys.all });
+    setCredentials(next);
   }, []);
 
   useEffect(() => {
@@ -54,13 +68,14 @@ export function App() {
     let active = true;
     void getServiceSettings()
       .then((settings) => {
-        if (!active) return;
-        setGatewayUrl(serviceBaseUrl(settings));
-        setServiceReady(true);
+        if (active) {
+          setGatewayUrl(serviceBaseUrl(settings));
+          setServiceReady(true);
+        }
       })
       .catch((error: unknown) => {
         if (active) {
-          showNotice(error instanceof Error ? error.message : "读取服务监听配置失败", "error");
+          showNotice(error instanceof Error ? error.message : "读取服务配置失败", "error");
           setServiceReady(true);
         }
       });
@@ -69,95 +84,114 @@ export function App() {
     };
   }, [showNotice, tauriRuntime]);
 
-  useEffect(() => {
-    if (!dashboardQuery.error) return;
-    showNotice(queryErrorMessage(dashboardQuery.error, "Gateway 连接失败"), "error");
-  }, [dashboardQuery.error, showNotice]);
-
-  const navigate = useCallback<Navigate>((next, options = {}): void => {
+  const navigate = useCallback<Navigate>((next, options = {}) => {
     const params = new URLSearchParams();
     if (next === "playground" && options.modelId) params.set("model", options.modelId);
-    const hash = `#${next}${params.toString() ? `?${params.toString()}` : ""}`;
-    if (window.location.hash !== hash) {
-      const method = options.replace ? "replaceState" : "pushState";
-      window.history[method](null, "", hash);
-    }
+    const hash = `#${next}${params.toString() ? `?${params}` : ""}`;
+    if (window.location.hash !== hash)
+      window.history[options.replace ? "replaceState" : "pushState"](null, "", hash);
     setLocation({ page: next, modelId: options.modelId });
     setMobileNav(false);
   }, []);
 
   const refresh = useCallback(
-    () => dashboardQuery.refetch({ cancelRefetch: true }),
-    [dashboardQuery.refetch],
+    () => queryClient.refetchQueries({ queryKey: gatewayQueryKeys.all, type: "active" }),
+    [],
   );
 
   useEffect(() => {
-    if (!serviceReady) return;
-    const onLocationChange = (): void => setLocation(resolveLocation(window.location.hash));
+    const onLocationChange = () => {
+      setLocation(resolveLocation(window.location.hash));
+      setMobileNav(false);
+    };
     window.addEventListener("hashchange", onLocationChange);
     window.addEventListener("popstate", onLocationChange);
     return () => {
       window.removeEventListener("hashchange", onLocationChange);
       window.removeEventListener("popstate", onLocationChange);
     };
-  }, [serviceReady]);
+  }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => setSystemDark(media.matches);
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
-    localStorage.setItem("llm-gateway.theme", theme);
-  }, [theme]);
+    localStorage.setItem("llm-gateway.theme", themePreference);
+  }, [theme, themePreference]);
 
   return (
     <>
       <DashboardLayout
         page={location.page}
         mobileOpen={mobileNav}
-        loading={loading}
-        refreshing={dashboardQuery.isFetching}
-        lastUpdated={lastUpdated}
+        refreshing={fetching > 0}
         healthStatus={data.health.status}
         theme={theme}
         onNavigate={navigate}
         onToggleMobile={setMobileNav}
         onRefresh={() => void refresh()}
-        onToggleTheme={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+        onToggleTheme={() => setThemePreference(theme === "dark" ? "light" : "dark")}
       >
-        {location.page === "overview" && <OverviewPage data={data} onNavigate={navigate} />}
-        {location.page === "playground" && (
-          <PlaygroundPage
-            data={data}
-            api={api}
-            initialModelId={location.modelId}
-            onNavigate={navigate}
-            onRefresh={() => void refresh()}
-          />
+        {healthError && (
+          <div
+            role="alert"
+            className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive"
+          >
+            <span className="flex items-center gap-2">
+              <AlertCircle className="size-4 shrink-0" />
+              无法连接网关，已有数据可能过期。{healthError}
+            </span>
+            <Button variant="outline" size="sm" onClick={() => navigate("settings")}>
+              连接设置
+            </Button>
+          </div>
         )}
-        {location.page === "metrics" && <MetricsPage data={data} api={api} />}
-        {location.page === "management" && (
-          <ManagementPage data={data} api={api} onNotice={showNotice} onNavigate={navigate} />
-        )}
-        {location.page === "settings" && (
-          <SettingsPage
-            credentials={credentials}
-            onCredentials={updateCredentials}
-            theme={theme}
-            onTheme={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
-            onNotice={showNotice}
-            onRefresh={() => void refresh()}
-            gatewayUrl={gatewayUrl}
-          />
-        )}
+        <Suspense
+          fallback={
+            <div
+              role="status"
+              className="flex min-h-40 items-center justify-center gap-2 text-sm text-muted-foreground"
+            >
+              <Spinner />
+              正在加载页面…
+            </div>
+          }
+        >
+          {location.page === "overview" && (
+            <OverviewPage data={data} gatewayUrl={gatewayUrl} onNavigate={navigate} />
+          )}
+          {location.page === "playground" && (
+            <PlaygroundPage
+              data={data}
+              api={api}
+              initialModelId={location.modelId}
+              onNavigate={navigate}
+              onRefresh={() => void refresh()}
+            />
+          )}
+          {location.page === "metrics" && <MetricsPage data={data} api={api} />}
+          {location.page === "management" && (
+            <ManagementPage data={data} api={api} onNotice={showNotice} onNavigate={navigate} />
+          )}
+          {location.page === "settings" && (
+            <SettingsPage
+              credentials={credentials}
+              onCredentials={updateCredentials}
+              themePreference={themePreference}
+              onThemePreference={setThemePreference}
+              onNotice={showNotice}
+              onRefresh={() => void refresh()}
+              gatewayUrl={gatewayUrl}
+            />
+          )}
+        </Suspense>
       </DashboardLayout>
-      <Toaster
-        position="bottom-right"
-        theme={theme}
-        richColors
-        closeButton
-        visibleToasts={3}
-        toastOptions={{
-          className: "font-sans",
-        }}
-      />
+      <Toaster position="bottom-right" theme={theme} closeButton visibleToasts={3} />
     </>
   );
 }

@@ -1,6 +1,7 @@
 export type PageKey = "overview" | "playground" | "metrics" | "management" | "settings";
 
 export type NoticeTone = "success" | "error" | "warning" | "info";
+export type ThemePreference = "light" | "dark" | "system";
 
 export interface NavigateOptions {
   modelId?: string;
@@ -181,6 +182,13 @@ export interface DashboardData {
   channels: ChannelConfig[];
   keys: ApiKeyRecord[];
   adminError: string;
+  resources: Record<"auth" | "models" | "channels" | "keys" | "metrics", ResourceState>;
+}
+
+export interface ResourceState {
+  pending: boolean;
+  error: string;
+  hasData: boolean;
 }
 
 export interface ChatResult {

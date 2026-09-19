@@ -1,60 +1,28 @@
-import {
-  AlertCircle,
-  Bot,
-  Check,
-  CircleDashed,
-  Loader2,
-  MessageSquareText,
-  RefreshCw,
-  Trash2,
-  X,
-  XCircle,
-  Zap,
-} from "lucide-react";
-import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, Bot, ChevronDown, RefreshCw, Square, Trash2 } from "lucide-react";
+import { type FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Streamdown } from "streamdown";
 import type { GatewayApi } from "../../api";
-import { CopyButton } from "../../components/common";
-import { ModelSearch } from "../../components/ModelSearch";
-import {
-  Badge,
-  Button,
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-  Kbd,
-  Select,
-  Spinner,
-  Textarea,
-} from "../../components/ui";
-import { formatNumber, toFiniteNumber, usageTotal } from "../../lib/format";
-import { modelEfforts, modelSupportsReasoning, searchModels } from "../../lib/models";
-import { cn } from "../../lib/utils";
+import { CopyButton, ResourceContent } from "../../components/common";
+import { ModelPicker } from "../../components/ModelPicker";
+import { Badge, Button, Card, Select, Spinner, Textarea } from "../../components/ui";
+import { formatNumber, usageTotal } from "../../lib/format";
+import { modelEfforts, modelSupportsReasoning } from "../../lib/models";
 import type { DashboardData, GatewayModel, Navigate, Usage } from "../../types";
 
-type PlaygroundState = "idle" | "streaming" | "success" | "error" | "canceled";
-
-type PlaygroundResponse = {
-  state: PlaygroundState;
+type Request = { model: GatewayModel; prompt: string; effort: string };
+type Response = {
+  state: "idle" | "streaming" | "success" | "error" | "canceled";
   content: string;
   reasoning: string;
   usage?: Usage;
   error: string;
+  request?: Request;
 };
-
-const emptyResponse: PlaygroundResponse = {
-  state: "idle",
-  content: "",
-  reasoning: "",
-  usage: undefined,
-  error: "",
-};
-
-const examplePrompts = [
-  "用一句话介绍当前 Gateway 的能力。",
-  "解释当前模型的路由逻辑。",
-  "给我一个健康检查 curl 示例。",
+const emptyResponse: Response = { state: "idle", content: "", reasoning: "", error: "" };
+const examples = [
+  { label: "测试文本", prompt: "用三句话解释流式响应。" },
+  { label: "测试代码", prompt: "写一个 Python Hello World，并说明运行方式。" },
+  { label: "测试表格", prompt: "用 Markdown 表格比较 HTTP 和 WebSocket。" },
 ];
 
 export function PlaygroundPage({
@@ -72,545 +40,396 @@ export function PlaygroundPage({
 }) {
   const [modelId, setModelId] = useState(initialModelId ?? data.models[0]?.id ?? "");
   const [effort, setEffort] = useState("auto");
-  const [prompt, setPrompt] = useState("请用一句话介绍当前 Gateway 的能力。");
-  const [response, setResponse] = useState<PlaygroundResponse>(emptyResponse);
+  const [prompt, setPrompt] = useState("");
+  const [response, setResponse] = useState<Response>(emptyResponse);
   const abortRef = useRef<AbortController | null>(null);
-  const lastRequestRef = useRef<{
-    model: GatewayModel;
-    prompt: string;
-    effort: string;
-  } | null>(null);
-  const model = data.models.find((item) => item.id === modelId) ?? data.models[0];
-
-  useEffect(() => {
-    return () => {
+  const model = data.models.find((item) => item.id === modelId);
+  const streaming = response.state === "streaming";
+  useEffect(
+    () => () => {
       abortRef.current?.abort();
       abortRef.current = null;
-    };
-  }, []);
-
+    },
+    [],
+  );
   useEffect(() => {
-    if (!data.models.length) {
-      setModelId("");
-      return;
-    }
-    if (!data.models.some((item) => item.id === modelId)) {
-      const nextModelId = data.models[0].id;
-      setModelId(nextModelId);
-      onNavigate("playground", { modelId: nextModelId, replace: true });
-    }
-  }, [data.models, modelId, onNavigate]);
-
+    if (initialModelId && data.models.some((item) => item.id === initialModelId))
+      setModelId(initialModelId);
+    else if (
+      data.resources.models.hasData &&
+      data.models.length &&
+      !data.models.some((item) => item.id === modelId)
+    )
+      setModelId(data.models[0].id);
+  }, [data.models, data.resources.models.hasData, initialModelId, modelId]);
   useEffect(() => {
-    if (initialModelId && data.models.some((item) => item.id === initialModelId)) {
-      setModelId((current) => (current === initialModelId ? current : initialModelId));
-    }
-  }, [data.models, initialModelId]);
-
-  useEffect(() => {
-    const efforts = modelEfforts(model);
-    if (!modelSupportsReasoning(model)) {
+    if (!modelSupportsReasoning(model)) setEffort("auto");
+    else if (effort !== "auto" && effort !== "off" && !Object.hasOwn(modelEfforts(model), effort))
       setEffort("auto");
-      return;
-    }
-    setEffort((current) => {
-      if (current === "auto" || current === "off" || Object.hasOwn(efforts, current)) {
-        return current;
-      }
-      return model.defaultReasoningEffort && Object.hasOwn(efforts, model.defaultReasoningEffort)
-        ? model.defaultReasoningEffort
-        : "auto";
-    });
-  }, [model]);
+  }, [model, effort]);
 
-  const clearOutput = (): void => {
+  const send = async (request: Request): Promise<void> => {
+    if (abortRef.current) return;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setResponse({ ...emptyResponse, state: "streaming", request });
+    try {
+      await api.streamChat(
+        request.model,
+        request.prompt,
+        request.effort,
+        (update) => {
+          if (abortRef.current !== controller || controller.signal.aborted) return;
+          setResponse((current) => ({
+            ...current,
+            content: current.content + (update.content ?? ""),
+            reasoning: current.reasoning + (update.reasoning ?? ""),
+            usage: update.usage ?? current.usage,
+          }));
+        },
+        controller.signal,
+      );
+      if (!controller.signal.aborted && abortRef.current === controller)
+        setResponse((current) => ({ ...current, state: "success" }));
+    } catch (error) {
+      if (!controller.signal.aborted && abortRef.current === controller)
+        setResponse((current) => ({
+          ...current,
+          state: "error",
+          error: error instanceof Error ? error.message : "请求失败，请重试",
+        }));
+    } finally {
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        onRefresh();
+      }
+    }
+  };
+  const stop = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setResponse((current) => ({ ...current, state: "canceled" }));
+    onRefresh();
+  };
+  const clear = () => {
     abortRef.current?.abort();
     abortRef.current = null;
     setResponse(emptyResponse);
   };
-
-  const send = useCallback(
-    async (
-      requestModel: GatewayModel,
-      requestPrompt: string,
-      requestEffort: string,
-    ): Promise<void> => {
-      if (abortRef.current) return;
-      const controller = new AbortController();
-      abortRef.current = controller;
-      setResponse({ ...emptyResponse, state: "streaming" });
-      try {
-        await api.streamChat(
-          requestModel,
-          requestPrompt,
-          requestEffort,
-          (update) => {
-            if (!update.content && !update.reasoning && !update.usage) return;
-            setResponse((current) => ({
-              ...current,
-              content: update.content ? current.content + update.content : current.content,
-              reasoning: update.reasoning
-                ? current.reasoning + update.reasoning
-                : current.reasoning,
-              usage: update.usage ?? current.usage,
-            }));
-          },
-          controller.signal,
-        );
-        if (controller.signal.aborted) {
-          if (abortRef.current === controller) {
-            setResponse((current) => ({ ...current, state: "canceled" }));
-          }
-          return;
-        }
-        setResponse((current) => ({ ...current, state: "success" }));
-        onRefresh();
-      } catch (caught) {
-        if (controller.signal.aborted) {
-          if (abortRef.current === controller) {
-            setResponse((current) => ({ ...current, state: "canceled" }));
-          }
-          return;
-        }
-        setResponse((current) => ({
-          ...current,
-          state: "error",
-          error: caught instanceof Error ? caught.message : "请求失败",
-        }));
-      } finally {
-        if (abortRef.current === controller) abortRef.current = null;
-      }
-    },
-    [api, onRefresh],
-  );
-
-  const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+  const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!model || !prompt.trim() || response.state === "streaming") return;
-    const requestPrompt = prompt.trim();
-    lastRequestRef.current = { model, prompt: requestPrompt, effort };
-    await send(model, requestPrompt, effort);
-  };
-
-  const stop = (): void => {
-    const controller = abortRef.current;
-    if (!controller) return;
-    controller.abort();
-    abortRef.current = null;
-    setResponse((current) => ({ ...current, state: "canceled" }));
-  };
-
-  const retry = (): void => {
-    const request = lastRequestRef.current;
-    if (!request || response.state === "streaming") return;
-    void send(request.model, request.prompt, request.effort);
-  };
-
-  const changeModel = (nextModelId: string): void => {
-    setModelId(nextModelId);
-    onNavigate("playground", { modelId: nextModelId, replace: true });
-  };
-
-  const clearPrompt = (): void => {
-    setPrompt("");
+    if (model && prompt.trim() && !streaming)
+      void send({ model: { ...model }, prompt: prompt.trim(), effort });
   };
 
   return (
-    <div className="grid gap-6 xl:grid-cols-[minmax(0,0.82fr)_minmax(0,1.18fr)]">
-      <PlaygroundForm
-        models={data.models}
-        model={model}
-        effort={effort}
-        prompt={prompt}
-        state={response.state}
-        onModelChange={changeModel}
-        onEffortChange={setEffort}
-        onPromptChange={setPrompt}
-        onClearPrompt={clearPrompt}
-        onSubmit={submit}
-        onStop={stop}
-      />
+    <div className="grid h-full min-h-0 gap-4 lg:grid-cols-[minmax(18rem,0.75fr)_minmax(0,1.25fr)]">
+      <Card className="flex min-h-0 flex-col overflow-hidden">
+        <form aria-label="模型请求" onSubmit={submit} className="flex h-full min-h-0 flex-col">
+          <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-5">
+            <ResourceContent state={data.resources.models} label="模型">
+              <div className="space-y-2">
+                <label htmlFor="playground-model" className="text-sm font-medium">
+                  模型
+                </label>
+                <ModelPicker
+                  id="playground-model"
+                  models={data.models}
+                  value={modelId}
+                  disabled={streaming || !data.models.length}
+                  placeholder={data.models.length ? "选择模型" : "暂无可用模型"}
+                  onChange={(id) => {
+                    setModelId(id);
+                    onNavigate("playground", { modelId: id, replace: true });
+                  }}
+                />
+              </div>
+            </ResourceContent>
+            {modelSupportsReasoning(model) && (
+              <div className="flex items-center justify-between gap-3">
+                <label
+                  htmlFor="playground-effort"
+                  className="shrink-0 text-sm text-muted-foreground"
+                >
+                  思考强度
+                </label>
+                <Select
+                  id="playground-effort"
+                  className="h-9 max-w-44"
+                  value={effort}
+                  onChange={(event) => setEffort(event.target.value)}
+                  disabled={streaming}
+                >
+                  <option value="auto">自动</option>
+                  <option value="off">关闭</option>
+                  {Object.keys(modelEfforts(model))
+                    .filter((key) => key !== "off")
+                    .map((key) => (
+                      <option key={key} value={key}>
+                        {key}
+                      </option>
+                    ))}
+                </Select>
+              </div>
+            )}
+            <div className="flex min-h-52 flex-1 flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <label htmlFor="playground-prompt" className="text-sm font-medium">
+                  消息
+                </label>
+                <span className="text-xs text-muted-foreground">⌘ / Ctrl + Enter 发送</span>
+              </div>
+              <Textarea
+                id="playground-prompt"
+                value={prompt}
+                onChange={(event) => setPrompt(event.target.value)}
+                placeholder="输入消息，测试模型的响应效果…"
+                disabled={streaming}
+                className="min-h-44 flex-1 resize-none bg-background/50"
+                onKeyDown={(event) => {
+                  if (
+                    event.key === "Enter" &&
+                    (event.metaKey || event.ctrlKey) &&
+                    !event.nativeEvent.isComposing
+                  ) {
+                    event.preventDefault();
+                    event.currentTarget.form?.requestSubmit();
+                  }
+                }}
+              />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {examples.map((example) => (
+                <Button
+                  key={example.label}
+                  variant="outline"
+                  size="sm"
+                  disabled={streaming}
+                  onClick={() => setPrompt(example.prompt)}
+                >
+                  {example.label}
+                </Button>
+              ))}
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center justify-between gap-3 border-t px-5 py-4">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setPrompt("")}
+              disabled={!prompt || streaming}
+            >
+              清空输入
+            </Button>
+            {streaming ? (
+              <Button onClick={stop} variant="outline">
+                <Square className="size-3.5" />
+                停止生成
+              </Button>
+            ) : (
+              <Button
+                type="submit"
+                disabled={!model || !prompt.trim() || !data.resources.models.hasData}
+              >
+                <ArrowUp className="size-4" />
+                发送
+              </Button>
+            )}
+          </div>
+        </form>
+      </Card>
       <ResponsePreview
-        model={model}
-        effort={effort}
         response={response}
-        onClear={clearOutput}
-        onRetry={retry}
+        onClear={clear}
+        onRetry={() => {
+          if (response.request) void send(response.request);
+        }}
       />
     </div>
   );
 }
 
-function PlaygroundForm({
-  models,
-  model,
-  effort,
-  prompt,
-  state,
-  onModelChange,
-  onEffortChange,
-  onPromptChange,
-  onClearPrompt,
-  onSubmit,
-  onStop,
-}: {
-  models: GatewayModel[];
-  model?: GatewayModel;
-  effort: string;
-  prompt: string;
-  state: PlaygroundState;
-  onModelChange: (value: string) => void;
-  onEffortChange: (value: string) => void;
-  onPromptChange: (value: string) => void;
-  onClearPrompt: () => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-  onStop: () => void;
-}) {
-  const efforts = modelEfforts(model);
-  const [modelQuery, setModelQuery] = useState("");
-  const filteredModels = searchModels(models, modelQuery);
-  const searchable = models.length > 6;
-  const selectedOutsideSearch = model && !filteredModels.some((item) => item.id === model.id);
-  return (
-    <Card className="h-fit">
-      <CardHeader>
-        <div className="flex items-center gap-2">
-          <MessageSquareText className="size-4 text-primary" />
-          <CardTitle>发送请求</CardTitle>
-        </div>
-        <CardDescription>选择模型，输入消息并查看真实的流式响应</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <form className="space-y-5" aria-label="模型请求" onSubmit={onSubmit}>
-          {models.length > 1 ? (
-            <div className="space-y-2">
-              <label htmlFor="playground-model" className="text-xs font-medium text-foreground">
-                模型
-              </label>
-              {searchable && (
-                <>
-                  <ModelSearch
-                    value={modelQuery}
-                    onChange={setModelQuery}
-                    descriptionId="playground-model-results"
-                  />
-                  <p
-                    id="playground-model-results"
-                    role="status"
-                    className="text-xs text-muted-foreground"
-                  >
-                    {modelQuery.trim()
-                      ? filteredModels.length
-                        ? `找到 ${filteredModels.length} / ${models.length} 个模型`
-                        : "没有匹配的模型，当前选择保持不变"
-                      : `共 ${models.length} 个模型，可搜索名称、ID 或 Provider`}
-                  </p>
-                </>
-              )}
-              <Select
-                id="playground-model"
-                value={model?.id ?? ""}
-                onChange={(event) => onModelChange(event.target.value)}
-                disabled={!models.length}
-              >
-                <option value="">选择模型</option>
-                {selectedOutsideSearch && (
-                  <optgroup label="当前选择（不匹配搜索）">
-                    <option value={model.id}>
-                      {model.name || model.id} · {model.id}
-                    </option>
-                  </optgroup>
-                )}
-                {filteredModels.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name && item.name !== item.id ? `${item.name} · ${item.id}` : item.id}
-                  </option>
-                ))}
-              </Select>
-              {model && (
-                <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                  <span className="font-mono">{model.id}</span>
-                  {model.provider && <Badge variant="muted">{model.provider}</Badge>}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <div className="text-xs font-medium text-foreground">模型</div>
-              <div className="flex min-h-10 items-center justify-between gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 text-sm">
-                <span className="truncate">{model?.name || model?.id || "暂无模型"}</span>
-                {model?.provider && <Badge variant="muted">{model.provider}</Badge>}
-              </div>
-            </div>
-          )}
-          {modelSupportsReasoning(model) && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <label htmlFor="playground-effort" className="text-xs font-medium text-foreground">
-                  思考强度
-                </label>
-                <Badge variant="info">模型支持</Badge>
-              </div>
-              <Select
-                id="playground-effort"
-                value={effort}
-                onChange={(event) => onEffortChange(event.target.value)}
-              >
-                <option value="auto">自动（模型默认）</option>
-                <option value="off">关闭思考</option>
-                {Object.keys(efforts)
-                  .filter((key) => key !== "off")
-                  .map((key) => (
-                    <option key={key} value={key}>
-                      {key}
-                    </option>
-                  ))}
-              </Select>
-            </div>
-          )}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label htmlFor="playground-prompt" className="text-xs font-medium text-foreground">
-                Prompt
-              </label>
-              <Kbd>⌘ ↵</Kbd>
-            </div>
-            <Textarea
-              id="playground-prompt"
-              value={prompt}
-              onChange={(event) => onPromptChange(event.target.value)}
-              placeholder="输入一条消息..."
-              className="min-h-44"
-              onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                  event.preventDefault();
-                  event.currentTarget.form?.requestSubmit();
-                }
-              }}
-            />
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="mr-0.5 text-[11px] text-muted-foreground">示例</span>
-              {examplePrompts.map((example) => (
-                <button
-                  key={example}
-                  type="button"
-                  onClick={() => onPromptChange(example)}
-                  className={cn(
-                    "rounded-full border border-border/70 bg-muted/20 px-2 py-1",
-                    "text-[11px] text-muted-foreground transition-colors",
-                    "hover:border-primary/30 hover:bg-primary/8 hover:text-foreground",
-                  )}
-                >
-                  {example}
-                </button>
-              ))}
-            </div>
-            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2"
-                onClick={onClearPrompt}
-                disabled={!prompt}
-              >
-                <Trash2 className="size-3" />
-                清空输入
-              </Button>
-              <span>{prompt.length} 字符</span>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              type="submit"
-              className="flex-1"
-              disabled={!model || !prompt.trim() || state === "streaming"}
-            >
-              {state === "streaming" ? (
-                <>
-                  <Spinner className="size-3.5" />
-                  生成中
-                </>
-              ) : (
-                <>
-                  <Zap className="size-4" />
-                  发送请求
-                </>
-              )}
-            </Button>
-            {state === "streaming" && (
-              <Button type="button" variant="outline" onClick={onStop}>
-                <X className="size-4" />
-                停止
-              </Button>
-            )}
-          </div>
-        </form>
-      </CardContent>
-    </Card>
-  );
-}
-
 function ResponsePreview({
-  model,
-  effort,
   response,
   onClear,
   onRetry,
 }: {
-  model?: GatewayModel;
-  effort: string;
-  response: PlaygroundResponse;
+  response: Response;
   onClear: () => void;
   onRetry: () => void;
 }) {
-  const { state, error, reasoning, content, usage } = response;
-  const title = model
-    ? `${model.name || model.id} · ${effort === "auto" ? "自动思考" : effort === "off" ? "思考关闭" : effort}`
-    : "选择模型开始测试";
+  const { state, content, reasoning, error, usage, request } = response;
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const following = useRef(true);
+  const [atBottom, setAtBottom] = useState(true);
+  const streaming = state === "streaming";
+  useLayoutEffect(() => {
+    if (request) {
+      following.current = true;
+      setAtBottom(true);
+    }
+  }, [request]);
+  useLayoutEffect(() => {
+    if (content || reasoning || state === "idle") {
+      if (following.current && scrollRef.current)
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [content, reasoning, state]);
+  const scrollToBottom = () => {
+    following.current = true;
+    setAtBottom(true);
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  };
+  const labels = {
+    idle: "待发送",
+    streaming: "生成中",
+    success: "已完成",
+    error: "失败",
+    canceled: "已停止",
+  };
   return (
-    <Card className="min-h-[480px] overflow-hidden sm:min-h-[560px]">
-      <CardHeader className="border-b border-border/60 bg-muted/15">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <CardTitle>响应预览</CardTitle>
-            <CardDescription>{title}</CardDescription>
-          </div>
-          <div className="flex items-center gap-1.5">
-            {(content || reasoning || error) && (
-              <>
-                {(content || reasoning) && (
-                  <CopyButton
-                    value={[
-                      reasoning ? `思考过程\n${reasoning}` : "",
-                      content ? `Assistant\n${content}` : "",
-                    ]
-                      .filter(Boolean)
-                      .join("\n\n")}
-                    label="复制全部"
-                  />
-                )}
-                {state !== "streaming" && (
-                  <Button variant="ghost" size="sm" onClick={onRetry} aria-label="重试请求">
-                    <RefreshCw className="size-3.5" />
-                    <span className="hidden sm:inline">重试</span>
-                  </Button>
-                )}
-                <Button variant="ghost" size="sm" onClick={onClear} aria-label="清空响应">
-                  <Trash2 className="size-3.5" />
-                  <span className="hidden sm:inline">清空</span>
-                </Button>
-              </>
-            )}
-            {state === "streaming" ? (
-              <Badge variant="warning">
-                <Loader2 className="size-3 animate-spin" />
-                生成中
-              </Badge>
-            ) : state === "success" ? (
-              <Badge variant="success">
-                <Check className="size-3" />
-                完成
-              </Badge>
-            ) : state === "error" ? (
-              <Badge variant="danger">
-                <XCircle className="size-3" />
-                失败
-              </Badge>
-            ) : state === "canceled" ? (
-              <Badge variant="muted">
-                <XCircle className="size-3" />
-                已停止
-              </Badge>
-            ) : (
-              <Badge variant="muted">待命</Badge>
-            )}
-          </div>
+    <Card className="relative flex min-h-[26rem] min-w-0 flex-col overflow-hidden lg:min-h-0">
+      <div className="flex shrink-0 items-start justify-between gap-3 border-b px-5 py-4">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold">响应</h2>
+          {request && (
+            <p className="mt-1 truncate text-xs text-muted-foreground" title={request.model.id}>
+              {request.model.name || request.model.id} ·{" "}
+              {request.effort === "auto"
+                ? "自动"
+                : request.effort === "off"
+                  ? "关闭思考"
+                  : request.effort}
+            </p>
+          )}
         </div>
-      </CardHeader>
-      <CardContent className="max-h-[min(44rem,calc(100vh-12rem))] space-y-4 overflow-y-auto p-5 scrollbar-thin">
+        <div className="flex shrink-0 items-center gap-1">
+          {(content || reasoning) && (
+            <CopyButton
+              value={[reasoning ? `思考过程\n${reasoning}` : "", content]
+                .filter(Boolean)
+                .join("\n\n")}
+              label="复制"
+            />
+          )}
+          {request && !streaming && (
+            <>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onRetry}
+                title="重试原请求"
+                aria-label="重试原请求"
+              >
+                <RefreshCw className="size-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onClear}
+                title="清空响应"
+                aria-label="清空响应"
+              >
+                <Trash2 className="size-4" />
+              </Button>
+            </>
+          )}
+          <span role="status" aria-live="polite">
+            <Badge
+              variant={state === "error" ? "danger" : state === "success" ? "success" : "muted"}
+            >
+              {streaming && <Spinner className="size-3" />}
+              {labels[state]}
+            </Badge>
+          </span>
+        </div>
+      </div>
+      <div
+        ref={scrollRef}
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-5 scrollbar-thin"
+        onScroll={(event) => {
+          const target = event.currentTarget;
+          const bottom = target.scrollHeight - target.scrollTop - target.clientHeight < 40;
+          following.current = bottom;
+          setAtBottom(bottom);
+        }}
+      >
+        {state === "idle" && (
+          <div className="flex h-full min-h-56 flex-col items-center justify-center gap-3 text-center">
+            <Bot className="size-8 text-primary/70" />
+            <p className="text-sm font-medium">从一条消息开始</p>
+            <p className="max-w-xs text-sm text-muted-foreground">
+              选择模型并发送消息，响应会实时显示在这里。
+            </p>
+          </div>
+        )}
         {error && (
           <div
-            className={cn(
-              "flex items-start gap-2 rounded-xl border border-red-400/25",
-              "bg-red-400/10 p-3 text-sm text-red-700 dark:text-red-200",
-            )}
+            role="alert"
+            className="mb-4 rounded-lg bg-destructive/5 px-4 py-3 text-sm leading-6 text-destructive"
           >
-            <AlertCircle className="mt-0.5 size-4 shrink-0" />
             {error}
           </div>
         )}
         {reasoning && (
-          <div className="rounded-xl border border-violet-400/20 bg-violet-400/5">
-            <div
-              className={cn(
-                "flex items-center gap-2 border-b border-violet-400/15 px-4 py-3",
-                "text-xs font-medium text-violet-200",
-              )}
-            >
-              <CircleDashed className="size-3.5" />
+          <details className="group mb-5 border-b pb-4">
+            <summary className="flex cursor-pointer list-none items-center gap-2 text-sm text-muted-foreground [&::-webkit-details-marker]:hidden">
+              <ChevronDown className="size-4 transition-transform group-open:rotate-180" />
               思考过程
-            </div>
-            <div
-              className={cn(
-                "max-h-64 overflow-y-auto whitespace-pre-wrap px-4 py-3 font-mono text-xs leading-6",
-                "text-violet-700/80 scrollbar-thin dark:text-violet-100/70",
-              )}
-            >
+            </summary>
+            <div className="mt-3 whitespace-pre-wrap text-sm leading-7 text-muted-foreground">
               {reasoning}
-              {state === "streaming" && (
-                <span className="ml-1 inline-block h-3 w-1 animate-pulse bg-violet-300" />
-              )}
             </div>
-          </div>
+          </details>
         )}
-        {content ? (
-          <div
-            role="log"
-            aria-live="polite"
-            className="rounded-xl border border-border/70 bg-background/55 p-4"
+        {content && (
+          <Streamdown
+            className="response-markdown text-sm leading-7"
+            isAnimating={streaming}
+            mode={streaming ? "streaming" : "static"}
+            controls={{
+              code: { copy: true, download: false },
+              table: { copy: true, download: false, fullscreen: false },
+            }}
+            translations={{
+              copyCode: "复制代码",
+              copied: "已复制",
+              copyTable: "复制表格",
+              copyTableAsMarkdown: "复制为 Markdown",
+              copyTableAsCsv: "复制为 CSV",
+              copyTableAsTsv: "复制为 TSV",
+            }}
+            codeBlockMaxHeight={0}
+            tableMaxHeight={0}
           >
-            <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
-              <Bot className="size-3.5 text-primary" />
-              Assistant
-            </div>
-            <div className="whitespace-pre-wrap text-sm leading-7 text-foreground">
-              {content}
-              {state === "streaming" && (
-                <span className="ml-1 inline-block h-4 w-1 animate-pulse bg-primary" />
-              )}
-            </div>
-          </div>
-        ) : !reasoning && state === "idle" ? (
-          <div className="flex min-h-80 flex-col items-center justify-center text-center">
-            <div className="mb-4 flex size-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-              <MessageSquareText className="size-6" />
-            </div>
-            <div className="text-sm font-medium">准备好测试了吗？</div>
-            <p className="mt-2 max-w-xs text-xs leading-5 text-muted-foreground">
-              选择模型，输入 Prompt，查看真实的流式响应和思考过程。
-            </p>
-          </div>
-        ) : !content && state === "streaming" ? (
-          <div className="flex min-h-80 flex-col items-center justify-center text-center text-muted-foreground">
-            <Spinner className="mb-3 size-6 text-primary" />
-            <div className="text-sm">正在等待模型响应...</div>
-          </div>
-        ) : null}
-        {usage && (
-          <div className="flex flex-wrap gap-2 border-t border-border/60 pt-4 text-[11px] text-muted-foreground">
-            <Badge variant="muted">输入 {formatNumber(usage.inputTokens)} tokens</Badge>
-            <Badge variant="muted">输出 {formatNumber(usage.outputTokens)} tokens</Badge>
-            {toFiniteNumber(usage.cachedTokens) > 0 && (
-              <Badge variant="success">缓存 {formatNumber(usage.cachedTokens)} tokens</Badge>
-            )}
-            {toFiniteNumber(usage.reasoningTokens) > 0 && (
-              <Badge variant="muted">思考 {formatNumber(usage.reasoningTokens)} tokens</Badge>
-            )}
-            <Badge variant="info">总计 {formatNumber(usageTotal(usage))}</Badge>
+            {content}
+          </Streamdown>
+        )}
+        {streaming && !content && (
+          <div role="status" className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+            <Spinner />
+            {reasoning ? "正在思考…" : "正在等待模型响应…"}
           </div>
         )}
-      </CardContent>
+      </div>
+      {!atBottom && (
+        <Button
+          variant="outline"
+          size="sm"
+          className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-card shadow-sm"
+          onClick={scrollToBottom}
+        >
+          <ArrowDown className="size-3.5" />
+          回到底部
+        </Button>
+      )}
+      {usage && (
+        <div className="flex shrink-0 flex-wrap gap-x-4 gap-y-1 border-t px-5 py-3 text-xs text-muted-foreground">
+          <span>输入 {formatNumber(usage.inputTokens)}</span>
+          <span>输出 {formatNumber(usage.outputTokens)}</span>
+          <span>总计 {formatNumber(usageTotal(usage))} tokens</span>
+        </div>
+      )}
     </Card>
   );
 }

@@ -2,7 +2,6 @@ import { Globe2, RotateCw, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Field } from "../../components/common";
 import {
-  Badge,
   Button,
   Card,
   CardContent,
@@ -73,28 +72,30 @@ export function ServiceSettingsCard({
     }
   };
 
+  if (!available)
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>服务监听</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm leading-6 text-muted-foreground">
+            请在桌面应用中修改本机服务的监听地址和端口。
+          </p>
+        </CardContent>
+      </Card>
+    );
+
   return (
     <Card>
       <CardHeader>
         <div className="flex items-center gap-2">
-          <Globe2 className="size-4 text-amber-300" />
+          <Globe2 className="size-4 text-warning" />
           <CardTitle>服务监听</CardTitle>
-          {available ? (
-            <Badge variant="success">桌面端</Badge>
-          ) : (
-            <Badge variant="muted">仅桌面端</Badge>
-          )}
         </div>
-        <CardDescription>
-          配置 Axum 网关监听的 Host 和 Port。保存后应用会自动重启并使用新地址。
-        </CardDescription>
+        <CardDescription>配置网关监听地址和端口，保存后应用会自动重启。</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        {!available && (
-          <div className="rounded-lg border border-amber-400/25 bg-amber-400/10 px-3 py-2.5 text-xs leading-5 text-amber-200">
-            当前页面运行在普通浏览器中，无法修改本机网关监听配置。
-          </div>
-        )}
         <div className="grid gap-4 sm:grid-cols-[1fr_10rem]">
           <Field label="Host" htmlFor="service-host">
             <Input
@@ -103,7 +104,7 @@ export function ServiceSettingsCard({
               onChange={(event) => setHost(event.target.value)}
               placeholder="127.0.0.1 或 0.0.0.0"
               autoComplete="off"
-              disabled={!available || loading || saving}
+              disabled={loading || saving}
             />
           </Field>
           <Field label="Port" htmlFor="service-port">
@@ -117,11 +118,11 @@ export function ServiceSettingsCard({
               onChange={(event) => setPort(event.target.value)}
               placeholder="3000"
               autoComplete="off"
-              disabled={!available || loading || saving}
+              disabled={loading || saving}
             />
           </Field>
         </div>
-        <Button onClick={() => void save()} disabled={!available || loading || saving}>
+        <Button onClick={() => void save()} disabled={loading || saving}>
           {saving ? <Spinner className="size-3.5" /> : <Save className="size-3.5" />}
           保存并重启
         </Button>

@@ -15,13 +15,5 @@ export default defineConfig({
     outDir: resolve(projectRoot, ".build/web"),
     emptyOutDir: true,
     assetsDir: "assets",
-    cssCodeSplit: false,
-    rollupOptions: {
-      output: {
-        format: "iife",
-        entryFileNames: "gateway.js",
-        assetFileNames: "gateway.[ext]"
-      }
-    }
   }
 });

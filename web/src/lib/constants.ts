@@ -48,6 +48,12 @@ export const emptyDashboard: DashboardData = {
   channels: [],
   keys: [],
   adminError: "",
+  resources: Object.fromEntries(
+    ["auth", "models", "channels", "keys", "metrics"].map((key) => [
+      key,
+      { pending: true, error: "", hasData: false },
+    ]),
+  ) as DashboardData["resources"],
 };
 
 export const pageMeta: Record<PageKey, { label: string; title: string; description: string }> = {
@@ -57,7 +63,7 @@ export const pageMeta: Record<PageKey, { label: string; title: string; descripti
     description: "实时掌握服务状态、模型目录和最近调用",
   },
   playground: {
-    label: "Playground",
+    label: "工作台",
     title: "模型工作台",
     description: "直接验证模型、思考强度和响应效果",
   },

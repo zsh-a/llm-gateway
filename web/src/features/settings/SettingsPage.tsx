@@ -1,4 +1,4 @@
-import { Eye, EyeOff, KeyRound, Moon, Save, Server, Settings2, Sun } from "lucide-react";
+import { Tabs } from "@base-ui/react/tabs";
 import { type FormEvent, useState } from "react";
 import { type Credentials, saveCredentials } from "../../api";
 import { Field, InfoRow } from "../../components/common";
@@ -6,29 +6,28 @@ import {
   Button,
   Card,
   CardContent,
-  CardDescription,
-  CardFooter,
   CardHeader,
   CardTitle,
-  Input,
+  PasswordInput,
+  Select,
 } from "../../components/ui";
-import type { NoticeTone } from "../../types";
+import type { NoticeTone, ThemePreference } from "../../types";
 import { RemoteAuthSyncCard } from "./RemoteAuthSyncCard";
 import { ServiceSettingsCard } from "./ServiceSettingsCard";
 
 export function SettingsPage({
   credentials,
   onCredentials,
-  theme,
-  onTheme,
+  themePreference,
+  onThemePreference,
   onNotice,
   onRefresh,
   gatewayUrl,
 }: {
   credentials: Credentials;
   onCredentials: (next: Credentials) => void;
-  theme: "light" | "dark";
-  onTheme: () => void;
+  themePreference: ThemePreference;
+  onThemePreference: (theme: ThemePreference) => void;
   onNotice: (message: string, tone?: NoticeTone) => void;
   onRefresh?: () => void;
   gatewayUrl: string;
@@ -38,22 +37,14 @@ export function SettingsPage({
   const [useSameKey, setUseSameKey] = useState(
     !credentials.adminKey || credentials.adminKey === credentials.apiKey,
   );
-  const [showApiKey, setShowApiKey] = useState(false);
-  const [showAdminKey, setShowAdminKey] = useState(false);
-
-  const save = (event: FormEvent<HTMLFormElement>): void => {
+  const save = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const nextApiKey = apiKey.trim();
-    const next = {
-      apiKey: nextApiKey,
-      adminKey: useSameKey ? nextApiKey : adminKey.trim(),
-    };
+    const next = { apiKey: apiKey.trim(), adminKey: useSameKey ? apiKey.trim() : adminKey.trim() };
     saveCredentials(next);
     onCredentials(next);
-    onNotice("设置已保存");
+    onNotice("访问凭证已保存");
   };
-
-  const clear = (): void => {
+  const clear = () => {
     setApiKey("");
     setAdminKey("");
     setUseSameKey(true);
@@ -61,157 +52,138 @@ export function SettingsPage({
     onCredentials({ apiKey: "", adminKey: "" });
     onNotice("访问凭证已清除");
   };
+  const dirty =
+    apiKey.trim() !== credentials.apiKey ||
+    (useSameKey ? apiKey.trim() : adminKey.trim()) !== credentials.adminKey;
 
   return (
-    <div className="grid items-start gap-6 xl:grid-cols-[0.9fr_1.1fr]">
-      <div className="space-y-6">
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <KeyRound className="size-4 text-primary" />
+    <Tabs.Root
+      defaultValue="connection"
+      className="grid items-start gap-6 lg:grid-cols-[10rem_minmax(0,1fr)]"
+    >
+      <Tabs.List className="flex flex-wrap gap-1 lg:flex-col" aria-label="设置分类">
+        {[
+          ["connection", "连接与凭证"],
+          ["service", "服务监听"],
+          ["sync", "认证同步"],
+          ["appearance", "外观"],
+        ].map(([value, label]) => (
+          <Tabs.Tab
+            key={value}
+            value={value}
+            className="rounded-lg px-3 py-2 text-left text-sm text-muted-foreground data-active:bg-muted data-active:font-medium data-active:text-foreground"
+          >
+            {label}
+          </Tabs.Tab>
+        ))}
+      </Tabs.List>
+      <div className="min-w-0 max-w-3xl">
+        <Tabs.Panel value="connection" className="space-y-5">
+          <Card>
+            <CardHeader>
               <CardTitle>访问凭证</CardTitle>
-            </div>
-            <CardDescription>
-              只保存在当前浏览器 sessionStorage，不会写入 Gateway 配置。
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form className="space-y-4" onSubmit={save}>
-              <Field label="Gateway Key" htmlFor="settings-api-key">
-                <div className="relative">
-                  <Input
+              <p className="text-sm text-muted-foreground">
+                仅在本次会话有效，不会修改网关的服务配置。
+              </p>
+            </CardHeader>
+            <CardContent>
+              <form className="space-y-4" onSubmit={save}>
+                <Field label="Gateway Key" htmlFor="settings-api-key">
+                  <PasswordInput
                     id="settings-api-key"
-                    type={showApiKey ? "text" : "password"}
                     value={apiKey}
                     onChange={(event) => setApiKey(event.target.value)}
-                    placeholder="PROXY_API_KEY 或虚拟 Key"
-                    className="pr-10"
+                    placeholder="输入 Gateway Key 或客户端 API Key"
                     autoComplete="off"
                   />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="absolute right-1 top-1 size-8"
-                    onClick={() => setShowApiKey((current) => !current)}
-                    aria-label={showApiKey ? "隐藏 Gateway Key" : "显示 Gateway Key"}
-                    title={showApiKey ? "隐藏" : "显示"}
-                  >
-                    {showApiKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-                  </Button>
-                </div>
-              </Field>
-              <label className="flex cursor-pointer items-center gap-2 text-xs text-foreground">
-                <input
-                  type="checkbox"
-                  checked={useSameKey}
-                  onChange={(event) => setUseSameKey(event.target.checked)}
-                  className="size-3.5 accent-[var(--primary)]"
-                />
-                管理接口复用同一个 Key
-              </label>
-              {useSameKey ? (
-                <p className="text-[11px] leading-4 text-muted-foreground">
-                  本地 Gateway 通常只需填写一次；远程部署使用不同管理员 Key 时取消勾选。
-                </p>
-              ) : (
-                <Field label="管理员 API Key" htmlFor="settings-admin-key">
-                  <div className="relative">
-                    <Input
+                </Field>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={useSameKey}
+                    onChange={(event) => setUseSameKey(event.target.checked)}
+                    className="size-4 accent-primary"
+                  />
+                  管理接口使用同一个 Key
+                </label>
+                {!useSameKey && (
+                  <Field label="管理员 Key" htmlFor="settings-admin-key">
+                    <PasswordInput
                       id="settings-admin-key"
-                      type={showAdminKey ? "text" : "password"}
                       value={adminKey}
                       onChange={(event) => setAdminKey(event.target.value)}
-                      placeholder="PROXY_ADMIN_KEY"
-                      className="pr-10"
+                      placeholder="输入管理员 Key"
                       autoComplete="off"
                     />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="absolute right-1 top-1 size-8"
-                      onClick={() => setShowAdminKey((current) => !current)}
-                      aria-label={showAdminKey ? "隐藏管理员 API Key" : "显示管理员 API Key"}
-                      title={showAdminKey ? "隐藏" : "显示"}
-                    >
-                      {showAdminKey ? (
-                        <EyeOff className="size-3.5" />
-                      ) : (
-                        <Eye className="size-3.5" />
-                      )}
-                    </Button>
-                  </div>
-                </Field>
-              )}
-              <div className="flex items-center gap-2">
-                <Button type="submit">
-                  <Save className="size-4" />
-                  保存设置
-                </Button>
-                <Button type="button" variant="ghost" onClick={clear}>
-                  清除
-                </Button>
-              </div>
-            </form>
-          </CardContent>
-        </Card>
-        <ServiceSettingsCard onNotice={onNotice} />
-        <RemoteAuthSyncCard onNotice={onNotice} onRefresh={onRefresh} />
-      </div>
-      <div className="space-y-6">
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <Settings2 className="size-4 text-cyan-300" />
-              <CardTitle>外观</CardTitle>
-            </div>
-            <CardDescription>主题设置只影响当前浏览器。</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center justify-between rounded-xl border border-border/70 bg-muted/15 p-3.5">
-              <div className="flex items-center gap-3">
-                <div className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                  {theme === "dark" ? <Moon className="size-4" /> : <Sun className="size-4" />}
+                  </Field>
+                )}
+                <div className="flex gap-2">
+                  <Button type="submit" disabled={!dirty}>
+                    保存凭证
+                  </Button>
+                  <Button variant="ghost" onClick={clear} disabled={!apiKey && !adminKey}>
+                    清除
+                  </Button>
                 </div>
-                <div>
-                  <div className="text-sm font-medium">
-                    {theme === "dark" ? "深色模式" : "浅色模式"}
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">Tailwind design tokens</div>
+              </form>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>API 地址</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2 text-sm">
+              <InfoRow label="Base URL" value={`${gatewayUrl || location.origin}/v1`} copyable />
+              <details className="group pt-2">
+                <summary className="cursor-pointer text-sm text-muted-foreground">查看端点</summary>
+                <div className="mt-3 space-y-2">
+                  <InfoRow
+                    label="Chat Completions"
+                    value={`${gatewayUrl || location.origin}/v1/chat/completions`}
+                    copyable
+                  />
+                  <InfoRow
+                    label="Responses"
+                    value={`${gatewayUrl || location.origin}/v1/responses`}
+                    copyable
+                  />
+                  <InfoRow
+                    label="Models"
+                    value={`${gatewayUrl || location.origin}/v1/models`}
+                    copyable
+                  />
                 </div>
+              </details>
+            </CardContent>
+          </Card>
+        </Tabs.Panel>
+        <Tabs.Panel value="service">
+          <ServiceSettingsCard onNotice={onNotice} />
+        </Tabs.Panel>
+        <Tabs.Panel value="sync">
+          <RemoteAuthSyncCard onNotice={onNotice} onRefresh={onRefresh} />
+        </Tabs.Panel>
+        <Tabs.Panel value="appearance">
+          <Card>
+            <CardContent className="flex flex-wrap items-center justify-between gap-4 p-5">
+              <div>
+                <h2 className="text-sm font-medium">主题</h2>
+                <p className="mt-1 text-sm text-muted-foreground">选择外观，或跟随系统自动切换。</p>
               </div>
-              <Button variant="outline" onClick={onTheme}>
-                {theme === "dark" ? "切换浅色" : "切换深色"}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader>
-            <CardTitle>运行时信息</CardTitle>
-            <CardDescription>当前控制台和 API 地址</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3 text-xs">
-            <InfoRow label="Gateway" value={`${gatewayUrl || location.origin}/health`} copyable />
-            <InfoRow
-              label="Chat Completions"
-              value={`${gatewayUrl || location.origin}/v1/chat/completions`}
-              copyable
-            />
-            <InfoRow
-              label="Responses"
-              value={`${gatewayUrl || location.origin}/v1/responses`}
-              copyable
-            />
-            <InfoRow label="Models" value={`${gatewayUrl || location.origin}/v1/models`} copyable />
-          </CardContent>
-          <CardFooter className="border-t border-border/60 pt-4 text-[11px] text-muted-foreground">
-            <Server className="mr-1.5 size-3.5" />
-            首次认证独立完成，Gateway 只消费认证缓存。
-          </CardFooter>
-        </Card>
+              <Select
+                className="w-40"
+                aria-label="主题"
+                value={themePreference}
+                onChange={(event) => onThemePreference(event.target.value as ThemePreference)}
+              >
+                <option value="system">跟随系统</option>
+                <option value="light">浅色</option>
+                <option value="dark">深色</option>
+              </Select>
+            </CardContent>
+          </Card>
+        </Tabs.Panel>
       </div>
-    </div>
+    </Tabs.Root>
   );
 }

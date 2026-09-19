@@ -50,7 +50,7 @@ function BreakdownCard({ title, breakdown }: { title: string; breakdown?: Usage[
 export function UsageDetails({ usage }: { usage?: Usage | null }) {
   if (!usage) {
     return (
-      <div className="rounded-xl border border-amber-400/20 bg-amber-400/5 px-3 py-2.5 text-xs text-amber-200">
+      <div className="rounded-xl border border-amber-400/20 bg-amber-400/5 px-3 py-2.5 text-xs text-warning">
         上游没有返回 usage，当前请求无法进行准确 Token 统计。
       </div>
     );
@@ -75,11 +75,11 @@ export function UsageDetails({ usage }: { usage?: Usage | null }) {
   };
   const cards: Array<[string, string, string]> = [
     ["总 Token", tokenValue(usage.totalTokens), "text-foreground"],
-    ["输入", tokenValue(usage.inputTokens), "text-cyan-200"],
+    ["输入", tokenValue(usage.inputTokens), "text-info"],
     ["输出", tokenValue(usage.outputTokens), "text-primary"],
-    ["缓存命中", tokenValue(cachedTokens), "text-emerald-300"],
-    ["推理", tokenValue(usage.reasoningTokens), "text-violet-200"],
-    ["缓存写入", tokenValue(usage.cacheCreationTokens), "text-amber-200"],
+    ["缓存命中", tokenValue(cachedTokens), "text-success"],
+    ["推理", tokenValue(usage.reasoningTokens), "text-primary"],
+    ["缓存写入", tokenValue(usage.cacheCreationTokens), "text-warning"],
   ];
 
   return (
@@ -107,6 +107,8 @@ function RequestDetails({ row }: { row: RecentRequest }) {
   return (
     <div className="space-y-4 rounded-xl border border-border/70 bg-muted/15 p-3.5">
       <div className="grid gap-2 md:grid-cols-2">
+        <InfoRow label="模型" value={row.model || "—"} />
+        <InfoRow label="协议" value={row.protocol || "chat"} />
         <InfoRow label="Request ID" value={row.id || "—"} />
         <InfoRow label="开始时间" value={formatTime(row.startedAt, true)} />
         <InfoRow label="完成时间" value={formatTime(row.completedAt, true)} />
@@ -147,24 +149,24 @@ export function RequestTable({ rows }: { rows: RecentRequest[] }) {
 
   return (
     <div className="overflow-x-auto rounded-xl border border-border/70">
-      <table className="w-full min-w-[800px] text-left text-xs" aria-label="最近请求记录">
+      <table className="w-full text-left text-sm" aria-label="最近请求记录">
         <caption className="sr-only">最近请求记录</caption>
-        <thead className="bg-muted/45 text-[10px] uppercase tracking-wider text-muted-foreground">
+        <thead className="bg-muted/45 text-xs text-muted-foreground">
           <tr>
             <th className="w-10 px-2 py-2.5 font-medium" />
-            <th scope="col" className="px-3 py-2.5 font-medium">
+            <th scope="col" className="hidden px-3 py-2.5 font-medium md:table-cell">
               时间
             </th>
             <th scope="col" className="px-3 py-2.5 font-medium">
               模型
             </th>
-            <th scope="col" className="px-3 py-2.5 font-medium">
+            <th scope="col" className="hidden px-3 py-2.5 font-medium xl:table-cell">
               Provider
             </th>
-            <th scope="col" className="px-3 py-2.5 font-medium">
+            <th scope="col" className="hidden px-3 py-2.5 font-medium xl:table-cell">
               协议
             </th>
-            <th scope="col" className="px-3 py-2.5 font-medium">
+            <th scope="col" className="hidden px-3 py-2.5 font-medium md:table-cell">
               耗时
             </th>
             <th scope="col" className="px-3 py-2.5 font-medium">
@@ -197,17 +199,22 @@ export function RequestTable({ rows }: { rows: RecentRequest[] }) {
                       )}
                     </Button>
                   </td>
-                  <td className="whitespace-nowrap px-3 py-3 font-mono text-muted-foreground">
+                  <td className="hidden whitespace-nowrap px-3 py-3 font-mono text-xs text-muted-foreground md:table-cell">
                     {formatTime(row.startedAt, true)}
                   </td>
-                  <td className="max-w-48 truncate px-3 py-3 font-medium text-foreground">
+                  <td
+                    className="max-w-24 truncate px-3 py-3 font-medium text-foreground sm:max-w-48"
+                    title={row.model}
+                  >
                     {row.model || "—"}
                   </td>
-                  <td className="px-3 py-3 text-muted-foreground">{row.provider || "—"}</td>
-                  <td className="px-3 py-3">
+                  <td className="hidden px-3 py-3 text-muted-foreground xl:table-cell">
+                    {row.provider || "—"}
+                  </td>
+                  <td className="hidden px-3 py-3 xl:table-cell">
                     <Badge variant="muted">{row.protocol || "chat"}</Badge>
                   </td>
-                  <td className="px-3 py-3 text-muted-foreground">
+                  <td className="hidden px-3 py-3 text-muted-foreground md:table-cell">
                     {formatDuration(row.durationMs)}
                   </td>
                   <td className="px-3 py-3 font-mono text-muted-foreground">

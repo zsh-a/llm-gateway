@@ -1,3 +1,4 @@
+import { EventSourceParserStream } from "eventsource-parser/stream";
 import type {
   ApiKeyInput,
   ApiKeyRecord,
@@ -36,35 +37,6 @@ export class ApiError extends Error {
     this.name = "ApiError";
   }
 }
-
-const emptySummary: MetricsSummary = {
-  requests: 0,
-  successes: 0,
-  errors: 0,
-  canceled: 0,
-  successRate: null,
-  activeRequests: 0,
-  latency: { averageMs: null, p50Ms: null, p95Ms: null, maxMs: null },
-  tokens: {
-    inputTokens: 0,
-    outputTokens: 0,
-    reasoningTokens: 0,
-    cachedTokens: 0,
-    cacheCreationTokens: 0,
-    inputAudioTokens: 0,
-    outputAudioTokens: 0,
-    inputImageTokens: 0,
-    outputImageTokens: 0,
-    acceptedPredictionTokens: 0,
-    rejectedPredictionTokens: 0,
-    totalTokens: 0,
-    requestsWithUsage: 0,
-  },
-  byProvider: [],
-  byChannel: [],
-  byModel: [],
-  byApiKey: [],
-};
 
 export function loadCredentials(): Credentials {
   return {
@@ -125,96 +97,58 @@ export class GatewayApi {
     return body as T;
   }
 
-  private async safe<T>(request: Promise<T>, fallback: T): Promise<T> {
-    try {
-      return await request;
-    } catch {
-      return fallback;
-    }
+  health(signal?: AbortSignal): Promise<DashboardData["health"]> {
+    return this.request("/health", { signal });
   }
 
-  async dashboard(signal?: AbortSignal): Promise<DashboardData> {
-    const metricsPrefix = this.metricsPrefix();
-    const [health, auth, models, summary, timeseries, recent] = await Promise.all([
-      this.safe(this.request<DashboardData["health"]>("/health", { signal }), {
-        status: "offline",
-      }),
-      this.safe(this.request<AuthStatus>("/health/auth", { signal }), { providers: {} }),
-      this.safe(this.request<{ data: GatewayModel[] }>("/v1/models", { signal }), { data: [] }),
-      this.safe(
-        this.request<MetricsSummary>(`${metricsPrefix}/summary?window=24h`, { signal }),
-        emptySummary,
-      ),
-      this.safe(
-        this.request<{ data: TimeseriesPoint[] }>(`${metricsPrefix}/timeseries?window=24h`, {
-          signal,
-        }),
-        { data: [] },
-      ),
-      this.safe(
-        this.request<{ data: RecentRequest[] }>(`${metricsPrefix}/requests?window=24h&limit=50`, {
-          signal,
-        }),
-        { data: [] },
-      ),
-    ]);
+  auth(signal?: AbortSignal): Promise<AuthStatus> {
+    return this.request("/health/auth", { signal });
+  }
 
-    const [channelResult, keyResult] = await Promise.allSettled([
-      this.request<{ data: ChannelConfig[] }>("/admin/channels", { signal }),
-      this.request<{ data: ApiKeyRecord[] }>("/admin/keys", { signal }),
-    ]);
-    const channels = channelResult.status === "fulfilled" ? (channelResult.value.data ?? []) : [];
-    const keys = keyResult.status === "fulfilled" ? (keyResult.value.data ?? []) : [];
-    const adminFailure = [channelResult, keyResult].find(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
+  async models(signal?: AbortSignal): Promise<GatewayModel[]> {
+    return (await this.request<{ data: GatewayModel[] }>("/v1/models", { signal })).data;
+  }
+
+  async channels(signal?: AbortSignal): Promise<ChannelConfig[]> {
+    return (await this.request<{ data: ChannelConfig[] }>("/admin/channels", { signal })).data;
+  }
+
+  async keys(signal?: AbortSignal): Promise<ApiKeyRecord[]> {
+    return (await this.request<{ data: ApiKeyRecord[] }>("/admin/keys", { signal })).data;
+  }
+
+  private metricParams(query: MetricsQuery): URLSearchParams {
+    const params = new URLSearchParams({ window: query.window });
+    if (query.provider) params.set("provider", query.provider);
+    if (query.model) params.set("model", query.model);
+    if (query.status) params.set("status", query.status);
+    return params;
+  }
+
+  metricsSummary(query: MetricsQuery, signal?: AbortSignal): Promise<MetricsSummary> {
+    return this.request(`${this.metricsPrefix()}/summary?${this.metricParams(query)}`, { signal });
+  }
+
+  async metricsTimeseries(query: MetricsQuery, signal?: AbortSignal): Promise<TimeseriesPoint[]> {
+    const result = await this.request<{ data: TimeseriesPoint[] }>(
+      `${this.metricsPrefix()}/timeseries?${this.metricParams(query)}`,
+      { signal },
     );
-    const adminError = adminFailure
-      ? adminFailure.reason instanceof ApiError && adminFailure.reason.status === 401
-        ? "需要管理员 API Key"
-        : adminFailure.reason instanceof Error
-          ? adminFailure.reason.message
-          : "管理接口不可用"
-      : "";
-
-    return {
-      health,
-      auth,
-      models: models.data ?? [],
-      summary,
-      timeseries: timeseries.data ?? [],
-      recent: recent.data ?? [],
-      channels,
-      keys,
-      adminError,
-    };
+    return result.data;
   }
 
-  async metrics(query: MetricsQuery, signal?: AbortSignal): Promise<MetricsSnapshot> {
-    const prefix = this.metricsPrefix();
-    const filterParams = new URLSearchParams({ window: query.window });
-    if (query.provider) filterParams.set("provider", query.provider);
-    if (query.model) filterParams.set("model", query.model);
-    if (query.status) filterParams.set("status", query.status);
-    const requestParams = new URLSearchParams(filterParams);
-    requestParams.set("limit", String(query.limit ?? 50));
-    if (query.offset) requestParams.set("offset", String(query.offset));
-
-    const [summary, series, recent] = await Promise.all([
-      this.request<MetricsSummary>(`${prefix}/summary?${filterParams.toString()}`, { signal }),
-      this.request<{ data: TimeseriesPoint[] }>(`${prefix}/timeseries?${filterParams.toString()}`, {
-        signal,
-      }),
-      this.request<{ data: RecentRequest[]; total?: number }>(
-        `${prefix}/requests?${requestParams.toString()}`,
-        { signal },
-      ),
-    ]);
-    return {
-      summary,
-      timeseries: series.data ?? [],
-      recent: recent.data ?? [],
-      total: recent.total ?? recent.data?.length ?? 0,
-    };
+  async metricsRequests(
+    query: MetricsQuery,
+    signal?: AbortSignal,
+  ): Promise<Pick<MetricsSnapshot, "recent" | "total">> {
+    const params = this.metricParams(query);
+    params.set("limit", String(query.limit ?? 50));
+    params.set("offset", String(query.offset ?? 0));
+    const result = await this.request<{ data: RecentRequest[]; total?: number }>(
+      `${this.metricsPrefix()}/requests?${params}`,
+      { signal },
+    );
+    return { recent: result.data, total: result.total ?? result.data.length };
   }
 
   private reasoningOptions(model: GatewayModel, effort?: string): Record<string, unknown> {
@@ -278,66 +212,50 @@ export class GatewayApi {
     }
     if (!response.body) throw new ApiError("Gateway 未返回流式响应", 502);
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let ended = false;
-    const consume = (block: string): void => {
-      const data = block
-        .split(/\r?\n/)
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trimStart())
-        .join("\n")
-        .trim();
-      if (!data) return;
-      if (data === "[DONE]") {
-        ended = true;
-        onUpdate({ done: true });
-        return;
-      }
-      let payload: {
-        choices?: Array<{
-          delta?: {
-            content?: string | Array<{ text?: string }> | null;
-            reasoning_content?: string;
-          };
-          finish_reason?: string | null;
-        }>;
-        usage?: Usage;
-      };
-      try {
-        payload = JSON.parse(data) as typeof payload;
-      } catch {
-        return;
-      }
-      const choice = payload.choices?.[0];
-      const delta = choice?.delta;
-      const content = Array.isArray(delta?.content)
-        ? delta.content.map((part) => part.text ?? "").join("")
-        : (delta?.content ?? "");
-      const reasoning = delta?.reasoning_content ?? "";
-      if (content || reasoning || payload.usage || choice?.finish_reason) {
+    const reader = response.body
+      .pipeThrough(new TextDecoderStream())
+      .pipeThrough(new EventSourceParserStream())
+      .getReader();
+    let finished = false;
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          if (!finished) throw new ApiError("响应连接提前结束，请重试", 502);
+          break;
+        }
+        if (value.data.trim() === "[DONE]") break;
+        if (!value.data.trim()) continue;
+        const payload = JSON.parse(value.data) as {
+          error?: { message?: string };
+          choices?: Array<{
+            delta?: {
+              content?: string | Array<{ text?: string }> | null;
+              reasoning_content?: string;
+            };
+            finish_reason?: string | null;
+          }>;
+          usage?: Usage;
+        };
+        if (payload.error) throw new ApiError(payload.error.message || "模型响应失败", 502);
+        const choice = payload.choices?.[0];
+        const delta = choice?.delta;
+        const content = Array.isArray(delta?.content)
+          ? delta.content.map((part) => part.text ?? "").join("")
+          : (delta?.content ?? "");
+        if (choice?.finish_reason) finished = true;
         onUpdate({
           content: content || undefined,
-          reasoning: reasoning || undefined,
+          reasoning: delta?.reasoning_content,
           usage: payload.usage,
           finishReason: choice?.finish_reason,
         });
       }
-    };
-
-    while (!ended) {
-      const result = await reader.read();
-      buffer += decoder.decode(result.value ?? new Uint8Array(), { stream: !result.done });
-      const blocks = buffer.split(/\r?\n\r?\n/);
-      buffer = blocks.pop() ?? "";
-      for (const block of blocks) consume(block);
-      if (result.done) {
-        if (buffer.trim()) consume(buffer);
-        break;
-      }
+      onUpdate({ done: true });
+    } finally {
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
     }
-    if (!ended) onUpdate({ done: true });
   }
 
   saveChannel(channel: ChannelInput): Promise<unknown> {

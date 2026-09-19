@@ -4,7 +4,10 @@
     "includes": [
       "web/src/**/*.ts",
       "web/src/**/*.tsx",
-      "web/src/**/*.css"
+      "web/src/**/*.css",
+      "web/tests/**/*.ts",
+      "web/tests/**/*.tsx",
+      "vitest.config.ts"
     ]
   },
   "formatter": {

@@ -1,11 +1,13 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@import "streamdown/styles.css";
+@source "../../node_modules/streamdown/dist/*.js";
 
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --background: #f6f8fc;
+  --background: #f7f8fa;
   --foreground: #111827;
   --card: #ffffff;
   --card-foreground: #111827;
@@ -19,7 +21,10 @@
   --muted-foreground: #64748b;
   --accent: #e0f2fe;
   --accent-foreground: #075985;
-  --destructive: #dc2626;
+  --destructive: #b91c1c;
+  --success: #047857;
+  --warning: #92400e;
+  --info: #0369a1;
   --destructive-foreground: #ffffff;
   --border: #e2e8f0;
   --input: #e2e8f0;
@@ -34,11 +39,11 @@
 }
 
 .dark {
-  --background: #090d18;
+  --background: #101216;
   --foreground: #e8edf8;
-  --card: #101727;
+  --card: #181b21;
   --card-foreground: #e8edf8;
-  --popover: #101727;
+  --popover: #181b21;
   --popover-foreground: #e8edf8;
   --primary: #818cf8;
   --primary-foreground: #101126;
@@ -49,6 +54,9 @@
   --accent: #122c43;
   --accent-foreground: #7dd3fc;
   --destructive: #f87171;
+  --success: #6ee7b7;
+  --warning: #fcd34d;
+  --info: #7dd3fc;
   --destructive-foreground: #240609;
   --border: #23304a;
   --input: #263652;
@@ -77,6 +85,9 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
@@ -126,10 +137,7 @@
     min-width: 320px;
     min-height: 100vh;
     margin: 0;
-    background:
-      radial-gradient(circle at 12% -8%, rgb(99 102 241 / 0.09), transparent 28rem),
-      radial-gradient(circle at 92% 0%, rgb(6 182 212 / 0.06), transparent 24rem), var(--background);
-    background-attachment: fixed;
+    background: var(--background);
     color: var(--foreground);
     font-family: var(--font-sans);
     text-rendering: optimizeLegibility;
@@ -147,11 +155,15 @@
     font: inherit;
   }
 
+  a:focus-visible,
+  summary:focus-visible,
+  [tabindex]:focus-visible,
   button:focus-visible,
   input:focus-visible,
   textarea:focus-visible,
   select:focus-visible {
-    outline: none;
+    outline: 2px solid var(--ring);
+    outline-offset: 3px;
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -176,18 +188,6 @@
 }
 
 @layer utilities {
-  .panel-shadow {
-    box-shadow: var(--shadow-panel);
-  }
-
-  .grid-fade {
-    background-image:
-      linear-gradient(to right, rgb(148 163 184 / 0.08) 1px, transparent 1px),
-      linear-gradient(to bottom, rgb(148 163 184 / 0.08) 1px, transparent 1px);
-    background-size: 28px 28px;
-    mask-image: linear-gradient(to bottom, black, transparent 78%);
-  }
-
   .scrollbar-thin {
     scrollbar-width: thin;
     scrollbar-color: rgb(100 116 139 / 0.45) transparent;
