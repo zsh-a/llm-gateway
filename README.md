@@ -17,11 +17,13 @@ Tauri 2
 ## 目录
 
 ```text
-src-tauri/             Rust 网关、Tauri 入口、SQLite 和托盘
-web/src/               React 控制台
+src-tauri/src/gateway/ Rust 网关 HTTP、协议、认证、指标和模型目录
+src-tauri/src/desktop.rs Tauri 启动与系统托盘
+web/src/               React 控制台页面与通用组件
+web/src/features/      按功能组织的管理页面组件
 scripts/auth.ts        一次性认证捕获工具
 scripts/auth-support.ts 认证缓存、Provider 捕获规则和配置读取
-assets/icons/          应用与托盘图标
+src-tauri/icons/       应用与托盘图标
 ```
 
 运行时只包含 Rust/Tauri 网关；认证工具在首次捕获凭据时使用 Node 和 mitmweb，网关运行时不会启动它们。
@@ -88,6 +90,7 @@ REQUEST_TIMEOUT_MS=180000
 MAX_BODY_BYTES=1048576
 MODEL_DISCOVERY=true
 MODEL_DISCOVERY_TIMEOUT_MS=30000
+METRICS_MAX_RECORDS=2000
 # WORKBUDDY_MODEL_FILE=/path/to/WorkBuddy/product.json
 # DEFAULT_MODEL=provider/model-id
 # CORS_ORIGIN=http://localhost:1420

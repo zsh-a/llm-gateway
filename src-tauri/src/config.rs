@@ -101,6 +101,10 @@ impl Config {
             .unwrap_or_else(|_| self.runtime_dir.join("gateway.sqlite3"))
     }
 
+    pub fn bind_address(&self) -> String {
+        format!("{}:{}", self.bind_host, self.port)
+    }
+
     pub fn is_loopback(&self) -> bool {
         matches!(
             self.bind_host.trim().to_ascii_lowercase().as_str(),
