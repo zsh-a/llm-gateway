@@ -8,7 +8,7 @@
     "build:auth": "tsc -p tsconfig.auth.json",
     "dev:web:tauri": "vite --config web/vite.config.ts --host 127.0.0.1 --port 1420",
     "build:web:tauri": "vite build --config web/vite.config.ts",
-    "serve:headless": "cargo run --manifest-path src-tauri/Cargo.toml --bin llm-gateway-headless",
+    "serve:headless": "cargo run --manifest-path src-tauri/Cargo.toml -- --headless",
     "serve:rust": "npm run serve:headless",
     "desktop": "tauri dev",
     "package:tauri": "tauri build",

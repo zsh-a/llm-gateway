@@ -15,10 +15,6 @@ crate-type = ["lib", "cdylib", "staticlib"]
 name = "llm-gateway"
 path = "src/main.rs"
 
-[[bin]]
-name = "llm-gateway-headless"
-path = "src/headless.rs"
-
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

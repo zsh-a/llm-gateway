@@ -63,8 +63,8 @@ systemd/launchd 服务：
 ```bash
 npm run serve:headless
 
-# 或直接运行 headless 二进制
-cargo run --release --manifest-path src-tauri/Cargo.toml --bin llm-gateway-headless
+# 或直接运行主二进制的 headless 参数
+cargo run --release --manifest-path src-tauri/Cargo.toml -- --headless
 ```
 
 现有主程序也支持 `--headless` 参数或 `HEADLESS=1` 环境变量：
