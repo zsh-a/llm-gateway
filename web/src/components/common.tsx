@@ -11,8 +11,8 @@ export function statusVariant(
   status: string | undefined,
 ): "success" | "warning" | "danger" | "muted" {
   if (status === "success" || status === "ok" || status === "ready") return "success";
-  if (status === "error" || status === "offline") return "danger";
-  if (status === "pending" || status === "starting" || status === "not_ready") return "warning";
+  if (status === "error" || status === "offline" || status === "failed") return "danger";
+  if (["pending", "starting", "stopping", "not_ready"].includes(status ?? "")) return "warning";
   return "muted";
 }
 
@@ -26,6 +26,9 @@ export function StatusBadge({ status, label }: { status: string | undefined; lab
     pending: "等待中",
     ready: "就绪",
     starting: "启动中",
+    stopping: "停止中",
+    stopped: "已停止",
+    failed: "服务异常",
     success: "成功",
     unknown: "未知",
   };

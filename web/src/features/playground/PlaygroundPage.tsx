@@ -31,12 +31,14 @@ export function PlaygroundPage({
   initialModelId,
   onNavigate,
   onRefresh,
+  serviceAvailable = true,
 }: {
   data: DashboardData;
   api: GatewayApi;
   initialModelId?: string;
   onNavigate: Navigate;
   onRefresh: () => void;
+  serviceAvailable?: boolean;
 }) {
   const [modelId, setModelId] = useState(initialModelId ?? data.models[0]?.id ?? "");
   const [effort, setEffort] = useState("auto");
@@ -69,7 +71,7 @@ export function PlaygroundPage({
   }, [model, effort]);
 
   const send = async (request: Request): Promise<void> => {
-    if (abortRef.current) return;
+    if (abortRef.current || !serviceAvailable) return;
     const controller = new AbortController();
     abortRef.current = controller;
     setResponse({ ...emptyResponse, state: "streaming", request });
@@ -229,7 +231,9 @@ export function PlaygroundPage({
             ) : (
               <Button
                 type="submit"
-                disabled={!model || !prompt.trim() || !data.resources.models.hasData}
+                disabled={
+                  !serviceAvailable || !model || !prompt.trim() || !data.resources.models.hasData
+                }
               >
                 <ArrowUp className="size-4" />
                 发送
@@ -240,6 +244,7 @@ export function PlaygroundPage({
       </Card>
       <ResponsePreview
         response={response}
+        canRetry={serviceAvailable}
         onClear={clear}
         onRetry={() => {
           if (response.request) void send(response.request);
@@ -251,10 +256,12 @@ export function PlaygroundPage({
 
 function ResponsePreview({
   response,
+  canRetry,
   onClear,
   onRetry,
 }: {
   response: Response;
+  canRetry: boolean;
   onClear: () => void;
   onRetry: () => void;
 }) {
@@ -318,6 +325,7 @@ function ResponsePreview({
                 variant="ghost"
                 size="icon"
                 onClick={onRetry}
+                disabled={!canRetry}
                 title="重试原请求"
                 aria-label="重试原请求"
               >

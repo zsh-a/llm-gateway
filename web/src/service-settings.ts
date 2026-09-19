@@ -1,15 +1,35 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export interface ServiceSettings {
   host: string;
   port: number;
 }
 
-export function serviceBaseUrl(settings: ServiceSettings): string {
-  let host = settings.host.trim();
-  if (["0.0.0.0", "::", "[::]"].includes(host)) host = "127.0.0.1";
-  if (host.includes(":") && !host.startsWith("[")) host = `[${host}]`;
-  return `http://${host}:${settings.port}`;
+export interface ServiceStatus {
+  phase: "starting" | "running" | "stopping" | "stopped" | "failed";
+  baseUrl: string;
+  activeRequests: number;
+  error: string | null;
+  canForceExit: boolean;
+}
+
+export function getServiceStatus(): Promise<ServiceStatus> {
+  return invoke<ServiceStatus>("get_service_status");
+}
+
+export function controlService(action: "start" | "stop" | "restart"): Promise<void> {
+  return invoke<void>("control_service", { action });
+}
+
+export function forceQuit(): Promise<void> {
+  return invoke<void>("force_quit");
+}
+
+export function listenServiceStatus(
+  callback: (status: ServiceStatus) => void,
+): Promise<UnlistenFn> {
+  return listen<ServiceStatus>("gateway-service-status", (event) => callback(event.payload));
 }
 
 export function getServiceSettings(): Promise<ServiceSettings> {

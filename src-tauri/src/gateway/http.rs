@@ -87,8 +87,21 @@ pub(crate) async fn serve(state: AppState) -> anyhow::Result<()> {
     let address = state.config.bind_address();
     let listener = TcpListener::bind(&address).await?;
     info!(%address, "Rust Axum 网关已启动");
+    let activity = state.activity.clone();
+    serve_listener(state, listener, async move {
+        shutdown_signal().await;
+        activity.set_accepting(false);
+    })
+    .await
+}
+
+pub(crate) async fn serve_listener(
+    state: AppState,
+    listener: TcpListener,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
     axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown)
         .await?;
     Ok(())
 }
@@ -257,7 +270,14 @@ async fn proxy_chat(
         Ok(routes) => routes,
         Err(response) => return *response,
     };
-    let metric = state.metric(if responses_mode { "responses" } else { "chat" }, &identity);
+    let Some(metric) = state.metric(if responses_mode { "responses" } else { "chat" }, &identity)
+    else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "网关正在停止，请稍后重试",
+            "service_stopping",
+        );
+    };
     let mut response = None;
     let mut last_status = StatusCode::BAD_GATEWAY;
     for (index, route) in routes.iter().enumerate() {

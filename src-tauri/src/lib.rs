@@ -2,6 +2,7 @@ mod config;
 mod db;
 mod desktop;
 mod gateway;
+mod service;
 
 use crate::config::Config;
 use crate::gateway::{AppState, serve};
@@ -21,21 +22,43 @@ pub fn run() {
     init_tracing();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Err(error) = desktop::show_main(app, false) {
+                tracing::warn!(%error, "唤醒已有窗口失败");
+            }
+        }))
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             desktop::get_service_settings,
             desktop::save_service_settings,
+            desktop::get_service_status,
+            desktop::control_service,
+            desktop::force_quit,
             desktop::remote_sync_status,
             desktop::remote_sync_pull
         ])
         .setup(desktop::setup)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+                if window.label() == "main" {
+                    api.prevent_close();
+                    if let Err(error) = window.hide() {
+                        tracing::warn!(%error, "隐藏窗口失败");
+                    }
+                }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("运行 LLM Gateway Tauri 应用失败");
+        .build(tauri::generate_context!())
+        .expect("创建 LLM Gateway Tauri 应用失败")
+        .run(desktop::handle_run_event);
 }
 
 pub fn run_headless() -> anyhow::Result<()> {

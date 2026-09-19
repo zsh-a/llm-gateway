@@ -196,6 +196,7 @@ export function Spinner({ className }: { className?: string }) {
 }
 
 export function ConfirmDialog({
+  confirmDisabled = false,
   open,
   title,
   description,
@@ -209,6 +210,7 @@ export function ConfirmDialog({
   title: string;
   description: string;
   confirmLabel?: string;
+  confirmDisabled?: boolean;
   loading?: boolean;
   destructive?: boolean;
   onConfirm: () => void;
@@ -239,7 +241,7 @@ export function ConfirmDialog({
             <Button
               variant={destructive ? "destructive" : "default"}
               onClick={onConfirm}
-              disabled={loading}
+              disabled={loading || confirmDisabled}
             >
               {loading && <Spinner />}
               {loading ? "处理中…" : confirmLabel}

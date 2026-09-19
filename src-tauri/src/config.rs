@@ -12,6 +12,20 @@ pub struct ServiceSettings {
 }
 
 impl ServiceSettings {
+    pub fn base_url(&self) -> String {
+        let host = match self.host.trim() {
+            "0.0.0.0" => "127.0.0.1",
+            "::" | "[::]" => "::1",
+            host => host,
+        };
+        let host = if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]")
+        } else {
+            host.to_owned()
+        };
+        format!("http://{host}:{}", self.port)
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         let host = self.host.trim();
         anyhow::ensure!(!host.is_empty(), "服务 Host 不能为空");
@@ -28,6 +42,33 @@ impl ServiceSettings {
         Self {
             host: self.host.trim().to_string(),
             port: self.port,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_addresses_are_not_wildcard_bind_addresses() {
+        for (host, expected) in [
+            ("0.0.0.0", "http://127.0.0.1:3000"),
+            ("::", "http://[::1]:3000"),
+            ("[::]", "http://[::1]:3000"),
+            ("::1", "http://[::1]:3000"),
+            ("[::1]", "http://[::1]:3000"),
+            (" localhost ", "http://localhost:3000"),
+            ("192.168.1.10", "http://192.168.1.10:3000"),
+        ] {
+            assert_eq!(
+                ServiceSettings {
+                    host: host.into(),
+                    port: 3000
+                }
+                .base_url(),
+                expected
+            );
         }
     }
 }

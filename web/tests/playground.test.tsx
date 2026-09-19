@@ -6,6 +6,68 @@ import { PlaygroundPage } from "../src/features/playground/PlaygroundPage";
 import { emptyDashboard } from "../src/lib/constants";
 
 describe("playground request identity", () => {
+  it("disables sends and retries when the desktop service stops", async () => {
+    const api = new GatewayApi({ apiKey: "", adminKey: "" });
+    const stream = vi.spyOn(api, "streamChat").mockResolvedValue(undefined);
+    const data = {
+      ...emptyDashboard,
+      models: [{ id: "a", name: "Alpha" }],
+      resources: {
+        ...emptyDashboard.resources,
+        models: { hasData: true, pending: false, error: "" },
+      },
+    };
+    const props = { data, api, onNavigate: vi.fn(), onRefresh: vi.fn() };
+    const { rerender } = render(<PlaygroundPage {...props} />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("消息"), "hello");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await screen.findByText("已完成");
+    rerender(<PlaygroundPage {...props} serviceAvailable={false} />);
+    expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "重试原请求" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    await user.click(screen.getByLabelText("消息"));
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    expect(stream).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the current stream alive while the service drains", async () => {
+    const api = new GatewayApi({ apiKey: "", adminKey: "" });
+    let signal: AbortSignal | undefined;
+    let finish!: () => void;
+    vi.spyOn(api, "streamChat").mockImplementation(
+      (_model, _prompt, _effort, _update, nextSignal) => {
+        signal = nextSignal;
+        return new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+      },
+    );
+    const data = {
+      ...emptyDashboard,
+      models: [{ id: "a", name: "Alpha" }],
+      resources: {
+        ...emptyDashboard.resources,
+        models: { hasData: true, pending: false, error: "" },
+      },
+    };
+    const props = { data, api, onNavigate: vi.fn(), onRefresh: vi.fn() };
+    const { rerender } = render(<PlaygroundPage {...props} />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("消息"), "hello");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    rerender(<PlaygroundPage {...props} serviceAvailable={false} />);
+    expect(signal?.aborted).toBe(false);
+    expect((screen.getByRole("button", { name: "停止生成" }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+    finish();
+    await screen.findByText("已完成");
+    expect(signal?.aborted).toBe(false);
+  });
+
   it("renders Markdown and retains the original model for preview and retry", async () => {
     const api = new GatewayApi({ apiKey: "", adminKey: "" });
     const stream = vi

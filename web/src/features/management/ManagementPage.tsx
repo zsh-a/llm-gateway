@@ -29,11 +29,13 @@ export function ManagementPage({
   api,
   onNotice,
   onNavigate,
+  serviceAvailable = true,
 }: {
   data: DashboardData;
   api: GatewayApi;
   onNotice: (message: string, tone?: NoticeTone) => void;
   onNavigate: Navigate;
+  serviceAvailable?: boolean;
 }) {
   const [tab, setTab] = useState("channels");
   const [editor, setEditor] = useState<Editor | null>(null);
@@ -118,7 +120,7 @@ export function ManagementPage({
             </Tabs.Tab>
           </Tabs.List>
           <Button
-            disabled={busy || !resource.hasData || Boolean(resource.error)}
+            disabled={!serviceAvailable || busy || !resource.hasData || Boolean(resource.error)}
             onClick={() => {
               setDirty(false);
               setEditor({ kind: tab === "channels" ? "channel" : "key" });
@@ -140,7 +142,7 @@ export function ManagementPage({
           <ResourceContent state={data.resources.channels} label="渠道">
             <ChannelList
               items={data.channels}
-              disabled={busy || Boolean(data.resources.channels.error)}
+              disabled={!serviceAvailable || busy || Boolean(data.resources.channels.error)}
               onEdit={(item) => {
                 setDirty(false);
                 setEditor({ kind: "channel", item });
@@ -159,7 +161,7 @@ export function ManagementPage({
           <ResourceContent state={data.resources.keys} label="API Keys">
             <ApiKeyList
               items={data.keys}
-              disabled={busy || Boolean(data.resources.keys.error)}
+              disabled={!serviceAvailable || busy || Boolean(data.resources.keys.error)}
               onEdit={(item) => {
                 setDirty(false);
                 setEditor({ kind: "key", item });
@@ -201,7 +203,7 @@ export function ManagementPage({
             models={data.models.map((model) => model.id)}
             channels={data.channels}
             item={editor.item}
-            disabled={Boolean(data.resources.channels.error)}
+            disabled={!serviceAvailable || Boolean(data.resources.channels.error)}
             onDirtyChange={setDirty}
             onCancel={closeEditor}
             onSave={async (input) => {
@@ -216,7 +218,7 @@ export function ManagementPage({
             key={editor.item?.id ?? "new-key"}
             models={data.models}
             item={editor.item}
-            disabled={Boolean(data.resources.keys.error)}
+            disabled={!serviceAvailable || Boolean(data.resources.keys.error)}
             onDirtyChange={setDirty}
             onCancel={closeEditor}
             onSave={async (input) => {
@@ -264,9 +266,10 @@ export function ManagementPage({
         confirmLabel={confirmation?.kind === "channel" ? "删除渠道" : "撤销 Key"}
         destructive
         loading={removeMutation.isPending}
+        confirmDisabled={!serviceAvailable}
         onCancel={() => setConfirmation(null)}
         onConfirm={() => {
-          if (!confirmation) return;
+          if (!confirmation || !serviceAvailable) return;
           void run(
             async () => {
               await removeMutation.mutateAsync(confirmation);

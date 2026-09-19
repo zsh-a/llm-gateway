@@ -25,6 +25,30 @@ function renderManagement(api: GatewayApi) {
 }
 
 describe("management sheets", () => {
+  it("preserves an open draft but prevents saving while the service is stopped", async () => {
+    const api = new GatewayApi({ apiKey: "", adminKey: "" });
+    const save = vi.spyOn(api, "saveChannel");
+    const props = { data, api, onNotice: vi.fn(), onNavigate: vi.fn() };
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <ManagementPage {...props} />
+      </QueryClientProvider>,
+    );
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "新增渠道" }));
+    await user.type(await screen.findByLabelText("显示名称"), "Unsaved draft");
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <ManagementPage {...props} serviceAvailable={false} />
+      </QueryClientProvider>,
+    );
+    expect((screen.getByLabelText("显示名称") as HTMLInputElement).value).toBe("Unsaved draft");
+    const submit = within(screen.getByRole("dialog")).getByRole("button", { name: /创建渠道/ });
+    expect((submit as HTMLButtonElement).disabled).toBe(true);
+    await user.click(submit);
+    expect(save).not.toHaveBeenCalled();
+  });
+
   it("guards unsaved changes, preserves them when canceled and restores trigger focus", async () => {
     const user = userEvent.setup();
     const api = new GatewayApi({ apiKey: "", adminKey: "" });

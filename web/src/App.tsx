@@ -4,13 +4,13 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react
 import { Toaster, toast } from "sonner";
 import { type Credentials, GatewayApi, gatewayBaseUrl, loadCredentials } from "./api";
 import { DashboardLayout } from "./components/layout";
+import { ServiceBanner } from "./components/ServiceBanner";
 import { Button, Spinner } from "./components/ui";
 import { OverviewPage } from "./features/overview/OverviewPage";
 import { resolveLocation } from "./lib/constants";
+import { useDesktopService } from "./lib/desktop-service";
 import { useGatewayDashboard } from "./lib/gateway-queries";
 import { gatewayQueryKeys, queryClient } from "./lib/query";
-import { isTauriRuntime } from "./remote-sync";
-import { getServiceSettings, serviceBaseUrl } from "./service-settings";
 import type { Navigate, NoticeTone, ThemePreference } from "./types";
 
 const ManagementPage = lazy(() =>
@@ -31,12 +31,9 @@ const SettingsPage = lazy(() =>
 );
 
 export function App() {
-  const tauriRuntime = isTauriRuntime();
   const [location, setLocation] = useState(() => resolveLocation(window.location.hash));
   const [mobileNav, setMobileNav] = useState(false);
   const [credentials, setCredentials] = useState(loadCredentials);
-  const [gatewayUrl, setGatewayUrl] = useState(gatewayBaseUrl);
-  const [serviceReady, setServiceReady] = useState(!tauriRuntime);
   const [themePreference, setThemePreference] = useState<ThemePreference>(() => {
     const saved = localStorage.getItem("llm-gateway.theme");
     return saved === "light" || saved === "dark" ? saved : "system";
@@ -45,8 +42,6 @@ export function App() {
     () => window.matchMedia("(prefers-color-scheme: dark)").matches,
   );
   const theme = themePreference === "system" ? (systemDark ? "dark" : "light") : themePreference;
-  const api = useMemo(() => new GatewayApi(credentials, gatewayUrl), [credentials, gatewayUrl]);
-  const { data, healthError } = useGatewayDashboard(api, serviceReady, location.page);
   const fetching = useIsFetching({ queryKey: gatewayQueryKeys.all });
 
   const showNotice = useCallback((message: string, tone: NoticeTone = "success"): void => {
@@ -57,6 +52,12 @@ export function App() {
     else toast.success(message, options);
   }, []);
 
+  const desktop = useDesktopService(showNotice);
+  const gatewayUrl = desktop.status?.baseUrl ?? gatewayBaseUrl;
+  const serviceReady = !desktop.native || (desktop.status?.phase === "running" && !desktop.error);
+  const api = useMemo(() => new GatewayApi(credentials, gatewayUrl), [credentials, gatewayUrl]);
+  const { data, healthError } = useGatewayDashboard(api, serviceReady, location.page);
+
   const updateCredentials = useCallback((next: Credentials): void => {
     void queryClient.cancelQueries({ queryKey: gatewayQueryKeys.all });
     queryClient.removeQueries({ queryKey: gatewayQueryKeys.all });
@@ -64,25 +65,9 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!tauriRuntime) return;
-    let active = true;
-    void getServiceSettings()
-      .then((settings) => {
-        if (active) {
-          setGatewayUrl(serviceBaseUrl(settings));
-          setServiceReady(true);
-        }
-      })
-      .catch((error: unknown) => {
-        if (active) {
-          showNotice(error instanceof Error ? error.message : "读取服务配置失败", "error");
-          setServiceReady(true);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [showNotice, tauriRuntime]);
+    if (desktop.native && serviceReady)
+      void queryClient.invalidateQueries({ queryKey: gatewayQueryKeys.all });
+  }, [desktop.native, serviceReady]);
 
   const navigate = useCallback<Navigate>((next, options = {}) => {
     const params = new URLSearchParams();
@@ -130,14 +115,21 @@ export function App() {
         page={location.page}
         mobileOpen={mobileNav}
         refreshing={fetching > 0}
-        healthStatus={data.health.status}
+        healthStatus={
+          desktop.error
+            ? "error"
+            : desktop.native && desktop.status?.phase !== "running"
+              ? (desktop.status?.phase ?? "starting")
+              : data.health.status
+        }
         theme={theme}
         onNavigate={navigate}
         onToggleMobile={setMobileNav}
         onRefresh={() => void refresh()}
         onToggleTheme={() => setThemePreference(theme === "dark" ? "light" : "dark")}
       >
-        {healthError && (
+        <ServiceBanner service={desktop} />
+        {healthError && serviceReady && (
           <div
             role="alert"
             className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive"
@@ -172,11 +164,20 @@ export function App() {
               initialModelId={location.modelId}
               onNavigate={navigate}
               onRefresh={() => void refresh()}
+              serviceAvailable={serviceReady}
             />
           )}
-          {location.page === "metrics" && <MetricsPage data={data} api={api} />}
+          {location.page === "metrics" && (
+            <MetricsPage data={data} api={api} enabled={serviceReady} />
+          )}
           {location.page === "management" && (
-            <ManagementPage data={data} api={api} onNotice={showNotice} onNavigate={navigate} />
+            <ManagementPage
+              data={data}
+              api={api}
+              onNotice={showNotice}
+              onNavigate={navigate}
+              serviceAvailable={serviceReady}
+            />
           )}
           {location.page === "settings" && (
             <SettingsPage

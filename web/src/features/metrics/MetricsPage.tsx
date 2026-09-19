@@ -26,9 +26,17 @@ import { formatCompact, formatDuration, formatNumber } from "../../lib/format";
 import { useMetrics } from "../../lib/gateway-queries";
 import type { DashboardData, MetricsQuery, MetricsWindow } from "../../types";
 
-export function MetricsPage({ data, api }: { data: DashboardData; api: GatewayApi }) {
+export function MetricsPage({
+  data,
+  api,
+  enabled = true,
+}: {
+  data: DashboardData;
+  api: GatewayApi;
+  enabled?: boolean;
+}) {
   const [filters, setFilters] = useState<MetricsQuery>({ window: "24h", limit: 50, offset: 0 });
-  const query = useMetrics(api, filters);
+  const query = useMetrics(api, filters, enabled);
   const metrics = query.data ?? { summary: emptySummary, timeseries: [], recent: [], total: 0 };
   const summary = metrics.summary;
   const providers = Array.from(
@@ -121,11 +129,16 @@ export function MetricsPage({ data, api }: { data: DashboardData; api: GatewayAp
             更新中
           </span>
         ) : query.error ? (
-          <Button variant="outline" size="sm" onClick={() => void query.refetch()}>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!enabled}
+            onClick={() => void query.refetch()}
+          >
             重新加载
           </Button>
         ) : (
-          <span>每 10 秒自动更新</span>
+          <span>{enabled ? "每 10 秒自动更新" : "服务未运行，已暂停更新"}</span>
         )}
       </div>
       <ResourceContent state={state} label="统计">

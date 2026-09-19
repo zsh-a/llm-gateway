@@ -69,7 +69,19 @@ pub(super) async fn metrics_response(
                 .is_none_or(|identity| row.api_key_id.as_deref() == Some(identity.key_id.as_str()))
     });
     match view {
-        MetricView::Summary => Json(summary_json(&rows)).into_response(),
+        MetricView::Summary => {
+            let active_requests = if query.status.is_some() {
+                0
+            } else {
+                state.activity.matching(
+                    identity.as_ref().map(|value| value.key_id.as_str()),
+                    query.provider.as_deref(),
+                    query.model.as_deref(),
+                    since,
+                )
+            };
+            Json(summary_json(&rows, active_requests)).into_response()
+        }
         MetricView::Requests => {
             let offset = query.offset.unwrap_or(0);
             let limit = query.limit.unwrap_or(50).clamp(1, 500);
@@ -87,7 +99,7 @@ pub(super) async fn metrics_response(
     }
 }
 
-fn summary_json(rows: &[MetricRow]) -> Value {
+fn summary_json(rows: &[MetricRow], active_requests: usize) -> Value {
     let requests = rows.len() as i64;
     let successes = rows.iter().filter(|row| row.status == "success").count() as i64;
     let errors = rows.iter().filter(|row| row.status == "error").count() as i64;
@@ -104,7 +116,7 @@ fn summary_json(rows: &[MetricRow]) -> Value {
         "errors": errors,
         "canceled": canceled,
         "successRate": if requests > 0 { json!(successes as f64 / requests as f64) } else { Value::Null },
-        "activeRequests": 0,
+        "activeRequests": active_requests,
         "latency": {
             "averageMs": average(&durations),
             "p50Ms": percentile(&durations, 0.50),

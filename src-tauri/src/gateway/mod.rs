@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tracing::warn;
 
+mod activity;
 mod auth;
 mod http;
 mod metrics;
@@ -17,7 +18,9 @@ mod model_catalog;
 mod protocols;
 mod sync;
 
+use activity::{Activity, RequestGuard};
 pub(crate) use http::serve;
+pub(crate) use http::serve_listener;
 pub(crate) use sync::{RemoteSyncPullResult, RemoteSyncSettings, RemoteSyncStatus};
 
 use auth::{
@@ -62,6 +65,7 @@ pub struct AppState {
     pub config: Config,
     pub db: Db,
     pub client: Client,
+    pub(crate) activity: Activity,
     auth: Arc<RwLock<HashMap<String, HeaderMap>>>,
     model_cache: Arc<RwLock<Option<ModelCache>>>,
 }
@@ -95,6 +99,7 @@ struct MetricContext {
 
 #[derive(Default)]
 struct MetricDraft {
+    active: Option<RequestGuard>,
     id: String,
     started_at: i64,
     protocol: String,
@@ -110,6 +115,58 @@ struct MetricDraft {
 }
 
 impl AppState {
+    #[cfg(test)]
+    pub(crate) fn test_state(runtime_dir: &std::path::Path) -> Self {
+        // Explicit configuration: tests never read real credentials or DATABASE_FILE.
+        let config = Config {
+            bind_host: "127.0.0.1".into(),
+            port: 0,
+            request_timeout_ms: 5000,
+            max_body_bytes: 1024 * 1024,
+            proxy_api_key: String::new(),
+            proxy_admin_key: String::new(),
+            cors_origin: String::new(),
+            runtime_dir: runtime_dir.into(),
+            auth_cache_dir: runtime_dir.join("auth"),
+            channels_file: runtime_dir.join("channels.json"),
+            api_keys_file: runtime_dir.join("keys.json"),
+            model_file: None,
+            model_discovery: false,
+            model_discovery_timeout_ms: 100,
+            default_model: String::new(),
+            metrics_max_records: 100,
+        };
+        Self {
+            config,
+            db: Db::open(std::path::Path::new(":memory:")).unwrap(),
+            client: Client::builder().no_proxy().build().unwrap(),
+            activity: Activity::default(),
+            auth: Arc::new(RwLock::new(HashMap::new())),
+            model_cache: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_upstream(&self, url: &str) {
+        self.auth
+            .write()
+            .unwrap()
+            .insert("mimo".into(), HeaderMap::new());
+        self.db
+            .upsert_channel(&ChannelRecord {
+                id: "test".into(),
+                name: "test".into(),
+                provider_id: "mimo".into(),
+                auth_ref: "mimo".into(),
+                upstream_url: Some(url.into()),
+                enabled: true,
+                priority: 0,
+                weight: 1,
+                model_mappings: json!({}),
+            })
+            .unwrap();
+    }
+
     pub fn new(config: Config) -> anyhow::Result<Self> {
         config.ensure_runtime_dir()?;
         let db = Db::open(&config.database_path())?;
@@ -150,6 +207,7 @@ impl AppState {
             config,
             db,
             client,
+            activity: Activity::default(),
             auth: Arc::new(RwLock::new(auth)),
             model_cache: Arc::new(RwLock::new(None)),
         })
@@ -198,18 +256,23 @@ impl AppState {
             .is_some_and(|auth| auth.contains_key(auth_ref))
     }
 
-    fn metric(&self, protocol: &str, identity: &Identity) -> MetricContext {
+    fn metric(&self, protocol: &str, identity: &Identity) -> Option<MetricContext> {
         let now = now_ms();
-        MetricContext {
+        let id = Db::new_id();
+        let active = self
+            .activity
+            .begin(id.clone(), identity.key_id.clone(), now)?;
+        Some(MetricContext {
             state: self.clone(),
             draft: Arc::new(Mutex::new(MetricDraft {
-                id: Db::new_id(),
+                id,
+                active: Some(active),
                 started_at: now,
                 protocol: protocol.to_string(),
                 api_key_id: identity.managed.then(|| identity.key_id.clone()),
                 ..MetricDraft::default()
             })),
-        }
+        })
     }
 
     fn auth_status(&self) -> Value {
@@ -505,6 +568,9 @@ impl AppState {
 impl MetricContext {
     fn set_route(&self, route: &Route, model: &str) {
         if let Ok(mut draft) = self.draft.lock() {
+            if let Some(active) = &draft.active {
+                active.set_route(&route.provider, model);
+            }
             draft.provider = Some(route.provider.clone());
             draft.channel_id = Some(route.channel_id.clone());
             draft.model = Some(model.to_string());
@@ -526,6 +592,7 @@ impl MetricContext {
             return;
         }
         guard.finished = true;
+        let active = guard.active.take();
         guard.status = Some(status.to_string());
         guard.status_code = code.map(|value| value.as_u16() as i64);
         guard.finish_reason = finish_reason.map(str::to_string);
@@ -565,6 +632,7 @@ impl MetricContext {
             .state
             .db
             .prune_metrics(self.state.config.metrics_max_records);
+        drop(active);
     }
 }
 
