@@ -63,6 +63,9 @@ jobs:
       - name: Test frontend
         run: npm run test:frontend
 
+      - name: Test auth tooling
+        run: npm run test:auth
+
       - name: Typecheck and build frontend
         run: npm run typecheck && npm run build
 

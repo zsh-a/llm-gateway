@@ -114,7 +114,7 @@ git push origin v1.0.0
 
 ## 首次认证
 
-认证工具会启动 mitmweb 和对应的桌面客户端，等待成功请求，然后只保存 Cookie、Authorization 和 X-* 请求头：
+认证工具会启动 mitmweb 和对应的桌面客户端，等待成功请求，然后保存 Cookie、Authorization 和 X-* 请求头；WorkBuddy 还会保存模型配置接口要求的 User-Agent 客户端版本：
 
 ```bash
 npm run auth
@@ -172,6 +172,14 @@ npm run sync -- pull --force
 桌面应用也支持在“设置 → 远端认证同步”中检查远端版本并拉取认证。同步 Token
 只保存在当前桌面会话中，加密密码不会保存；拉取成功后网关会立即重新加载认证缓存。
 普通浏览器页面不具备本地解密和写入权限，仍需使用桌面应用完成拉取。
+
+WorkBuddy 模型目录在网关启动时和桌面拉取认证成功后自动获取。网关使用登录凭据请求
+`https://copilot.tencent.com/v3/config`，无需目标设备安装 WorkBuddy，也无需把模型目录重新上传到云端。
+旧认证包未保存 User-Agent 时会使用兼容版本头；新捕获的认证会保留客户端原有版本头。
+模型请求复用 5 分钟缓存，到期后下次查询会重新获取。成功结果只保存模型元数据到
+`RUNTIME_DIR/models/workbuddy.json`；认证失效、网络失败或返回空目录时不会覆盖已有目录。
+远程失败后依次尝试 `WORKBUDDY_MODEL_FILE`、网关模型缓存、WorkBuddy 用户缓存和 macOS 安装目录。
+`MODEL_DISCOVERY=false` 会关闭远程及本地发现，仅返回内置默认模型。
 
 认证工具的代理、客户端入口和证书参数见 [.env.example](./.env.example)。
 
@@ -256,6 +264,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 npm run typecheck
 npm run check:frontend
 npm run test:frontend
+npm run test:auth
 npm test
 npm run build:web:tauri
 npm run package:tauri

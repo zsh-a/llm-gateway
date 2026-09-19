@@ -36,7 +36,10 @@ pub(super) fn read_auth_headers(path: &PathBuf) -> Option<HeaderMap> {
         };
         headers.insert(name, value);
     }
-    (!headers.is_empty()).then_some(headers)
+    headers
+        .keys()
+        .any(|name| name != header::USER_AGENT)
+        .then_some(headers)
 }
 
 pub(super) fn read_auth_captured_at(path: &PathBuf) -> Option<i64> {
@@ -51,7 +54,7 @@ pub(super) fn is_forwarded_header(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     matches!(
         name.as_str(),
-        "authorization" | "cookie" | "x-api-key" | "x-goog-api-key"
+        "authorization" | "cookie" | "user-agent" | "x-api-key" | "x-goog-api-key"
     ) || name.starts_with("x-")
 }
 

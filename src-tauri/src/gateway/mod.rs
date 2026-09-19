@@ -7,7 +7,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
-use tokio::time::timeout;
 use tracing::warn;
 
 mod activity;
@@ -15,6 +14,8 @@ mod auth;
 mod http;
 mod metrics;
 mod model_catalog;
+#[cfg(test)]
+mod model_catalog_tests;
 mod protocols;
 mod sync;
 
@@ -32,6 +33,10 @@ use model_catalog::{ModelCache, ModelInfo, fallback_models, parse_models};
 const MIMO_URL: &str = "https://mimo-server-cn.xiaomimimo.com/api/route/chat/completions";
 const MIMO_MODELS_URL: &str = "https://mimo-server-cn.xiaomimimo.com/api/model/list";
 const WORKBUDDY_URL: &str = "https://copilot.tencent.com/v2/chat/completions";
+const WORKBUDDY_MODELS_URL: &str = "https://copilot.tencent.com/v3/config";
+// /v3/config requires a client version in User-Agent. Older auth vaults omitted it.
+// This fallback was verified against the WorkBuddy 5.5.6 client and config endpoint.
+const WORKBUDDY_USER_AGENT: &str = "WorkBuddy/5.5.6";
 
 fn load_auth_cache(config: &Config) -> HashMap<String, HeaderMap> {
     let mut auth = HashMap::new();
@@ -68,6 +73,7 @@ pub struct AppState {
     pub(crate) activity: Activity,
     auth: Arc<RwLock<HashMap<String, HeaderMap>>>,
     model_cache: Arc<RwLock<Option<ModelCache>>>,
+    model_refresh: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone, Debug)]
@@ -143,6 +149,7 @@ impl AppState {
             activity: Activity::default(),
             auth: Arc::new(RwLock::new(HashMap::new())),
             model_cache: Arc::new(RwLock::new(None)),
+            model_refresh: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -210,6 +217,7 @@ impl AppState {
             activity: Activity::default(),
             auth: Arc::new(RwLock::new(auth)),
             model_cache: Arc::new(RwLock::new(None)),
+            model_refresh: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -229,7 +237,9 @@ impl AppState {
         sync::pull(self, settings, passphrase, force).await
     }
 
-    pub(crate) fn reload_auth_cache(&self) -> anyhow::Result<()> {
+    pub(crate) async fn reload_auth_cache(&self) -> anyhow::Result<()> {
+        // A request with the previous credentials must finish before invalidating its catalog.
+        let _refresh = self.model_refresh.lock().await;
         let auth = load_auth_cache(&self.config);
         let mut current = self
             .auth
@@ -504,6 +514,13 @@ impl AppState {
     }
 
     async fn models(&self) -> Vec<ModelInfo> {
+        self.models_from(MIMO_MODELS_URL, WORKBUDDY_MODELS_URL)
+            .await
+    }
+
+    async fn models_from(&self, mimo_url: &str, workbuddy_url: &str) -> Vec<ModelInfo> {
+        // Startup, health checks and the console can all request models concurrently.
+        let _refresh = self.model_refresh.lock().await;
         if let Some(cache) = self.model_cache.read().ok().and_then(|guard| guard.clone()) {
             if cache.fetched_at.elapsed() < Duration::from_secs(300) {
                 return cache.models;
@@ -511,31 +528,26 @@ impl AppState {
         }
         let mut models = fallback_models();
         if self.config.model_discovery {
-            if let Some(remote) = self.fetch_mimo_models().await {
+            let (mimo, workbuddy) = tokio::join!(
+                self.fetch_mimo_models(mimo_url),
+                self.fetch_workbuddy_models(workbuddy_url),
+            );
+            if let Some(remote) = mimo {
                 for model in remote {
                     if !models.iter().any(|current| current.id == model.id) {
                         models.push(model);
                     }
                 }
             }
-            let mut workbuddy_files = Vec::new();
-            if let Some(path) = &self.config.model_file {
-                workbuddy_files.push(path.clone());
-            }
-            if let Some(home) = dirs::home_dir() {
-                workbuddy_files.push(home.join(".workbuddy/cache/acc-product-config-v3.json"));
-            }
-            if cfg!(target_os = "macos") {
-                workbuddy_files.push(PathBuf::from("/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/product.json"));
-            }
-            for path in workbuddy_files {
-                if let Ok(raw) = std::fs::read_to_string(path) {
-                    let discovered = parse_models(&raw, "workbuddy");
-                    if !discovered.is_empty() {
-                        models.extend(discovered);
-                        break;
-                    }
+            if let Some(remote) = workbuddy {
+                if let Err(error) =
+                    model_catalog::save_workbuddy_catalog(&self.config.runtime_dir, &remote)
+                {
+                    warn!(%error, "无法保存 WorkBuddy 模型缓存，当前会话仍使用远端目录");
                 }
+                models.extend(remote);
+            } else {
+                models.extend(self.local_workbuddy_models());
             }
         }
         let mut seen = HashSet::new();
@@ -549,16 +561,98 @@ impl AppState {
         models
     }
 
-    async fn fetch_mimo_models(&self) -> Option<Vec<ModelInfo>> {
+    fn local_workbuddy_models(&self) -> Vec<ModelInfo> {
+        let mut workbuddy_files = Vec::new();
+        if let Some(path) = &self.config.model_file {
+            workbuddy_files.push(path.clone());
+        }
+        workbuddy_files.push(model_catalog::workbuddy_catalog_path(
+            &self.config.runtime_dir,
+        ));
+        if let Some(home) = dirs::home_dir() {
+            workbuddy_files.push(home.join(".workbuddy/cache/acc-product-config-v3.json"));
+        }
+        if cfg!(target_os = "macos") {
+            workbuddy_files.push(PathBuf::from(
+                "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/product.json",
+            ));
+        }
+        for path in workbuddy_files {
+            if let Ok(raw) = std::fs::read_to_string(path) {
+                let discovered = parse_models(&raw, "workbuddy");
+                if !discovered.is_empty() {
+                    return discovered;
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    async fn fetch_workbuddy_models(&self, endpoint: &str) -> Option<Vec<ModelInfo>> {
+        let mut headers = self.auth_headers("workbuddy")?;
+        headers
+            .entry(axum::http::header::USER_AGENT)
+            .or_insert(axum::http::HeaderValue::from_static(WORKBUDDY_USER_AGENT));
+        let response = match self
+            .client
+            .get(endpoint)
+            .headers(headers)
+            .header("accept", "application/json")
+            .timeout(Duration::from_millis(
+                self.config.model_discovery_timeout_ms,
+            ))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => response,
+            Ok(response) => {
+                warn!(status = %response.status(), "WorkBuddy 模型目录请求失败，使用本地缓存");
+                return None;
+            }
+            Err(error) => {
+                warn!(%error, "WorkBuddy 模型目录请求失败，使用本地缓存");
+                return None;
+            }
+        };
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                warn!(%error, "读取 WorkBuddy 模型目录失败，使用本地缓存");
+                return None;
+            }
+        };
+        let Ok(value) = serde_json::from_str::<Map<String, Value>>(&body) else {
+            warn!("WorkBuddy 配置不是有效 JSON，保留本地缓存");
+            return None;
+        };
+        if let Some(code) = value.get("code") {
+            if code != &json!(0) && code != &json!("0") {
+                warn!("WorkBuddy 配置返回业务错误，保留本地缓存");
+                return None;
+            }
+        }
+        let models = parse_models(&body, "workbuddy");
+        if models.is_empty() {
+            warn!("WorkBuddy 配置未返回有效模型，保留本地缓存");
+            return None;
+        }
+        Some(models)
+    }
+
+    async fn fetch_mimo_models(&self, endpoint: &str) -> Option<Vec<ModelInfo>> {
         let headers = self.auth_headers("mimo")?;
-        let request = self.client.get(MIMO_MODELS_URL).headers(headers.clone());
-        let response = timeout(
-            Duration::from_millis(self.config.model_discovery_timeout_ms),
-            request.send(),
-        )
-        .await
-        .ok()?
-        .ok()?;
+        let response = self
+            .client
+            .get(endpoint)
+            .headers(headers)
+            .timeout(Duration::from_millis(
+                self.config.model_discovery_timeout_ms,
+            ))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
         let body = response.text().await.ok()?;
         let models = parse_models(&body, "mimo");
         (!models.is_empty()).then_some(models)

@@ -100,9 +100,13 @@ pub(crate) async fn serve_listener(
     listener: TcpListener,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
-    axum::serve(listener, router(state))
+    let discovery_state = state.clone();
+    let discovery = tokio::spawn(async move { discovery_state.models().await });
+    let result = axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown)
-        .await?;
+        .await;
+    discovery.abort();
+    result?;
     Ok(())
 }
 

@@ -318,11 +318,11 @@ fn force_exit<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
 
 pub fn handle_run_event<R: Runtime>(app: &AppHandle<R>, event: tauri::RunEvent) {
     match event {
-        tauri::RunEvent::ExitRequested { api, .. } => {
-            if !app.state::<ExitGate>().ready.load(Ordering::Acquire) {
-                api.prevent_exit();
-                begin_exit(app, false);
-            }
+        tauri::RunEvent::ExitRequested { api, .. }
+            if !app.state::<ExitGate>().ready.load(Ordering::Acquire) =>
+        {
+            api.prevent_exit();
+            begin_exit(app, false);
         }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => {

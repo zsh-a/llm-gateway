@@ -79,7 +79,7 @@ export const providers: AuthProvider[] = [
     authMethods: ["GET", "POST"],
     authHosts: ["copilot.tencent.com"],
     authPaths: ["/v3/config", "/v2/report", "/v2/chat/completions"],
-    captureHeaders: ["cookie", "authorization", "x-*"],
+    captureHeaders: ["cookie", "authorization", "user-agent", "x-*"],
     clientCandidates: macApplicationBinaries("WorkBuddy", ["Electron", "WorkBuddy"])
   }
 ];
@@ -118,7 +118,7 @@ export function credentialHeaders(input: unknown): AuthHeaders | null {
       hasCredential = true;
       continue;
     }
-    if (lowerKey === "authorization" || lowerKey.startsWith("x-")) {
+    if (lowerKey === "authorization" || lowerKey === "user-agent" || lowerKey.startsWith("x-")) {
       headers[key] = itemValue;
       if (lowerKey === "authorization" || isCredentialHeader(lowerKey)) hasCredential = true;
     }

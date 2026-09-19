@@ -69,7 +69,17 @@ export function RemoteAuthSyncCard({
         localProviders: result.providers,
       });
       setPassphrase("");
-      onNotice(`已拉取并应用 ${result.providers.join("、")} 认证`);
+      const applied = `已拉取并应用 ${result.providers.join("、")} 认证`;
+      if (result.workbuddyModelCount) {
+        onNotice(`${applied}，已加载 ${result.workbuddyModelCount} 个 WorkBuddy 模型`);
+      } else if (result.providers.includes("workbuddy")) {
+        onNotice(
+          `${applied}；暂未获取到 WorkBuddy 完整模型目录，请检查网络、认证有效性及模型发现设置`,
+          "warning",
+        );
+      } else {
+        onNotice(applied);
+      }
       onRefresh?.();
     },
     onError: (error: unknown) => onNotice(queryErrorMessage(error, "远端认证同步失败"), "error"),

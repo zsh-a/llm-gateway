@@ -47,6 +47,7 @@ pub(crate) struct RemoteSyncPullResult {
     pub revision: i64,
     pub updated_at: i64,
     pub providers: Vec<String>,
+    pub workbuddy_model_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -156,13 +157,20 @@ pub(crate) async fn pull(
             updated_at: remote.updated_at,
         },
     )?;
-    state.reload_auth_cache()?;
+    state.reload_auth_cache().await?;
+    let workbuddy_model_count = state
+        .models()
+        .await
+        .iter()
+        .filter(|model| model.provider == "workbuddy" && model.id != "default")
+        .count();
 
     Ok(RemoteSyncPullResult {
         vault_id: settings.vault_id,
         revision: remote.revision,
         updated_at: remote.updated_at,
         providers,
+        workbuddy_model_count,
     })
 }
 
@@ -296,7 +304,10 @@ fn write_auth_payload(config: &Config, payload: &VaultPayload) -> Result<Vec<Str
             })
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect::<BTreeMap<_, _>>();
-        if headers.is_empty() {
+        if !headers
+            .keys()
+            .any(|name| !name.eq_ignore_ascii_case("user-agent"))
+        {
             continue;
         }
         let body = json!({

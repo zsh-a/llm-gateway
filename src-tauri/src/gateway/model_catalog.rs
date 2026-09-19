@@ -1,7 +1,37 @@
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+pub(super) fn workbuddy_catalog_path(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join("models").join("workbuddy.json")
+}
+
+pub(super) fn save_workbuddy_catalog(
+    runtime_dir: &Path,
+    models: &[ModelInfo],
+) -> anyhow::Result<()> {
+    let catalog = serde_json::json!({
+        "models": models.iter().map(|model| serde_json::json!({
+            "id": model.id,
+            "name": model.name,
+            "supportsReasoning": model.capabilities.get("reasoning").copied().unwrap_or(false),
+        })).collect::<Vec<_>>()
+    });
+    let path = workbuddy_catalog_path(runtime_dir);
+    std::fs::create_dir_all(path.parent().expect("model cache directory"))?;
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> anyhow::Result<()> {
+        std::fs::write(&temporary, serde_json::to_vec_pretty(&catalog)?)?;
+        std::fs::rename(&temporary, &path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
+}
 
 #[derive(Clone)]
 pub(super) struct ModelCache {
@@ -175,5 +205,4 @@ fn valid_model_id(id: &str) -> bool {
         && !id.chars().any(char::is_whitespace)
         && !id.ends_with(".json")
         && !id.contains('/')
-        && (id == "default" || id.contains('-') || id.contains('.') || id.contains('_'))
 }

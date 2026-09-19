@@ -22,6 +22,7 @@ export interface RemoteSyncPullResult {
   revision: number;
   updatedAt: number;
   providers: string[];
+  workbuddyModelCount?: number;
 }
 
 const URL_KEY = "llm-gateway.sync-url";
