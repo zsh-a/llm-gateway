@@ -17,6 +17,7 @@ export interface AuthProvider {
 }
 
 export interface AuthConfig {
+  runtimeDir: string;
   authCacheDir: string;
   channelsFile: string;
 }
@@ -56,6 +57,7 @@ function macApplicationBinaries(application: string, executables: string[]): str
 export function loadAuthConfig(): AuthConfig {
   const runtimeDir = env("RUNTIME_DIR", join(process.cwd(), ".runtime"));
   return {
+    runtimeDir,
     authCacheDir: env("AUTH_CACHE_DIR", join(runtimeDir, "auth")),
     channelsFile: env("CHANNELS_FILE", join(runtimeDir, "channels.json"))
   };

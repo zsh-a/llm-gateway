@@ -2,7 +2,9 @@ dist/
 .build/
 node_modules/
 .env
+.dev.vars
 .runtime/
+.wrangler/
 .DS_Store
 src-tauri/target/
 src-tauri/gen/

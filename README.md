@@ -21,6 +21,7 @@ src-tauri/src/gateway/ Rust 网关 HTTP、协议、认证、指标和模型目�
 src-tauri/src/desktop.rs Tauri 启动与系统托盘
 web/src/               React 控制台页面与通用组件
 web/src/features/      按功能组织的页面与业务组件
+cloudflare/sync-worker/ Cloudflare 加密认证同步 Worker
 scripts/auth.ts        一次性认证捕获工具
 scripts/auth-support.ts 认证缓存、Provider 捕获规则和配置读取
 src-tauri/icons/       应用与托盘图标
@@ -46,6 +47,9 @@ npm run serve:rust          # 仅启动 Rust/Axum 网关
 npm run package:tauri       # 构建当前平台安装包
 npm run package:macos       # 构建 macOS .app 和 .dmg
 npm run auth                # 捕获 MiMo/WorkBuddy 认证缓存
+npm run sync -- status      # 查看远端认证保险库版本
+npm run sync -- push        # 加密并上传本机认证缓存
+npm run sync -- pull        # 下载并解密认证缓存
 ```
 
 发布包不需要额外安装 Node。Tauri 开发模式使用 Vite 的 `127.0.0.1:1420`，网关默认监听 `127.0.0.1:3000`。控制台通过 `VITE_GATEWAY_BASE_URL` 访问 Axum 服务，发布构建已经设置为 `http://127.0.0.1:3000`。
@@ -73,6 +77,36 @@ npm run auth -- --provider workbuddy --no-client
 ```bash
 npm run auth -- --provider mimo --channel mimo-secondary
 ```
+
+## 多机认证同步
+
+`cloudflare/sync-worker` 是可独立部署的同步服务。Worker 只保存客户端使用
+`scrypt + AES-256-GCM` 加密后的认证包，不接触 Cookie、Authorization 或 `X-*`
+请求头明文。
+
+部署 Worker：
+
+```bash
+cd cloudflare/sync-worker
+npm install
+npx wrangler secret put SYNC_TOKEN
+npm run deploy
+```
+
+在每台机器上设置相同的同步地址、Token 和保险库 ID，然后使用同一个同步密码：
+
+```bash
+export SYNC_URL=https://<worker-domain>
+export SYNC_TOKEN=<worker-token>
+export SYNC_VAULT_ID=personal
+export SYNC_PASSPHRASE='use-a-long-local-passphrase'
+
+npm run sync -- push
+npm run sync -- pull --force
+```
+
+`push` 默认使用本机保存的远端版本进行冲突检测；确认覆盖远端时使用
+`--force`。不要同步整个 `.runtime` 或 SQLite 文件。
 
 认证工具的代理、客户端入口和证书参数见 [.env.example](./.env.example)。
 
