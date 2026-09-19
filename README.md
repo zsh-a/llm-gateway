@@ -54,6 +54,27 @@ npm run sync -- pull        # 下载并解密认证缓存
 
 发布包不需要额外安装 Node。Tauri 开发模式使用 Vite 的 `127.0.0.1:1420`，网关默认监听 `127.0.0.1:3000`。控制台通过 `VITE_GATEWAY_BASE_URL` 访问 Axum 服务，发布构建已经设置为 `http://127.0.0.1:3000`。
 
+## GitHub Actions 发布
+
+[`.github/workflows/desktop.yml`](./.github/workflows/desktop.yml) 会在 Pull Request、`main`
+分支推送和手动运行时执行检查并上传构建产物。构建矩阵包含：
+
+```text
+Windows x64       .msi / .exe
+Linux x64         .AppImage / .deb / .rpm
+macOS arm64       .dmg
+macOS x64         .dmg
+```
+
+发布版本时创建并推送 `v*` 标签：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+标签工作流会创建 GitHub Release 并上传所有平台安装包。当前 macOS 构建使用临时签名，适合测试和内部分发；正式公开分发还需要配置 Apple Developer 证书和公证。
+
 ## 首次认证
 
 认证工具会启动 mitmweb 和对应的桌面客户端，等待成功请求，然后只保存 Cookie、Authorization 和 X-* 请求头：
