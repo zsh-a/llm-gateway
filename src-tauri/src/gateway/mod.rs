@@ -128,7 +128,7 @@ impl AppState {
             bind_host: "127.0.0.1".into(),
             port: 0,
             request_timeout_ms: 5000,
-            max_body_bytes: 1024 * 1024,
+            max_body_bytes: crate::config::DEFAULT_MAX_BODY_BYTES,
             proxy_api_key: String::new(),
             proxy_admin_key: String::new(),
             cors_origin: String::new(),

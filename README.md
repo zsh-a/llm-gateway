@@ -194,7 +194,7 @@ RUNTIME_DIR=./.runtime
 # AUTH_CACHE_DIR=./.runtime/auth
 # DATABASE_FILE=./.runtime/gateway.sqlite3
 REQUEST_TIMEOUT_MS=180000
-MAX_BODY_BYTES=1048576
+MAX_BODY_BYTES=8388608
 MODEL_DISCOVERY=true
 MODEL_DISCOVERY_TIMEOUT_MS=30000
 METRICS_MAX_RECORDS=2000
@@ -207,6 +207,14 @@ METRICS_MAX_RECORDS=2000
 `RUNTIME_DIR/service.json`。环境变量 `BIND_HOST` 和 `PORT` 优先级更高，适合 headless、容器和
 systemd/launchd 服务。debug 模式默认使用项目下的 `.runtime`；release 应用默认使用系统用户数据目录。
 macOS 路径为 `~/Library/Application Support/LLM Gateway`。设置 `RUNTIME_DIR` 可以固定到其他目录。
+
+HTTP 请求体默认上限为 8 MiB（8,388,608 字节），由 `MAX_BODY_BYTES` 控制；它按整个 JSON 的
+字节数计算，与模型的 token 上下文限制无关，历史 `reasoning_content` 和 tool 输出也会占用。
+Chat Completions / Responses 请求超限时返回 HTTP 413 和 `request_body_too_large`，错误中包含
+当前上限；`/.well-known/llm-gateway/capabilities` 的 `limits.maxBodyBytes` 也会返回生效值。
+如需调整，请在启动网关的进程环境中设置该变量，然后完全退出并重新启动。仅修改 `.env.example`
+不会生效；已设置的环境变量会覆盖默认值。旧版默认 1 MiB 的网关也可通过设置
+`MAX_BODY_BYTES=8388608` 提高上限，无需改动模型配置。
 
 SQLite 默认路径为 `RUNTIME_DIR/gateway.sqlite3`。启动时会从旧的 `channels.json` 和 `api-keys.json` 做一次性导入；后续管理数据以 SQLite 为准。
 

@@ -3,6 +3,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 const SERVICE_SETTINGS_FILE: &str = "service.json";
+pub(crate) const DEFAULT_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,7 +170,7 @@ impl Config {
             bind_host,
             port,
             request_timeout_ms: env_u64("REQUEST_TIMEOUT_MS", 180_000),
-            max_body_bytes: env_u64("MAX_BODY_BYTES", 1024 * 1024) as usize,
+            max_body_bytes: env_u64("MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES as u64) as usize,
             proxy_api_key: env::var("PROXY_API_KEY").unwrap_or_default(),
             proxy_admin_key: env::var("PROXY_ADMIN_KEY").unwrap_or_default(),
             cors_origin: env::var("CORS_ORIGIN").unwrap_or_default(),

@@ -1,8 +1,8 @@
 // HTTP routing and request handlers for the gateway.
 use super::AppState;
 use super::auth::{
-    database_error, error_response, hash_secret, now_ms, require_admin, require_public_auth,
-    require_public_auth_identity, string_array,
+    GatewayError, database_error, error_response, hash_secret, now_ms, require_admin,
+    require_public_auth, require_public_auth_identity, string_array,
 };
 use super::metrics::{MetricQuery, MetricView, metrics_response};
 use super::protocols::{
@@ -12,6 +12,7 @@ use super::protocols::{
 use crate::config::Config;
 use crate::db::{ApiKeyRecord, ChannelRecord, Db};
 use axum::body::{Body, Bytes};
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::header::{self, HeaderValue};
 use axum::http::{HeaderMap, StatusCode};
@@ -29,6 +30,9 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{debug, info};
 
 const MAX_UPSTREAM_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+#[cfg(test)]
+mod tests;
 
 fn router(state: AppState) -> Router {
     Router::new()
@@ -187,6 +191,7 @@ async fn capabilities(State(state): State<AppState>) -> impl IntoResponse {
         "version": 1,
         "service": "llm-gateway",
         "authRequired": state.requires_authentication(),
+        "limits": { "maxBodyBytes": state.config.max_body_bytes },
         "protocols": {
             "chatCompletions": { "path": "/v1/chat/completions", "stream": true, "tools": true, "reasoningContent": true, "usageChunk": true },
             "responses": { "path": "/v1/responses", "stream": true, "reasoningText": true, "functionCalls": true }
@@ -210,17 +215,24 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
 async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    let mut body = body;
+    let mut body = match inference_body(body, state.config.max_body_bytes) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
     proxy_chat(state, headers, &mut body, false).await
 }
 
 async fn responses(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    let body = match inference_body(body, state.config.max_body_bytes) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
     let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let mut chat = responses_to_chat(&body);
     let response = proxy_chat(state, headers, &mut chat, true).await;
@@ -243,6 +255,28 @@ async fn responses(
         body.get("model").and_then(Value::as_str).unwrap_or(""),
     ))
     .into_response()
+}
+
+fn inference_body(
+    body: Result<Json<Value>, JsonRejection>,
+    max_body_bytes: usize,
+) -> Result<Value, GatewayError> {
+    body.map(|Json(value)| value).map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            Box::new((StatusCode::PAYLOAD_TOO_LARGE, Json(json!({
+                "error": {
+                    "message": format!(
+                        "HTTP 请求体超过网关限制（{max_body_bytes} 字节），与模型 token 上下文限制无关。请压缩历史消息，或提高 MAX_BODY_BYTES 后重启网关。"
+                    ),
+                    "type": "invalid_request_error",
+                    "code": "request_body_too_large",
+                    "maxBodyBytes": max_body_bytes
+                }
+            }))).into_response())
+        } else {
+            Box::new(rejection.into_response())
+        }
+    })
 }
 
 async fn proxy_chat(
