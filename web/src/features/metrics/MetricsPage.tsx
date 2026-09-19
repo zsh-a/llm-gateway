@@ -11,8 +11,8 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { GatewayApi } from "../api";
-import { DistributionList, Field, MetricChart, StatCard } from "../components/common";
+import type { GatewayApi } from "../../api";
+import { DistributionList, Field, MetricChart, StatCard } from "../../components/common";
 import {
   Badge,
   Button,
@@ -23,16 +23,16 @@ import {
   CardTitle,
   Select,
   Spinner,
-} from "../components/ui";
-import { RequestTable } from "../components/usage";
-import { formatCompact, formatDuration, formatNumber } from "../lib/format";
+} from "../../components/ui";
+import { RequestTable } from "../../components/usage";
+import { formatCompact, formatDuration, formatNumber } from "../../lib/format";
 import type {
   DashboardData,
   MetricsQuery,
   MetricsSnapshot,
   MetricsStatus,
   MetricsWindow,
-} from "../types";
+} from "../../types";
 
 const windowOptions: Array<{ value: MetricsWindow; label: string }> = [
   { value: "1h", label: "最近 1 小时" },

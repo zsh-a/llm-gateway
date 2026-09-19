@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, GatewayApi, loadCredentials } from "./api";
 import { DashboardLayout } from "./components/layout";
+import { ManagementPage } from "./features/management/ManagementPage";
+import { MetricsPage } from "./features/metrics/MetricsPage";
+import { OverviewPage } from "./features/overview/OverviewPage";
+import { PlaygroundPage } from "./features/playground/PlaygroundPage";
+import { SettingsPage } from "./features/settings/SettingsPage";
 import { emptyDashboard, resolveLocation } from "./lib/constants";
-import { ManagementPage } from "./pages/ManagementPage";
-import { MetricsPage } from "./pages/MetricsPage";
-import { OverviewPage } from "./pages/OverviewPage";
-import { PlaygroundPage } from "./pages/PlaygroundPage";
-import { SettingsPage } from "./pages/SettingsPage";
 import type { DashboardData, Navigate, Notice, NoticeTone } from "./types";
 
 export function App() {

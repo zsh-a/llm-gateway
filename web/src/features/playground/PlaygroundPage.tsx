@@ -13,9 +13,9 @@ import {
   Zap,
 } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import type { GatewayApi } from "../api";
-import { CopyButton } from "../components/common";
-import { ModelSearch } from "../components/ModelSearch";
+import type { GatewayApi } from "../../api";
+import { CopyButton } from "../../components/common";
+import { ModelSearch } from "../../components/ModelSearch";
 import {
   Badge,
   Button,
@@ -29,11 +29,11 @@ import {
   Select,
   Spinner,
   Textarea,
-} from "../components/ui";
-import { formatNumber, toFiniteNumber, usageTotal } from "../lib/format";
-import { modelEfforts, modelSupportsReasoning, searchModels } from "../lib/models";
-import { cn } from "../lib/utils";
-import type { DashboardData, GatewayModel, Navigate, Usage } from "../types";
+} from "../../components/ui";
+import { formatNumber, toFiniteNumber, usageTotal } from "../../lib/format";
+import { modelEfforts, modelSupportsReasoning, searchModels } from "../../lib/models";
+import { cn } from "../../lib/utils";
+import type { DashboardData, GatewayModel, Navigate, Usage } from "../../types";
 
 type PlaygroundState = "idle" | "streaming" | "success" | "error" | "canceled";
 

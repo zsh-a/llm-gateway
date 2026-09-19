@@ -1,11 +1,21 @@
 import { AlertCircle } from "lucide-react";
 import { type FormEvent, useState } from "react";
-import type { GatewayApi } from "../api";
-import { Button, ConfirmDialog } from "../components/ui";
-import { ApiKeyList } from "../features/management/ApiKeyList";
-import { ChannelForm } from "../features/management/ChannelForm";
-import { ChannelList } from "../features/management/ChannelList";
-import { KeyForm } from "../features/management/KeyForm";
+import type { GatewayApi } from "../../api";
+import { Button, ConfirmDialog } from "../../components/ui";
+import { cn } from "../../lib/utils";
+import type {
+  ApiKeyInput,
+  ApiKeyRecord,
+  ChannelConfig,
+  ChannelInput,
+  DashboardData,
+  Navigate,
+  NoticeTone,
+} from "../../types";
+import { ApiKeyList } from "./ApiKeyList";
+import { ChannelForm } from "./ChannelForm";
+import { ChannelList } from "./ChannelList";
+import { KeyForm } from "./KeyForm";
 import {
   type ChannelDraft,
   type Confirmation,
@@ -19,17 +29,7 @@ import {
   type SavingForm,
   serializeMappings,
   suggestedChannelId,
-} from "../features/management/types";
-import { cn } from "../lib/utils";
-import type {
-  ApiKeyInput,
-  ApiKeyRecord,
-  ChannelConfig,
-  ChannelInput,
-  DashboardData,
-  Navigate,
-  NoticeTone,
-} from "../types";
+} from "./types";
 
 export function ManagementPage({
   data,

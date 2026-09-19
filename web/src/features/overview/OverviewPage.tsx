@@ -16,14 +16,14 @@ import {
   Zap,
 } from "lucide-react";
 import { useState } from "react";
-import { EmptyState, MetricChart, Sparkline, StatCard, StatusBadge } from "../components/common";
-import { ModelSearch } from "../components/ModelSearch";
-import { Badge, Button, Card, CardContent, CardDescription, CardHeader } from "../components/ui";
-import { RequestTable } from "../components/usage";
-import { formatCompact, formatDuration, formatNumber, formatTime } from "../lib/format";
-import { modelSupportsReasoning, searchModels } from "../lib/models";
-import { cn } from "../lib/utils";
-import type { AuthProviderStatus, DashboardData, GatewayModel, Navigate } from "../types";
+import { EmptyState, MetricChart, Sparkline, StatCard, StatusBadge } from "../../components/common";
+import { ModelSearch } from "../../components/ModelSearch";
+import { Badge, Button, Card, CardContent, CardDescription, CardHeader } from "../../components/ui";
+import { RequestTable } from "../../components/usage";
+import { formatCompact, formatDuration, formatNumber, formatTime } from "../../lib/format";
+import { modelSupportsReasoning, searchModels } from "../../lib/models";
+import { cn } from "../../lib/utils";
+import type { AuthProviderStatus, DashboardData, GatewayModel, Navigate } from "../../types";
 
 export function OverviewPage({ data, onNavigate }: { data: DashboardData; onNavigate: Navigate }) {
   const [modelQuery, setModelQuery] = useState("");

@@ -1,7 +1,7 @@
 import { Eye, EyeOff, KeyRound, Moon, Save, Server, Settings2, Sun } from "lucide-react";
 import { type FormEvent, useState } from "react";
-import { type Credentials, gatewayBaseUrl, saveCredentials } from "../api";
-import { Field, InfoRow } from "../components/common";
+import { type Credentials, gatewayBaseUrl, saveCredentials } from "../../api";
+import { Field, InfoRow } from "../../components/common";
 import {
   Button,
   Card,
@@ -11,8 +11,8 @@ import {
   CardHeader,
   CardTitle,
   Input,
-} from "../components/ui";
-import type { NoticeTone } from "../types";
+} from "../../components/ui";
+import type { NoticeTone } from "../../types";
 
 export function SettingsPage({
   credentials,
