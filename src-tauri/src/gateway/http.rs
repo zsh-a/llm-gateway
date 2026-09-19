@@ -87,8 +87,43 @@ pub(crate) async fn serve(state: AppState) -> anyhow::Result<()> {
     let address = state.config.bind_address();
     let listener = TcpListener::bind(&address).await?;
     info!(%address, "Rust Axum 网关已启动");
-    axum::serve(listener, router(state)).await?;
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let ctrl_c = async {
+            if let Err(error) = tokio::signal::ctrl_c().await {
+                debug!(%error, "监听 Ctrl-C 信号失败");
+            }
+        };
+        let terminate = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut signal) => {
+                    signal.recv().await;
+                }
+                Err(error) => {
+                    debug!(%error, "监听 SIGTERM 信号失败");
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = terminate => {},
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+
+    info!("收到关闭信号，正在停止 Rust Axum 网关");
 }
 
 async fn health() -> impl IntoResponse {

@@ -5,6 +5,7 @@ description = "Rust/Tauri desktop gateway for LLM Gateway"
 authors = ["LLM Gateway"]
 edition = "2024"
 rust-version = "1.85"
+default-run = "llm-gateway"
 
 [lib]
 name = "llm_gateway_lib"
@@ -13,6 +14,10 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [[bin]]
 name = "llm-gateway"
 path = "src/main.rs"
+
+[[bin]]
+name = "llm-gateway-headless"
+path = "src/headless.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -32,7 +37,7 @@ serde_json = "1"
 sha2 = "0.10"
 subtle = "2"
 tauri = { version = "2", features = ["tray-icon"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "signal"] }
 tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

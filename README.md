@@ -43,7 +43,8 @@ npm run desktop
 
 ```bash
 npm run desktop             # Tauri 开发模式，启动托盘、Axum 和 React
-npm run serve:rust          # 仅启动 Rust/Axum 网关
+npm run serve:headless      # 无窗口、无托盘，仅启动 Rust/Axum 网关
+npm run serve:rust          # serve:headless 的兼容别名
 npm run package:tauri       # 构建当前平台安装包
 npm run package:macos       # 构建 macOS .app 和 .dmg
 npm run auth                # 捕获 MiMo/WorkBuddy 认证缓存
@@ -53,6 +54,29 @@ npm run sync -- pull        # 下载并解密认证缓存
 ```
 
 发布包不需要额外安装 Node。Tauri 开发模式使用 Vite 的 `127.0.0.1:1420`，网关默认监听 `127.0.0.1:3000`。控制台通过 `VITE_GATEWAY_BASE_URL` 访问 Axum 服务，发布构建已经设置为 `http://127.0.0.1:3000`。
+
+## Headless 模式
+
+Headless 模式只启动 Rust/Axum 网关，不创建 Tauri 窗口和系统托盘，适合服务器、容器和
+systemd/launchd 服务：
+
+```bash
+npm run serve:headless
+
+# 或直接运行 headless 二进制
+cargo run --release --manifest-path src-tauri/Cargo.toml --bin llm-gateway-headless
+```
+
+现有主程序也支持 `--headless` 参数或 `HEADLESS=1` 环境变量：
+
+```bash
+./src-tauri/target/release/llm-gateway --headless
+HEADLESS=1 ./src-tauri/target/release/llm-gateway
+```
+
+Headless 服务默认监听 `127.0.0.1:3000`。如果需要远程访问，请设置
+`BIND_HOST=0.0.0.0` 并同时配置 `PROXY_API_KEY` 与 `PROXY_ADMIN_KEY`。
+收到 SIGINT、SIGTERM 或 Windows Ctrl-C 后，服务会停止接收新连接并优雅退出。
 
 ## GitHub Actions 发布
 
