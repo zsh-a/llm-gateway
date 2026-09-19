@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "LLM Gateway",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "identifier": "com.llmgateway.desktop",
   "build": {
     "beforeDevCommand": "npm run dev:web:tauri",
@@ -39,6 +39,17 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "createUpdaterArtifacts": false
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQxMDRFQjg4NjExMjU4RkIKUldUN1dCSmhpT3NFMFh3SUk3TTBKNGQ1bDlCS0hIQXlRNFY5N1F4ajBVOUZNSmR5R0cwdEdpcHgK",
+      "endpoints": [
+        "https://github.com/zsh-a/llm-gateway/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

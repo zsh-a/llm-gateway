@@ -91,13 +91,19 @@ export const navigation: Array<{ key: PageKey; icon: typeof LayoutDashboard }> =
 export interface AppLocation {
   page: PageKey;
   modelId?: string;
+  settingsTab?: string;
 }
 
 export function resolveLocation(hash: string): AppLocation {
   const [pageValue, query = ""] = hash.replace(/^#/, "").split("?", 2);
   const page = pageValue in pageMeta ? (pageValue as PageKey) : "overview";
   const modelId = new URLSearchParams(query).get("model") || undefined;
-  return { page, modelId: page === "playground" ? modelId : undefined };
+  return {
+    page,
+    modelId: page === "playground" ? modelId : undefined,
+    settingsTab:
+      page === "settings" ? new URLSearchParams(query).get("tab") || undefined : undefined,
+  };
 }
 
 export function resolvePage(hash: string): PageKey {

@@ -6,7 +6,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, MutexGuard, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
@@ -45,6 +45,7 @@ pub struct GatewayService {
     running: Mutex<Option<RunningService>>,
     status: watch::Sender<ServiceStatus>,
     exiting: AtomicBool,
+    exit_signal: watch::Sender<bool>,
     drain_warning_after: Duration,
 }
 
@@ -63,6 +64,7 @@ impl GatewayService {
             running: Mutex::new(None),
             status: watch::channel(status).0,
             exiting: AtomicBool::new(false),
+            exit_signal: watch::channel(false).0,
             drain_warning_after: DRAIN_WARNING_AFTER,
         }
     }
@@ -159,7 +161,7 @@ impl GatewayService {
         Ok(())
     }
 
-    async fn stop_locked(&self, running: &mut Option<RunningService>) {
+    async fn stop_locked(&self, running: &mut Option<RunningService>, allow_force_exit: bool) {
         let Some(server) = running.as_mut() else {
             self.update(ServicePhase::Stopped, None);
             return;
@@ -171,9 +173,20 @@ impl GatewayService {
             Ok(result) => result,
             Err(_) => {
                 // Never silently kill a stream. The UI now offers an explicit force-exit action.
-                self.status
-                    .send_modify(|status| status.can_force_exit = true);
-                (&mut server.task).await
+                let mut exiting = self.exit_signal.subscribe();
+                self.status.send_modify(|status| {
+                    status.can_force_exit = allow_force_exit || self.is_exiting();
+                });
+                loop {
+                    tokio::select! {
+                        result = &mut server.task => break result,
+                        _ = exiting.changed() => {
+                            self.status.send_modify(|status| {
+                                status.can_force_exit = allow_force_exit || self.is_exiting();
+                            });
+                        }
+                    }
+                }
             }
         };
         if let Err(error) = result {
@@ -195,11 +208,11 @@ impl GatewayService {
         match action {
             "start" => self.start_locked(&mut running).await,
             "stop" => {
-                self.stop_locked(&mut running).await;
+                self.stop_locked(&mut running, true).await;
                 Ok(())
             }
             "restart" => {
-                self.stop_locked(&mut running).await;
+                self.stop_locked(&mut running, true).await;
                 self.start_locked(&mut running).await
             }
             _ => Err("未知的服务操作".into()),
@@ -209,7 +222,112 @@ impl GatewayService {
     pub async fn shutdown(&self) {
         self.exiting.store(true, Ordering::Release);
         self.state.activity.close();
+        self.exit_signal.send_replace(true);
         let mut running = self.running.lock().await;
-        self.stop_locked(&mut running).await;
+        self.stop_locked(&mut running, true).await;
+    }
+
+    pub fn is_exiting(&self) -> bool {
+        self.exiting.load(Ordering::Acquire)
+    }
+
+    /// Keep the lifecycle reservation until installation or recovery is complete.
+    pub fn begin_update(&self) -> Result<UpdateSession<'_>, String> {
+        let running = self
+            .running
+            .try_lock()
+            .map_err(|_| "服务正在处理上一项操作")?;
+        if self.is_exiting() {
+            return Err("应用正在退出".into());
+        }
+        let phase = self.snapshot().phase;
+        if phase == ServicePhase::Stopping {
+            return Err("服务仍在等待请求结束，请稍后更新".into());
+        }
+        Ok(UpdateSession {
+            service: self,
+            running,
+            was_running: phase == ServicePhase::Running,
+            paused: false,
+            shutdown_started: false,
+        })
+    }
+}
+
+pub struct UpdateSession<'a> {
+    service: &'a GatewayService,
+    running: MutexGuard<'a, Option<RunningService>>,
+    was_running: bool,
+    paused: bool,
+    shutdown_started: bool,
+}
+
+impl UpdateSession<'_> {
+    /// Admission can be reopened while waiting: do not close the listener yet.
+    /// Once idle, also await Axum's graceful shutdown to flush response bodies.
+    pub async fn drain(
+        &mut self,
+        cancel: &mut watch::Receiver<bool>,
+        before_stop: impl FnOnce() -> bool,
+    ) -> bool {
+        if self.was_running {
+            self.paused = true;
+            self.service.state.activity.set_accepting(false);
+            self.service.update(ServicePhase::Stopping, None);
+            let mut activity = self.service.subscribe_activity();
+            let mut exiting = self.service.exit_signal.subscribe();
+            loop {
+                if *cancel.borrow() || self.service.is_exiting() {
+                    return false;
+                }
+                if self.service.state.activity.count() == 0 {
+                    break;
+                }
+                tokio::select! {
+                    _ = activity.changed() => {},
+                    _ = cancel.changed() => {},
+                    _ = exiting.changed() => {},
+                }
+            }
+        }
+        // Release the watch read lock before calling into the updater, whose
+        // cancellation path holds its status lock while writing this signal.
+        let canceled = *cancel.borrow();
+        if canceled || self.service.is_exiting() || !before_stop() {
+            return false;
+        }
+        if self.was_running {
+            self.shutdown_started = true;
+            self.service.stop_locked(&mut self.running, false).await;
+        }
+        !*cancel.borrow() && !self.service.is_exiting()
+    }
+
+    pub fn was_running(&self) -> bool {
+        self.was_running
+    }
+
+    pub async fn restore(&mut self) -> Result<(), String> {
+        if self.was_running && !self.service.is_exiting() {
+            if self.shutdown_started {
+                self.service.start_locked(&mut self.running).await?;
+            } else if self.paused {
+                self.service.state.activity.set_accepting(true);
+                self.service.update(ServicePhase::Running, None);
+            }
+        }
+        self.paused = false;
+        Ok(())
+    }
+}
+
+impl Drop for UpdateSession<'_> {
+    fn drop(&mut self) {
+        // Cancellation of the owning task must not leave a live listener paused.
+        // A listener already shutting down cannot be reopened this way.
+        if self.paused && !self.shutdown_started && !self.service.is_exiting() {
+            self.service.state.activity.set_accepting(true);
+            self.service.update(ServicePhase::Running, None);
+        }
     }
 }

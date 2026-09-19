@@ -1,6 +1,6 @@
 {
   "name": "llm-gateway",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "A Rust/Tauri OpenAI-compatible gateway with a React control panel",
   "type": "module",
   "scripts": {
@@ -21,6 +21,7 @@
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test:auth": "npm run build:auth && node --test dist/auth/scripts/auth-support.test.js",
     "test:frontend": "vitest run",
+    "test:release": "node --test scripts/prepare-release.test.mjs",
     "typecheck": "tsc -p tsconfig.auth.json --noEmit && tsc -p web/tsconfig.json --noEmit",
     "format": "biome format --write web/src web/tests vitest.config.ts",
     "format:check": "biome format web/src web/tests vitest.config.ts",

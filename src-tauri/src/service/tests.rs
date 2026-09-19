@@ -258,3 +258,215 @@ async fn exit_during_restart_does_not_start_a_replacement_server() {
     timeout(DEADLINE, shutdown).await.unwrap().unwrap();
     assert_eq!(fixture.service.snapshot().phase, ServicePhase::Stopped);
 }
+
+#[tokio::test]
+async fn update_waits_for_streams_and_cancel_reopens_the_same_listener() {
+    let fixture = StreamingFixture::new().await;
+    let response = fixture.request().await;
+    let address = fixture.service.snapshot().base_url;
+    let (cancel, mut receiver) = watch::channel(false);
+    let service = fixture.service.clone();
+    let update = tokio::spawn(async move {
+        let mut session = service.begin_update().unwrap();
+        assert!(!session.drain(&mut receiver, || true).await);
+        session.restore().await.unwrap();
+    });
+    wait_for(&fixture.service, |status| {
+        status.phase == ServicePhase::Stopping
+    })
+    .await;
+    assert_eq!(
+        fixture.request().await.status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert!(fixture.service.control("start").await.is_err());
+    assert!(fixture.service.control("stop").await.is_err());
+    assert!(fixture.service.control("restart").await.is_err());
+    assert!(fixture.service.begin_update().is_err());
+    tokio::time::sleep(Duration::from_millis(70)).await;
+    assert!(!fixture.service.snapshot().can_force_exit);
+    assert!(!update.is_finished());
+    cancel.send_replace(true);
+    timeout(DEADLINE, update).await.unwrap().unwrap();
+    assert_eq!(fixture.service.snapshot().phase, ServicePhase::Running);
+    assert_eq!(fixture.service.snapshot().base_url, address);
+    fixture.release.notify_one();
+    assert!(response.text().await.unwrap().contains("[DONE]"));
+    let next = fixture.request().await;
+    assert!(next.status().is_success());
+    fixture.release.notify_one();
+    next.text().await.unwrap();
+    fixture.service.control("stop").await.unwrap();
+}
+
+#[tokio::test]
+async fn update_drains_completely_and_install_failure_restores_running_service() {
+    let fixture = StreamingFixture::new().await;
+    let response = fixture.request().await;
+    let (_cancel, mut cancel) = watch::channel(false);
+    let service = fixture.service.clone();
+    let (drained, mut ready) = watch::channel(false);
+    let (install_failed, failure) = tokio::sync::oneshot::channel::<()>();
+    let update = tokio::spawn(async move {
+        let mut session = service.begin_update().unwrap();
+        assert!(session.drain(&mut cancel, || true).await);
+        assert_eq!(service.snapshot().phase, ServicePhase::Stopped);
+        assert_eq!(service.snapshot().active_requests, 0);
+        drained.send_replace(true);
+        failure.await.unwrap();
+        session.restore().await.unwrap();
+    });
+    wait_for(&fixture.service, |status| {
+        status.phase == ServicePhase::Stopping
+    })
+    .await;
+    assert!(!*ready.borrow());
+    fixture.release.notify_one();
+    assert!(response.text().await.unwrap().contains("[DONE]"));
+    timeout(DEADLINE, ready.wait_for(|ready| *ready))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(fixture.service.control("start").await.is_err());
+    install_failed.send(()).unwrap();
+    timeout(DEADLINE, update).await.unwrap().unwrap();
+    assert_eq!(fixture.service.snapshot().phase, ServicePhase::Running);
+    let next = fixture.request().await;
+    assert!(next.status().is_success());
+    fixture.release.notify_one();
+    next.text().await.unwrap();
+    fixture.service.control("stop").await.unwrap();
+}
+
+#[tokio::test]
+async fn update_failure_preserves_a_previously_stopped_service() {
+    let fixture = StreamingFixture::new().await;
+    fixture.service.control("stop").await.unwrap();
+    let (_cancel, mut cancel) = watch::channel(false);
+    let mut session = fixture.service.begin_update().unwrap();
+    assert!(session.drain(&mut cancel, || true).await);
+    session.restore().await.unwrap();
+    assert_eq!(fixture.service.snapshot().phase, ServicePhase::Stopped);
+}
+
+#[tokio::test]
+async fn aborting_update_wait_reopens_admission_without_interrupting_the_stream() {
+    let fixture = StreamingFixture::new().await;
+    let response = fixture.request().await;
+    let (_cancel, mut cancel) = watch::channel(false);
+    let service = fixture.service.clone();
+    let update = tokio::spawn(async move {
+        let mut session = service.begin_update().unwrap();
+        session.drain(&mut cancel, || true).await;
+    });
+    wait_for(&fixture.service, |status| {
+        status.phase == ServicePhase::Stopping
+    })
+    .await;
+    update.abort();
+    assert!(update.await.unwrap_err().is_cancelled());
+    assert_eq!(fixture.service.snapshot().phase, ServicePhase::Running);
+    fixture.release.notify_one();
+    assert!(response.text().await.unwrap().contains("[DONE]"));
+    fixture.service.control("stop").await.unwrap();
+}
+
+#[tokio::test]
+async fn final_exit_wins_over_update_and_never_reopens_admission() {
+    let fixture = StreamingFixture::new().await;
+    let response = fixture.request().await;
+    let (_cancel, mut cancel) = watch::channel(false);
+    let service = fixture.service.clone();
+    let update = tokio::spawn(async move {
+        let mut session = service.begin_update().unwrap();
+        assert!(!session.drain(&mut cancel, || true).await);
+        session.restore().await.unwrap();
+    });
+    wait_for(&fixture.service, |status| {
+        status.phase == ServicePhase::Stopping
+    })
+    .await;
+    let service = fixture.service.clone();
+    let exit = tokio::spawn(async move { service.shutdown().await });
+    timeout(DEADLINE, update).await.unwrap().unwrap();
+    assert!(!exit.is_finished());
+    assert!(fixture.service.control("start").await.is_err());
+    fixture.release.notify_one();
+    assert!(response.text().await.unwrap().contains("[DONE]"));
+    timeout(DEADLINE, exit).await.unwrap().unwrap();
+    assert_eq!(fixture.service.snapshot().phase, ServicePhase::Stopped);
+    assert!(fixture.service.begin_update().is_err());
+}
+
+#[tokio::test]
+async fn exit_can_force_quit_when_update_is_waiting_for_an_unfinished_http_body() {
+    use tokio::io::AsyncWriteExt;
+    let fixture = StreamingFixture::new().await;
+    let address = fixture.service.snapshot().base_url;
+    let mut connection = tokio::net::TcpStream::connect(address.trim_start_matches("http://"))
+        .await
+        .unwrap();
+    connection.write_all(b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 999\r\n\r\n{").await.unwrap();
+    fixture
+        .client
+        .get(format!("{address}/health"))
+        .send()
+        .await
+        .unwrap();
+    let (_cancel, mut cancel) = watch::channel(false);
+    let service = fixture.service.clone();
+    let (stopping, mut stopped_admission) = watch::channel(false);
+    let update = tokio::spawn(async move {
+        let mut session = service.begin_update().unwrap();
+        assert!(
+            !session
+                .drain(&mut cancel, || {
+                    stopping.send_replace(true);
+                    true
+                })
+                .await
+        );
+        session.restore().await.unwrap();
+    });
+    timeout(DEADLINE, stopped_admission.wait_for(|value| *value))
+        .await
+        .unwrap()
+        .unwrap();
+    // This request is still in the JSON extractor, before activity registration.
+    assert_eq!(fixture.service.snapshot().active_requests, 0);
+    let service = fixture.service.clone();
+    let exit = tokio::spawn(async move { service.shutdown().await });
+    wait_for(&fixture.service, |status| status.can_force_exit).await;
+    assert!(!update.is_finished());
+    drop(connection);
+    timeout(DEADLINE, update).await.unwrap().unwrap();
+    timeout(DEADLINE, exit).await.unwrap().unwrap();
+    assert_eq!(fixture.service.snapshot().phase, ServicePhase::Stopped);
+}
+
+#[test]
+fn cancellation_signal_is_not_locked_during_the_final_stop_transition() {
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let service = GatewayService::new(AppState::test_state(runtime_dir.path()));
+    let (done, result) = std::sync::mpsc::channel();
+    // A dedicated thread lets the deadline catch a synchronous watch-lock
+    // deadlock, which an async timeout on the same executor cannot interrupt.
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (signal, mut cancel) = watch::channel(false);
+        let mut session = service.begin_update().unwrap();
+        let drained = runtime.block_on(session.drain(&mut cancel, || {
+            signal.send_replace(true);
+            true
+        }));
+        done.send(drained).unwrap();
+    });
+    assert!(
+        !result
+            .recv_timeout(DEADLINE)
+            .expect("cancellation deadlocked the stop transition")
+    );
+}

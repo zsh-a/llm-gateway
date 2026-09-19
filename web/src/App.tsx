@@ -5,10 +5,12 @@ import { Toaster, toast } from "sonner";
 import { type Credentials, GatewayApi, gatewayBaseUrl, loadCredentials } from "./api";
 import { DashboardLayout } from "./components/layout";
 import { ServiceBanner } from "./components/ServiceBanner";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { Button, Spinner } from "./components/ui";
 import { OverviewPage } from "./features/overview/OverviewPage";
 import { resolveLocation } from "./lib/constants";
 import { useDesktopService } from "./lib/desktop-service";
+import { useDesktopUpdates } from "./lib/desktop-updates";
 import { useGatewayDashboard } from "./lib/gateway-queries";
 import { gatewayQueryKeys, queryClient } from "./lib/query";
 import type { Navigate, NoticeTone, ThemePreference } from "./types";
@@ -53,6 +55,8 @@ export function App() {
   }, []);
 
   const desktop = useDesktopService(showNotice);
+  const updates = useDesktopUpdates(showNotice);
+  const updating = ["draining", "stopping", "installing"].includes(updates.status?.phase ?? "");
   const gatewayUrl = desktop.status?.baseUrl ?? gatewayBaseUrl;
   const serviceReady = !desktop.native || (desktop.status?.phase === "running" && !desktop.error);
   const api = useMemo(() => new GatewayApi(credentials, gatewayUrl), [credentials, gatewayUrl]);
@@ -128,7 +132,10 @@ export function App() {
         onRefresh={() => void refresh()}
         onToggleTheme={() => setThemePreference(theme === "dark" ? "light" : "dark")}
       >
-        <ServiceBanner service={desktop} />
+        {(!updating || desktop.status?.canForceExit) && <ServiceBanner service={desktop} />}
+        {(location.page !== "settings" || location.settingsTab !== "updates") && (
+          <UpdateBanner updates={updates} activeRequests={desktop.status?.activeRequests ?? 0} />
+        )}
         {healthError && serviceReady && (
           <div
             role="alert"
@@ -188,6 +195,8 @@ export function App() {
               onNotice={showNotice}
               onRefresh={() => void refresh()}
               gatewayUrl={gatewayUrl}
+              updates={updates}
+              activeRequests={desktop.status?.activeRequests ?? 0}
             />
           )}
         </Suspense>

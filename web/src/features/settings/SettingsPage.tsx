@@ -1,5 +1,5 @@
 import { Tabs } from "@base-ui/react/tabs";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { type Credentials, saveCredentials } from "../../api";
 import { Field, InfoRow } from "../../components/common";
 import {
@@ -11,9 +11,18 @@ import {
   PasswordInput,
   Select,
 } from "../../components/ui";
+import type { DesktopUpdates } from "../../lib/desktop-updates";
 import type { NoticeTone, ThemePreference } from "../../types";
+import { ApplicationUpdateCard } from "./ApplicationUpdateCard";
 import { RemoteAuthSyncCard } from "./RemoteAuthSyncCard";
 import { ServiceSettingsCard } from "./ServiceSettingsCard";
+
+function readTab() {
+  const tab = new URLSearchParams(window.location.hash.split("?")[1]).get("tab");
+  return tab && ["connection", "service", "sync", "appearance", "updates"].includes(tab)
+    ? tab
+    : "connection";
+}
 
 export function SettingsPage({
   credentials,
@@ -23,6 +32,8 @@ export function SettingsPage({
   onNotice,
   onRefresh,
   gatewayUrl,
+  updates,
+  activeRequests,
 }: {
   credentials: Credentials;
   onCredentials: (next: Credentials) => void;
@@ -31,7 +42,15 @@ export function SettingsPage({
   onNotice: (message: string, tone?: NoticeTone) => void;
   onRefresh?: () => void;
   gatewayUrl: string;
+  updates?: DesktopUpdates;
+  activeRequests?: number;
 }) {
+  const [tab, setTab] = useState(readTab);
+  useEffect(() => {
+    const changed = () => setTab(readTab());
+    window.addEventListener("hashchange", changed);
+    return () => window.removeEventListener("hashchange", changed);
+  }, []);
   const [apiKey, setApiKey] = useState(credentials.apiKey);
   const [adminKey, setAdminKey] = useState(credentials.adminKey);
   const [useSameKey, setUseSameKey] = useState(
@@ -58,7 +77,11 @@ export function SettingsPage({
 
   return (
     <Tabs.Root
-      defaultValue="connection"
+      value={tab}
+      onValueChange={(value) => {
+        setTab(value);
+        window.location.hash = `#settings?tab=${value}`;
+      }}
       className="grid items-start gap-6 lg:grid-cols-[10rem_minmax(0,1fr)]"
     >
       <Tabs.List className="flex flex-wrap gap-1 lg:flex-col" aria-label="设置分类">
@@ -67,6 +90,7 @@ export function SettingsPage({
           ["service", "服务监听"],
           ["sync", "认证同步"],
           ["appearance", "外观"],
+          ["updates", "应用更新"],
         ].map(([value, label]) => (
           <Tabs.Tab
             key={value}
@@ -78,6 +102,9 @@ export function SettingsPage({
         ))}
       </Tabs.List>
       <div className="min-w-0 max-w-3xl">
+        <Tabs.Panel value="updates">
+          <ApplicationUpdateCard updates={updates} activeRequests={activeRequests} />
+        </Tabs.Panel>
         <Tabs.Panel value="connection" className="space-y-5">
           <Card>
             <CardHeader>

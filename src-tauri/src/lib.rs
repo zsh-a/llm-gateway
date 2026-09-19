@@ -3,6 +3,7 @@ mod db;
 mod desktop;
 mod gateway;
 mod service;
+mod updater;
 
 use crate::config::Config;
 use crate::gateway::{AppState, serve};
@@ -22,6 +23,7 @@ pub fn run() {
     init_tracing();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Err(error) = desktop::show_main(app, false) {
                 tracing::warn!(%error, "唤醒已有窗口失败");
@@ -43,7 +45,12 @@ pub fn run() {
             desktop::control_service,
             desktop::force_quit,
             desktop::remote_sync_status,
-            desktop::remote_sync_pull
+            desktop::remote_sync_pull,
+            updater::get_update_status,
+            updater::check_for_updates,
+            updater::download_update,
+            updater::install_update,
+            updater::cancel_update
         ])
         .setup(desktop::setup)
         .on_window_event(|window, event| {

@@ -66,6 +66,9 @@ jobs:
       - name: Test auth tooling
         run: npm run test:auth
 
+      - name: Test release manifest and signatures
+        run: npm run test:release
+
       - name: Typecheck and build frontend
         run: npm run typecheck && npm run build
 
@@ -126,9 +129,43 @@ jobs:
         run: npm ci
 
       - name: Build desktop packages
-        run: npm run package:tauri -- --target "${{ matrix.target }}"
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          node scripts/prepare-release.mjs clean "${{ matrix.name }}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" ]]; then
+              echo 'TAURI_SIGNING_PRIVATE_KEY is required for a release.' >&2
+              exit 1
+            fi
+            npm run package:tauri -- --ci --target "${{ matrix.target }}"
+          else
+            npm run package:tauri -- --ci --target "${{ matrix.target }}" \
+              --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          fi
+
+      - name: Verify and stage signed release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          node scripts/prepare-release.mjs stage "${{ matrix.name }}" \
+            "src-tauri/target/${{ matrix.target }}/release/bundle" \
+            ".build/release/${{ matrix.name }}" "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY"
+
+      - name: Upload signed release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v7
+        with:
+          name: llm-gateway-${{ matrix.name }}
+          path: .build/release/${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Upload desktop packages
+        if: "!startsWith(github.ref, 'refs/tags/v')"
         uses: actions/upload-artifact@v7
         with:
           name: llm-gateway-${{ matrix.name }}
@@ -144,6 +181,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20.19.0
+
       - name: Download desktop packages
         uses: actions/download-artifact@v8
         with:
@@ -158,27 +203,30 @@ jobs:
         run: |
           set -euo pipefail
 
-          version="${GITHUB_REF_NAME#v}"
-          mapfile -t assets < <(
-            find release-assets -type f \( \
-              -name "*_${version}_*.dmg" -o \
-              -name "*_${version}_*.exe" -o \
-              -name "*_${version}_*.msi" \
-            \) -print
-          )
-
-          if ((${#assets[@]} == 0)); then
-            echo 'No desktop packages were found.' >&2
-            exit 1
-          fi
-
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" \
-              --repo "$GITHUB_REPOSITORY" \
-              --clobber
+            draft="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+            if [[ "$draft" != true ]]; then
+              echo 'Published releases are immutable. Publish a new version instead.' >&2
+              exit 1
+            fi
           else
-            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
               --repo "$GITHUB_REPOSITORY" \
               --title "LLM Gateway $GITHUB_REF_NAME" \
               --generate-notes
+          fi
+
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json body --jq .body > release-notes.txt
+          node scripts/prepare-release.mjs manifest release-assets \
+            "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" release-notes.txt > release-files.txt
+          mapfile -t assets < release-files.txt
+          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --draft=false --prerelease --latest=false
+          else
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --draft=false --latest
           fi

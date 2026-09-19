@@ -42,6 +42,9 @@ pub fn save_service_settings(
     state: State<'_, AppState>,
     settings: ServiceSettings,
 ) -> Result<(), String> {
+    if app.state::<ExitGate>().requested.load(Ordering::Acquire) {
+        return Err("应用正在更新或退出，请稍后修改设置".into());
+    }
     state
         .config
         .save_service_settings(&settings)
@@ -117,10 +120,16 @@ fn report_error<R: Runtime>(app: &AppHandle<R>, message: &str) {
 
 pub fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> {
     let state = AppState::new(Config::from_env())?;
+    let start_service = crate::updater::take_restart_state(
+        &state.config.runtime_dir,
+        &app.package_info().version.to_string(),
+    )
+    .unwrap_or(true);
     let service = Arc::new(GatewayService::new(state.clone()));
     app.manage(state);
     app.manage(service.clone());
     app.manage(ExitGate::default());
+    crate::updater::setup(app.handle());
 
     let status = MenuItem::with_id(app, "status", "服务：启动中…", false, None::<&str>)?;
     let detail = MenuItem::with_id(
@@ -133,6 +142,7 @@ pub fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> {
     let open = MenuItem::with_id(app, "open", "打开控制台", true, None::<&str>)?;
     let copy = MenuItem::with_id(app, "copy", "复制 OpenAI Base URL", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
+    let updates = MenuItem::with_id(app, "updates", "检查更新…", true, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle", "停止服务", false, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启服务", false, None::<&str>)?;
     let force = MenuItem::with_id(app, "force", "强制退出（中断请求）", false, None::<&str>)?;
@@ -147,6 +157,7 @@ pub fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> {
             &open,
             &copy,
             &settings,
+            &updates,
             &controls,
             &PredefinedMenuItem::separator(app)?,
             &quit,
@@ -188,6 +199,7 @@ pub fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> {
             }
         });
     builder.build(app)?;
+    update_tray(app.handle(), &service.snapshot())?;
 
     let handle = app.handle().clone();
     let mut status_events = service.subscribe();
@@ -219,8 +231,11 @@ pub fn setup<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn Error>> {
         }
     });
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = service.control("start").await {
-            warn!(%error, "启动网关失败");
+        if start_service {
+            let result = service.control("start").await;
+            if let Err(error) = result {
+                warn!(%error, "启动网关失败");
+            }
         }
     });
     if !std::env::args().any(|arg| arg == "--background") {
@@ -289,6 +304,9 @@ pub fn begin_exit<R: Runtime>(app: &AppHandle<R>, restart: bool) {
     if gate.requested.swap(true, Ordering::AcqRel) {
         return;
     }
+    if let Some(updates) = app.try_state::<Arc<crate::updater::UpdateManager>>() {
+        let _ = updates.cancel();
+    }
     let service = app.state::<Arc<GatewayService>>().inner().clone();
     let _ = update_tray(app, &service.snapshot());
     let handle = app.clone();
@@ -304,6 +322,36 @@ pub fn begin_exit<R: Runtime>(app: &AppHandle<R>, restart: bool) {
             handle.exit(0);
         }
     });
+}
+
+pub(crate) fn reserve_update_install<R: Runtime>(app: &AppHandle<R>) -> bool {
+    let reserved = app
+        .state::<ExitGate>()
+        .requested
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok();
+    refresh_tray(app);
+    reserved
+}
+
+pub(crate) fn release_update_install<R: Runtime>(app: &AppHandle<R>) {
+    app.state::<ExitGate>()
+        .requested
+        .store(false, Ordering::Release);
+    refresh_tray(app);
+}
+
+fn refresh_tray<R: Runtime>(app: &AppHandle<R>) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let status = handle.state::<Arc<GatewayService>>().snapshot();
+        let _ = update_tray(&handle, &status);
+    });
+}
+
+pub(crate) fn restart_after_update<R: Runtime>(app: &AppHandle<R>) {
+    app.state::<ExitGate>().ready.store(true, Ordering::Release);
+    app.request_restart();
 }
 
 fn force_exit<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -376,6 +424,15 @@ fn copy_address<R: Runtime>(app: &AppHandle<R>) {
 
 fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
     match event.id().as_ref() {
+        "updates" => {
+            if let Err(error) = show_main(app, true) {
+                report_error(app, &error.to_string());
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.eval("window.location.hash = '#settings?tab=updates'");
+            }
+            crate::updater::check_from_tray(app);
+        }
         "open" | "settings" | "detail" => {
             if let Err(error) = show_main(app, event.id().as_ref() != "open") {
                 report_error(app, &error.to_string());
