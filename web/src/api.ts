@@ -22,8 +22,10 @@ export interface Credentials {
   adminKey: string;
 }
 
-// Browser development stays same-origin; Tauri builds inject the local Axum address.
-export const gatewayBaseUrl = (import.meta.env.VITE_GATEWAY_BASE_URL ?? "").replace(/\/+$/, "");
+// The desktop app uses the local Axum gateway by default; deployments can override it.
+export const gatewayBaseUrl = (
+  import.meta.env.VITE_GATEWAY_BASE_URL ?? "http://127.0.0.1:3000"
+).replace(/\/+$/, "");
 
 function gatewayUrl(path: string): string {
   return `${gatewayBaseUrl}${path}`;

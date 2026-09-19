@@ -53,7 +53,7 @@ npm run sync -- push        # 加密并上传本机认证缓存
 npm run sync -- pull        # 下载并解密认证缓存
 ```
 
-发布包不需要额外安装 Node。Tauri 开发模式使用 Vite 的 `127.0.0.1:1420`，网关默认监听 `127.0.0.1:3000`。控制台通过 `VITE_GATEWAY_BASE_URL` 访问 Axum 服务，发布构建已经设置为 `http://127.0.0.1:3000`。
+发布包不需要额外安装 Node。Tauri 开发模式使用 Vite 的 `127.0.0.1:1420`，网关默认监听 `127.0.0.1:3000`。控制台通过 `VITE_GATEWAY_BASE_URL` 访问 Axum 服务，未设置时默认使用 `http://127.0.0.1:3000`。
 
 ## Headless 模式
 
