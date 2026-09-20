@@ -50,7 +50,9 @@ export function OverviewPage({
           <StatCard
             icon={TrendingUp}
             label="成功率"
-            value={summary.successRate === null ? "—" : `${summary.successRate.toFixed(1)}%`}
+            value={
+              summary.successRate === null ? "—" : `${(summary.successRate * 100).toFixed(1)}%`
+            }
             detail={`${formatNumber(summary.errors)} 个错误`}
             tone="green"
           />

@@ -1,6 +1,6 @@
 {
   "name": "llm-gateway",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "A Rust/Tauri OpenAI-compatible gateway with a React control panel",
   "type": "module",
   "scripts": {

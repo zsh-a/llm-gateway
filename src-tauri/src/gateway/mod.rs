@@ -279,7 +279,7 @@ impl AppState {
                 active: Some(active),
                 started_at: now,
                 protocol: protocol.to_string(),
-                api_key_id: identity.managed.then(|| identity.key_id.clone()),
+                api_key_id: Some(identity.key_id.clone()),
                 ..MetricDraft::default()
             })),
         })

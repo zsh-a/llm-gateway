@@ -6,6 +6,7 @@ const CHAT: &str = "/v1/chat/completions";
 const RESPONSES: &str = "/v1/responses";
 
 struct Fixture {
+    state: AppState,
     base_url: String,
     client: reqwest::Client,
     seen: Arc<Mutex<Vec<(usize, usize)>>>,
@@ -16,8 +17,14 @@ struct Fixture {
 
 impl Fixture {
     async fn new(limit: Option<usize>) -> Self {
+        Self::with_api_key(limit, "").await
+    }
+
+    async fn with_api_key(limit: Option<usize>, api_key: &str) -> Self {
         let runtime = tempfile::tempdir().unwrap();
         let mut state = AppState::test_state(runtime.path());
+        state.config.proxy_api_key = api_key.into();
+        state.config.proxy_admin_key = "test-admin".into();
         if let Some(limit) = limit {
             state.config.max_body_bytes = limit;
         }
@@ -32,7 +39,7 @@ impl Fixture {
                     let tools = messages.iter().filter(|message| message["role"] == "tool").filter_map(|message| message["content"].as_str()).map(str::len).sum();
                     observed.lock().unwrap().push((reasoning, tools));
                     ([("content-type", "text/event-stream")],
-                        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\ndata: [DONE]\n\n")
                 }
             }))
             .layer(DefaultBodyLimit::disable());
@@ -48,13 +55,23 @@ impl Fixture {
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let gateway_state = state.clone();
         let gateway = tokio::spawn(async move {
-            axum::serve(listener, router(state)).await.unwrap();
+            axum::serve(listener, router(gateway_state)).await.unwrap();
         });
+        let mut headers = HeaderMap::new();
+        if !api_key.is_empty() {
+            headers.insert(
+                header::AUTHORIZATION,
+                format!("Bearer {api_key}").parse().unwrap(),
+            );
+        }
         Self {
+            state,
             base_url,
             client: reqwest::Client::builder()
                 .no_proxy()
+                .default_headers(headers)
                 .timeout(Duration::from_secs(10))
                 .build()
                 .unwrap(),
@@ -74,12 +91,156 @@ impl Fixture {
             .await
             .unwrap()
     }
+
+    async fn metrics(&self, path: &str, key: Option<&str>) -> Value {
+        let mut request = self.client.get(format!("{}{path}", self.base_url));
+        if let Some(key) = key {
+            request = request.bearer_auth(key);
+        }
+        request
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.gateway.abort();
         self.upstream.abort();
+    }
+}
+
+#[tokio::test]
+async fn anonymous_and_environment_requests_are_visible_in_all_metric_views() {
+    for (key, identity) in [("", "anonymous"), ("test-environment", "environment")] {
+        let fixture = Fixture::with_api_key(None, key).await;
+        for path in [CHAT, RESPONSES] {
+            for stream in [false, true] {
+                let body = if path == CHAT {
+                    json!({"model":"mimo/test", "messages":[], "stream":stream})
+                } else {
+                    json!({"model":"mimo/test", "input":"test", "stream":stream})
+                };
+                let response = fixture.send(path, body.to_string()).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                response.text().await.unwrap();
+            }
+        }
+        let summary = fixture.metrics("/metrics/summary", None).await;
+        assert_eq!(summary["requests"], 4, "missing metrics for {identity}");
+        assert_eq!(summary["successes"], 4);
+        assert_eq!(summary["tokens"]["totalTokens"], 28);
+        assert_eq!(summary["activeRequests"], 0);
+        let recent = fixture.metrics("/metrics/requests", None).await;
+        assert_eq!(recent["total"], 4);
+        assert_eq!(recent["data"].as_array().unwrap().len(), 4);
+        let series = fixture.metrics("/metrics/timeseries", None).await;
+        assert_eq!(
+            series["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|point| point["requests"].as_u64().unwrap())
+                .sum::<u64>(),
+            4
+        );
+        assert!(
+            fixture
+                .state
+                .db
+                .metric_rows(0)
+                .unwrap()
+                .iter()
+                .all(|row| row.api_key_id.as_deref() == Some(identity))
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_unscoped_metrics_remain_visible_without_exposing_managed_keys() {
+    use crate::db::{ApiKeyRecord, MetricRecord};
+    for key in ["", "test-environment"] {
+        let fixture = Fixture::with_api_key(None, key).await;
+        for (id, identity) in [
+            ("legacy", None),
+            ("a", Some("key-a")),
+            ("b", Some("key-b")),
+            ("anonymous", Some("anonymous")),
+            ("environment", Some("environment")),
+        ] {
+            fixture
+                .state
+                .db
+                .insert_metric(&MetricRecord {
+                    id: id.into(),
+                    started_at: super::super::auth::now_ms(),
+                    completed_at: super::super::auth::now_ms(),
+                    protocol: "chat".into(),
+                    provider: Some("mimo".into()),
+                    channel_id: Some("test".into()),
+                    model: Some("mimo/test".into()),
+                    status: "success".into(),
+                    status_code: Some(200),
+                    finish_reason: Some("stop".into()),
+                    api_key_id: identity.map(str::to_string),
+                    usage_json: Some(json!({"totalTokens":7}).to_string()),
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            fixture.metrics("/metrics/summary", None).await["requests"],
+            2
+        );
+        assert_eq!(fixture.metrics("/metrics/requests", None).await["total"], 2);
+        assert_eq!(
+            fixture
+                .metrics("/admin/metrics/summary", Some("test-admin"))
+                .await["requests"],
+            5
+        );
+        for name in ["key-a", "key-b"] {
+            fixture
+                .state
+                .db
+                .upsert_api_key(&ApiKeyRecord {
+                    id: name.into(),
+                    name: name.into(),
+                    prefix: name.into(),
+                    hash: super::super::auth::hash_secret(name),
+                    enabled: true,
+                    created_at: 0,
+                    expires_at: None,
+                    allowed_models: vec![],
+                    rpm_limit: None,
+                    tpm_limit: None,
+                    quota_tokens: None,
+                    used_tokens: 0,
+                })
+                .unwrap();
+        }
+        for name in ["key-a", "key-b"] {
+            let summary = fixture.metrics("/metrics/summary", Some(name)).await;
+            assert_eq!(summary["requests"], 1);
+            assert_eq!(summary["tokens"]["totalTokens"], 7);
+            let recent = fixture.metrics("/metrics/requests", Some(name)).await;
+            assert_eq!(recent["total"], 1);
+            assert_eq!(
+                recent["data"][0]["id"],
+                if name == "key-a" { "a" } else { "b" }
+            );
+        }
+        assert_eq!(
+            fixture
+                .metrics("/metrics/summary?provider=workbuddy", Some("key-a"))
+                .await["requests"],
+            0
+        );
     }
 }
 

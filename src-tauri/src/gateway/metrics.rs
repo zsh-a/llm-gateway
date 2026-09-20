@@ -64,9 +64,13 @@ pub(super) async fn metrics_response(
                 .status
                 .as_deref()
                 .is_none_or(|value| row.status == value)
-            && identity
-                .as_ref()
-                .is_none_or(|identity| row.api_key_id.as_deref() == Some(identity.key_id.as_str()))
+            && identity.as_ref().is_none_or(|identity| {
+                // Older versions omitted the identity for anonymous and
+                // environment-key requests. Keep those records visible
+                // without granting managed keys access to unscoped data.
+                row.api_key_id.as_deref() == Some(identity.key_id.as_str())
+                    || (!identity.managed && row.api_key_id.is_none())
+            })
     });
     match view {
         MetricView::Summary => {
