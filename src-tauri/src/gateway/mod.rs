@@ -4,7 +4,6 @@ use axum::http::{HeaderMap, StatusCode};
 use reqwest::Client;
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tracing::warn;
@@ -28,15 +27,15 @@ use auth::{
     GatewayError, error_response, hash_secret, now_ms, read_auth_captured_at, read_auth_headers,
     request_credential, secret_equal,
 };
-use model_catalog::{ModelCache, ModelInfo, fallback_models, parse_models};
+use model_catalog::{ModelCache, ModelInfo, parse_models};
 
 const MIMO_URL: &str = "https://mimo-server-cn.xiaomimimo.com/api/route/chat/completions";
 const MIMO_MODELS_URL: &str = "https://mimo-server-cn.xiaomimimo.com/api/model/list";
 const WORKBUDDY_URL: &str = "https://copilot.tencent.com/v2/chat/completions";
 const WORKBUDDY_MODELS_URL: &str = "https://copilot.tencent.com/v3/config";
-// /v3/config requires a client version in User-Agent. Older auth vaults omitted it.
-// This fallback was verified against the WorkBuddy 5.5.6 client and config endpoint.
-const WORKBUDDY_USER_AGENT: &str = "WorkBuddy/5.5.6";
+// /v3/config selects its catalog by platform as well as client version.
+// Older auth vaults omitted User-Agent; WorkBuddy alone returns a legacy catalog.
+const WORKBUDDY_USER_AGENT: &str = "CLI/5.5.6 WorkBuddy/5.5.6";
 
 fn load_auth_cache(config: &Config) -> HashMap<String, HeaderMap> {
     let mut auth = HashMap::new();
@@ -526,18 +525,14 @@ impl AppState {
                 return cache.models;
             }
         }
-        let mut models = fallback_models();
+        let mut models = Vec::new();
         if self.config.model_discovery {
             let (mimo, workbuddy) = tokio::join!(
                 self.fetch_mimo_models(mimo_url),
                 self.fetch_workbuddy_models(workbuddy_url),
             );
             if let Some(remote) = mimo {
-                for model in remote {
-                    if !models.iter().any(|current| current.id == model.id) {
-                        models.push(model);
-                    }
-                }
+                models.extend(remote);
             }
             if let Some(remote) = workbuddy {
                 if let Err(error) =
@@ -569,14 +564,8 @@ impl AppState {
         workbuddy_files.push(model_catalog::workbuddy_catalog_path(
             &self.config.runtime_dir,
         ));
-        if let Some(home) = dirs::home_dir() {
-            workbuddy_files.push(home.join(".workbuddy/cache/acc-product-config-v3.json"));
-        }
-        if cfg!(target_os = "macos") {
-            workbuddy_files.push(PathBuf::from(
-                "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/product.json",
-            ));
-        }
+        // Client product files can contain bundled defaults merged into their cache.
+        // Only use an explicit catalog or models previously fetched by this gateway.
         for path in workbuddy_files {
             if let Ok(raw) = std::fs::read_to_string(path) {
                 let discovered = parse_models(&raw, "workbuddy");

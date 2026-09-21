@@ -57,12 +57,8 @@ export function PlaygroundPage({
   useEffect(() => {
     if (initialModelId && data.models.some((item) => item.id === initialModelId))
       setModelId(initialModelId);
-    else if (
-      data.resources.models.hasData &&
-      data.models.length &&
-      !data.models.some((item) => item.id === modelId)
-    )
-      setModelId(data.models[0].id);
+    else if (data.resources.models.hasData && !data.models.some((item) => item.id === modelId))
+      setModelId(data.models[0]?.id ?? "");
   }, [data.models, data.resources.models.hasData, initialModelId, modelId]);
   useEffect(() => {
     if (!modelSupportsReasoning(model)) setEffort("auto");

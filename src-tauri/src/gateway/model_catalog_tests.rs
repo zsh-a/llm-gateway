@@ -111,6 +111,11 @@ async fn fresh_install_fetches_with_legacy_auth_and_coalesces_requests() {
     );
     assert_eq!(server.requests.load(Ordering::SeqCst), 1);
     for models in [first, second] {
+        assert_eq!(
+            models.len(),
+            1,
+            "only the discovered model should be listed"
+        );
         let discovered = models
             .iter()
             .filter(|model| model.id == "test-workbuddy-model")
@@ -121,7 +126,7 @@ async fn fresh_install_fetches_with_legacy_auth_and_coalesces_requests() {
     }
     let incoming = &server.headers.lock().unwrap()[0];
     assert_eq!(incoming["authorization"], "Bearer legacy-test");
-    assert_eq!(incoming["user-agent"], WORKBUDDY_USER_AGENT);
+    assert_eq!(incoming["user-agent"], "CLI/5.5.6 WorkBuddy/5.5.6");
     let raw =
         std::fs::read_to_string(model_catalog::workbuddy_catalog_path(directory.path())).unwrap();
     assert!(!raw.contains("privateValue"));
@@ -179,6 +184,11 @@ async fn failed_refresh_preserves_last_good_models_across_restarts() {
         )
         .await
         .expect("the timeout includes reading the response body");
+        assert_eq!(
+            models.len(),
+            1,
+            "only the last successful catalog is reused"
+        );
         let model = models
             .iter()
             .find(|model| model.id == "test-workbuddy-model")
@@ -197,7 +207,7 @@ async fn reloading_synced_auth_invalidates_models_and_preserves_captured_user_ag
     std::fs::write(
         state.config.auth_path("workbuddy"),
         json!({
-            "headers": {"authorization": "Bearer new-test", "user-agent": "WorkBuddy/6.0.0"}
+            "headers": {"authorization": "Bearer new-test", "user-agent": "CLI/6.0.0 WorkBuddy/6.0.0"}
         })
         .to_string(),
     )
@@ -217,21 +227,28 @@ async fn reloading_synced_auth_invalidates_models_and_preserves_captured_user_ag
     assert_eq!(server.requests.load(Ordering::SeqCst), 2);
     let incoming = &server.headers.lock().unwrap()[1];
     assert_eq!(incoming["authorization"], "Bearer new-test");
-    assert_eq!(incoming["user-agent"], "WorkBuddy/6.0.0");
+    assert_eq!(incoming["user-agent"], "CLI/6.0.0 WorkBuddy/6.0.0");
 }
 
 #[tokio::test]
 async fn discovery_disabled_or_missing_credentials_never_contacts_workbuddy() {
     let directory = TempDir::new().unwrap();
     let server = ConfigServer::start().await;
-    let state = AppState::test_state(directory.path());
+    let mut state = AppState::test_state(directory.path());
+    state.config.model_discovery = true;
     assert!(state.fetch_workbuddy_models(&server.url).await.is_none());
+    assert!(state.models_from(&server.url, &server.url).await.is_empty());
     let mut state = authenticated_state(&directory).await;
     state.config.model_discovery = false;
+    // Disabling discovery also ignores a real on-disk catalog.
+    model_catalog::save_workbuddy_catalog(
+        directory.path(),
+        &parse_models(r#"{"models":[{"id":"cached-model"}]}"#, "workbuddy"),
+    )
+    .unwrap();
     let models = state.models_from(&server.url, &server.url).await;
-    assert_eq!(models.len(), fallback_models().len());
+    assert!(models.is_empty());
     assert_eq!(server.requests.load(Ordering::SeqCst), 0);
-    assert!(!model_catalog::workbuddy_catalog_path(directory.path()).exists());
 
     std::fs::write(
         state.config.auth_path("workbuddy"),
@@ -240,6 +257,83 @@ async fn discovery_disabled_or_missing_credentials_never_contacts_workbuddy() {
     .unwrap();
     state.reload_auth_cache().await.unwrap();
     assert!(!state.has_auth("workbuddy"));
+}
+
+#[tokio::test]
+async fn failed_discovery_without_a_saved_catalog_returns_no_models() {
+    let directory = TempDir::new().unwrap();
+    let state = authenticated_state(&directory).await;
+    let server = ConfigServer::start().await;
+    server.reply.lock().unwrap().status = StatusCode::UNAUTHORIZED;
+
+    assert!(state.models_from(&server.url, &server.url).await.is_empty());
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+    assert!(!model_catalog::workbuddy_catalog_path(directory.path()).exists());
+}
+
+#[tokio::test]
+async fn expired_catalog_is_replaced_with_current_upstream_models() {
+    let directory = TempDir::new().unwrap();
+    let state = authenticated_state(&directory).await;
+    let server = ConfigServer::start().await;
+    state.models_from(&server.url, &server.url).await;
+    server.reply.lock().unwrap().body = json!({
+        "code": 0,
+        "data": {"models": [{"id": "updated-model"}]}
+    })
+    .to_string();
+
+    let cached = state.models_from(&server.url, &server.url).await;
+    assert_eq!(cached[0].id, "test-workbuddy-model");
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+    state
+        .model_cache
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .fetched_at = Instant::now() - Duration::from_secs(301);
+
+    let refreshed = state.models_from(&server.url, &server.url).await;
+    assert_eq!(refreshed.len(), 1);
+    assert_eq!(refreshed[0].id, "updated-model");
+    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
+    let saved =
+        std::fs::read_to_string(model_catalog::workbuddy_catalog_path(directory.path())).unwrap();
+    let saved = parse_models(&saved, "workbuddy");
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].id, "updated-model");
+}
+
+#[tokio::test]
+async fn mimo_catalog_contains_only_upstream_models_and_metadata() {
+    let directory = TempDir::new().unwrap();
+    let mut state = AppState::test_state(directory.path());
+    state.config.model_discovery = true;
+    state.config.model_discovery_timeout_ms = 500;
+    state
+        .auth
+        .write()
+        .unwrap()
+        .insert("mimo".into(), HeaderMap::new());
+    let server = ConfigServer::start().await;
+    server.reply.lock().unwrap().body = json!({
+        "data": [
+            {"id": "mimo-pro", "name": "Current upstream name", "supportsReasoning": true},
+            {"id": "mimo-new"},
+            {"id": "mimo-new"}
+        ]
+    })
+    .to_string();
+
+    let models = state.models_from(&server.url, &server.url).await;
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].id, "mimo-pro");
+    assert_eq!(models[0].name, "Current upstream name");
+    assert_eq!(models[0].capabilities.get("reasoning"), Some(&true));
+    assert_eq!(models[1].id, "mimo-new");
+    assert!(models.iter().all(|model| model.provider == "mimo"));
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
 }
 
 #[test]

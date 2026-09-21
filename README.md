@@ -200,11 +200,13 @@ npm run sync -- pull --force
 
 WorkBuddy 模型目录在网关启动时和桌面拉取认证成功后自动获取。网关使用登录凭据请求
 `https://copilot.tencent.com/v3/config`，无需目标设备安装 WorkBuddy，也无需把模型目录重新上传到云端。
-旧认证包未保存 User-Agent 时会使用兼容版本头；新捕获的认证会保留客户端原有版本头。
+旧认证包未保存 User-Agent 时会使用 `CLI/5.5.6 WorkBuddy/5.5.6`，包含上游选择模型目录所需的
+CLI 平台标识；新捕获的认证会保留客户端完整的原始 User-Agent。
 模型请求复用 5 分钟缓存，到期后下次查询会重新获取。成功结果只保存模型元数据到
 `RUNTIME_DIR/models/workbuddy.json`；认证失效、网络失败或返回空目录时不会覆盖已有目录。
-远程失败后依次尝试 `WORKBUDDY_MODEL_FILE`、网关模型缓存、WorkBuddy 用户缓存和 macOS 安装目录。
-`MODEL_DISCOVERY=false` 会关闭远程及本地发现，仅返回内置默认模型。
+远程失败后依次尝试显式设置的 `WORKBUDDY_MODEL_FILE` 和网关保存的成功模型目录。
+不再自动读取 WorkBuddy 客户端的合并缓存或安装包清单，避免将其中的内置模型作为实际发现结果。
+网关不补充任何默认模型；没有可用目录时返回空列表。`MODEL_DISCOVERY=false` 会关闭远程及本地发现，返回空列表。
 
 认证工具的代理、客户端入口和证书参数见 [.env.example](./.env.example)。
 
@@ -223,7 +225,7 @@ MAX_BODY_BYTES=8388608
 MODEL_DISCOVERY=true
 MODEL_DISCOVERY_TIMEOUT_MS=30000
 METRICS_MAX_RECORDS=2000
-# WORKBUDDY_MODEL_FILE=/path/to/WorkBuddy/product.json
+# WORKBUDDY_MODEL_FILE=/path/to/workbuddy-models.json
 # DEFAULT_MODEL=provider/model-id
 # CORS_ORIGIN=http://localhost:1420
 ```

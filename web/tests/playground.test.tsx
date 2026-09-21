@@ -6,6 +6,36 @@ import { PlaygroundPage } from "../src/features/playground/PlaygroundPage";
 import { emptyDashboard } from "../src/lib/constants";
 
 describe("playground request identity", () => {
+  it("clears a removed selection when the catalog becomes empty and recovers on refresh", async () => {
+    const data = {
+      ...emptyDashboard,
+      models: [{ id: "a", name: "Alpha" }],
+      resources: {
+        ...emptyDashboard.resources,
+        models: { hasData: true, pending: false, error: "" },
+      },
+    };
+    const props = {
+      data,
+      api: new GatewayApi({ apiKey: "", adminKey: "" }),
+      initialModelId: "a",
+      onNavigate: vi.fn(),
+      onRefresh: vi.fn(),
+    };
+    const { rerender } = render(<PlaygroundPage {...props} />);
+    expect(screen.getByRole("combobox").textContent).toContain("Alpha");
+
+    rerender(<PlaygroundPage {...props} data={{ ...data, models: [] }} />);
+    expect(await screen.findByText("暂无可用模型")).toBeTruthy();
+    expect((screen.getByRole("combobox") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText("Alpha")).toBeNull();
+
+    rerender(<PlaygroundPage {...props} data={{ ...data, models: [{ id: "b", name: "Beta" }] }} />);
+    await waitFor(() => expect(screen.getByRole("combobox").textContent).toContain("Beta"));
+    expect((screen.getByRole("combobox") as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("disables sends and retries when the desktop service stops", async () => {
     const api = new GatewayApi({ apiKey: "", adminKey: "" });
     const stream = vi.spyOn(api, "streamChat").mockResolvedValue(undefined);

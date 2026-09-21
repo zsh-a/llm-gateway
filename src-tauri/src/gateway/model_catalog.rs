@@ -55,61 +55,6 @@ pub(super) struct ModelInfo {
     pub default_reasoning_effort: Option<String>,
 }
 
-pub(super) fn fallback_models() -> Vec<ModelInfo> {
-    vec![
-        ModelInfo {
-            id: "mimo-x-pro-preview".into(),
-            name: "MiMo X Pro Preview".into(),
-            provider: "mimo".into(),
-            owned_by: "mimo".into(),
-            capabilities: [("chat".into(), true), ("reasoning".into(), true)]
-                .into_iter()
-                .collect(),
-            reasoning_efforts: Some(
-                [
-                    ("off".into(), None),
-                    ("minimal".into(), Some("low".into())),
-                    ("low".into(), Some("low".into())),
-                    ("medium".into(), Some("medium".into())),
-                    ("high".into(), Some("high".into())),
-                    ("xhigh".into(), Some("xhigh".into())),
-                    ("max".into(), Some("max".into())),
-                ]
-                .into_iter()
-                .collect(),
-            ),
-            default_reasoning_effort: Some("medium".into()),
-        },
-        ModelInfo {
-            id: "mimo-pro".into(),
-            name: "MiMo Pro".into(),
-            provider: "mimo".into(),
-            owned_by: "mimo".into(),
-            capabilities: [("chat".into(), true)].into_iter().collect(),
-            reasoning_efforts: None,
-            default_reasoning_effort: None,
-        },
-        ModelInfo {
-            id: "mimo-flash".into(),
-            name: "MiMo Flash".into(),
-            provider: "mimo".into(),
-            owned_by: "mimo".into(),
-            capabilities: [("chat".into(), true)].into_iter().collect(),
-            reasoning_efforts: None,
-            default_reasoning_effort: None,
-        },
-        ModelInfo {
-            id: "default".into(),
-            name: "WorkBuddy Default".into(),
-            provider: "workbuddy".into(),
-            owned_by: "workbuddy".into(),
-            capabilities: [("chat".into(), true)].into_iter().collect(),
-            reasoning_efforts: None,
-            default_reasoning_effort: None,
-        },
-    ]
-}
-
 pub(super) fn parse_models(raw: &str, provider: &str) -> Vec<ModelInfo> {
     let Ok(value) = serde_json::from_str::<Value>(raw) else {
         return Vec::new();
