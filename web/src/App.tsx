@@ -75,11 +75,13 @@ export function App() {
 
   const navigate = useCallback<Navigate>((next, options = {}) => {
     const params = new URLSearchParams();
+    if (["metrics", "management"].includes(next) && options.apiKeyId)
+      params.set("key", options.apiKeyId);
     if (next === "playground" && options.modelId) params.set("model", options.modelId);
     const hash = `#${next}${params.toString() ? `?${params}` : ""}`;
     if (window.location.hash !== hash)
       window.history[options.replace ? "replaceState" : "pushState"](null, "", hash);
-    setLocation({ page: next, modelId: options.modelId });
+    setLocation({ page: next, modelId: options.modelId, apiKeyId: options.apiKeyId });
     setMobileNav(false);
   }, []);
 
@@ -175,10 +177,17 @@ export function App() {
             />
           )}
           {location.page === "metrics" && (
-            <MetricsPage data={data} api={api} enabled={serviceReady} />
+            <MetricsPage
+              data={data}
+              api={api}
+              enabled={serviceReady}
+              initialKeyId={location.apiKeyId}
+              onNavigate={navigate}
+            />
           )}
           {location.page === "management" && (
             <ManagementPage
+              initialKeyId={location.apiKeyId}
               data={data}
               api={api}
               onNotice={showNotice}

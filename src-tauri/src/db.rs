@@ -1,3 +1,5 @@
+pub mod usage;
+
 use anyhow::Context;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -41,6 +43,8 @@ pub struct ApiKeyRecord {
     pub tpm_limit: Option<i64>,
     pub quota_tokens: Option<i64>,
     pub used_tokens: i64,
+    pub revoked_at: Option<i64>,
+    pub last_used_at: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -80,7 +84,7 @@ impl Db {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let connection = Connection::open(path)
+        let mut connection = Connection::open(path)
             .with_context(|| format!("无法打开 SQLite 数据库 {}", path.display()))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "busy_timeout", 5000_i64)?;
@@ -131,6 +135,7 @@ impl Db {
               ON request_metrics(model);
             ",
         )?;
+        usage::migrate(&mut connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -174,6 +179,8 @@ impl Db {
                         tpm_limit: key.tpm_limit,
                         quota_tokens: key.quota_tokens,
                         used_tokens: key.used_tokens,
+                        revoked_at: None,
+                        last_used_at: None,
                     })?;
                 }
             }
@@ -244,7 +251,7 @@ impl Db {
         let connection = self.connection.lock().expect("sqlite mutex poisoned");
         let mut statement = connection.prepare(
             "SELECT id,name,prefix,hash,enabled,created_at,expires_at,allowed_models,
-                    rpm_limit,tpm_limit,quota_tokens,used_tokens
+                    rpm_limit,tpm_limit,quota_tokens,used_tokens,revoked_at,last_used_at
              FROM api_keys ORDER BY created_at DESC",
         )?;
         let rows = statement.query_map([], |row| {
@@ -262,6 +269,8 @@ impl Db {
                 tpm_limit: row.get(9)?,
                 quota_tokens: row.get(10)?,
                 used_tokens: row.get(11)?,
+                revoked_at: row.get(12)?,
+                last_used_at: row.get(13)?,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -272,7 +281,7 @@ impl Db {
         let item = connection
             .query_row(
                 "SELECT id,name,prefix,hash,enabled,created_at,expires_at,allowed_models,
-                        rpm_limit,tpm_limit,quota_tokens,used_tokens
+                        rpm_limit,tpm_limit,quota_tokens,used_tokens,revoked_at,last_used_at
                  FROM api_keys WHERE hash=?1",
                 params![hash],
                 |row| {
@@ -290,6 +299,8 @@ impl Db {
                         tpm_limit: row.get(9)?,
                         quota_tokens: row.get(10)?,
                         used_tokens: row.get(11)?,
+                        revoked_at: row.get(12)?,
+                        last_used_at: row.get(13)?,
                     })
                 },
             )
@@ -304,9 +315,9 @@ impl Db {
              (id,name,prefix,hash,enabled,created_at,expires_at,allowed_models,rpm_limit,tpm_limit,quota_tokens,used_tokens)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
              ON CONFLICT(id) DO UPDATE SET name=excluded.name,prefix=excluded.prefix,
-             hash=excluded.hash,enabled=excluded.enabled,expires_at=excluded.expires_at,
+             hash=excluded.hash,enabled=CASE WHEN api_keys.revoked_at IS NULL THEN excluded.enabled ELSE 0 END,expires_at=excluded.expires_at,
              allowed_models=excluded.allowed_models,rpm_limit=excluded.rpm_limit,
-             tpm_limit=excluded.tpm_limit,quota_tokens=excluded.quota_tokens,used_tokens=excluded.used_tokens",
+             tpm_limit=excluded.tpm_limit,quota_tokens=excluded.quota_tokens",
             params![
                 key.id,
                 key.name,
@@ -327,21 +338,22 @@ impl Db {
 
     pub fn delete_api_key(&self, id: &str) -> anyhow::Result<bool> {
         let connection = self.connection.lock().expect("sqlite mutex poisoned");
-        Ok(connection.execute("DELETE FROM api_keys WHERE id=?1", params![id])? > 0)
-    }
-
-    pub fn add_usage(&self, id: &str, tokens: i64) -> anyhow::Result<()> {
-        let connection = self.connection.lock().expect("sqlite mutex poisoned");
-        connection.execute(
-            "UPDATE api_keys SET used_tokens=used_tokens+?2 WHERE id=?1",
-            params![id, tokens.max(0)],
-        )?;
-        Ok(())
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as i64;
+        Ok(connection.execute(
+            "UPDATE api_keys SET enabled=0,revoked_at=?2 WHERE id=?1 AND revoked_at IS NULL",
+            params![id, now],
+        )? > 0)
     }
 
     pub fn insert_metric(&self, metric: &MetricRecord) -> anyhow::Result<()> {
-        let connection = self.connection.lock().expect("sqlite mutex poisoned");
-        connection.execute(
+        let mut connection = self.connection.lock().expect("sqlite mutex poisoned");
+        let tx = connection.transaction()?;
+        if !usage::account(&tx, metric, true)? {
+            return Ok(());
+        }
+        tx.execute(
             "INSERT OR REPLACE INTO request_metrics
              (id,started_at,completed_at,protocol,provider,channel_id,model,status,status_code,finish_reason,api_key_id,usage_json)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
@@ -360,6 +372,7 @@ impl Db {
                 metric.usage_json,
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
-import type { GatewayApi } from "../api";
+import { ApiError, type GatewayApi } from "../api";
 import type {
   DashboardData,
   MetricsQuery,
@@ -66,6 +66,8 @@ export function useMetrics(api: GatewayApi, filters: MetricsQuery, enabled = tru
   const error = [summary, timeseries, requests].find((query) => query.error)?.error;
   return {
     data,
+    authError: error instanceof ApiError && [401, 403, 503].includes(error.status),
+    lastUpdated: Math.min(summary.dataUpdatedAt, timeseries.dataUpdatedAt, requests.dataUpdatedAt),
     error: error ? queryErrorMessage(error, "统计数据加载失败") : "",
     isPending: !data && !error,
     isFetching: summary.isFetching || timeseries.isFetching || requests.isFetching,
@@ -104,7 +106,7 @@ export function useGatewayDashboard(api: GatewayApi, enabled: boolean, page: Pag
   const keys = useQuery({
     queryKey: gatewayQueryKeys.resource(api.baseUrl, "keys"),
     queryFn: ({ signal }) => api.keys(signal),
-    enabled: enabled && page === "management",
+    enabled: enabled && (page === "management" || (page === "metrics" && api.isAdministrator)),
     staleTime: 30000,
   });
   const metrics = useMetrics(api, overviewMetrics, enabled && page === "overview");

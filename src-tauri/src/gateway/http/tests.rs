@@ -1,6 +1,7 @@
 use super::*;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
+use tower::ServiceExt;
 
 const CHAT: &str = "/v1/chat/completions";
 const RESPONSES: &str = "/v1/responses";
@@ -21,10 +22,15 @@ impl Fixture {
     }
 
     async fn with_api_key(limit: Option<usize>, api_key: &str) -> Self {
+        Self::with_cors(limit, api_key, "").await
+    }
+
+    async fn with_cors(limit: Option<usize>, api_key: &str, cors_origin: &str) -> Self {
         let runtime = tempfile::tempdir().unwrap();
         let mut state = AppState::test_state(runtime.path());
         state.config.proxy_api_key = api_key.into();
         state.config.proxy_admin_key = "test-admin".into();
+        state.config.cors_origin = cors_origin.into();
         if let Some(limit) = limit {
             state.config.max_body_bytes = limit;
         }
@@ -114,6 +120,391 @@ impl Drop for Fixture {
         self.gateway.abort();
         self.upstream.abort();
     }
+}
+
+#[tokio::test]
+async fn cors_preflights_allow_external_pages_and_authorization_without_a_key() {
+    let runtime = tempfile::tempdir().unwrap();
+    for (configured, origin, expected) in [
+        (
+            "https://chat.example.com\nhttp://localhost:5173",
+            "https://chat.example.com",
+            "https://chat.example.com",
+        ),
+        (
+            "https://chat.example.com,http://localhost:5173",
+            "http://localhost:5173",
+            "http://localhost:5173",
+        ),
+        (
+            "https://chat.example.com",
+            "tauri://localhost",
+            "tauri://localhost",
+        ),
+        ("", "http://tauri.localhost", "http://tauri.localhost"),
+        ("*", "https://any.example.com", "*"),
+    ] {
+        let mut state = AppState::test_state(runtime.path());
+        state.config.cors_origin = configured.into();
+        state.config.proxy_api_key = "required-on-actual-requests".into();
+        let app = router(state);
+        for (path, method) in [
+            ("/v1/models", "GET"),
+            (CHAT, "POST"),
+            (RESPONSES, "POST"),
+            ("/admin/keys/test", "PATCH"),
+            ("/admin/keys/test", "DELETE"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("OPTIONS")
+                        .uri(path)
+                        .header("origin", origin)
+                        .header("access-control-request-method", method)
+                        .header(
+                            "access-control-request-headers",
+                            "authorization,content-type,x-api-key,x-client-name",
+                        )
+                        .header("access-control-request-private-network", "true")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+            let headers = response.headers();
+            assert_eq!(headers["access-control-allow-origin"], expected);
+            assert_eq!(
+                headers["access-control-allow-headers"],
+                "authorization,content-type,x-api-key,x-client-name"
+            );
+            assert!(
+                headers["access-control-allow-methods"]
+                    .to_str()
+                    .unwrap()
+                    .split(',')
+                    .any(|value| value.trim() == method)
+            );
+            assert_eq!(headers["access-control-allow-private-network"], "true");
+            assert!(!headers.contains_key("access-control-allow-credentials"));
+            assert!(
+                headers["vary"]
+                    .to_str()
+                    .unwrap()
+                    .to_ascii_lowercase()
+                    .contains("origin")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn cors_default_allowlist_and_invalid_config_do_not_allow_external_origins() {
+    let runtime = tempfile::tempdir().unwrap();
+    for configured in [
+        "",
+        "https://allowed.example.com",
+        "*,https://allowed.example.com",
+        "invalid",
+    ] {
+        let mut state = AppState::test_state(runtime.path());
+        state.config.cors_origin = configured.into();
+        let app = router(state);
+        for method in ["OPTIONS", "GET"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri("/health")
+                        .header("origin", "https://other.example.com")
+                        .header("access-control-request-method", "GET")
+                        .header("access-control-request-private-network", "true")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                !response
+                    .headers()
+                    .contains_key("access-control-allow-origin")
+            );
+            assert!(
+                !response
+                    .headers()
+                    .contains_key("access-control-allow-private-network")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn cors_actual_requests_keep_authentication_and_support_models_and_streaming() {
+    for configured in ["https://chat.example.com", "*"] {
+        let fixture = Fixture::with_cors(None, "browser-key", configured).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        for key in ["", "wrong-key", "browser-key"] {
+            for path in ["/v1/models", CHAT, RESPONSES, "/admin/keys"] {
+                let mut request = if [CHAT, RESPONSES].contains(&path) {
+                    client.post(format!("{}{path}", fixture.base_url)).json(
+                        &json!({"model":"mimo/test","messages":[],"input":"test","stream":true}),
+                    )
+                } else {
+                    client.get(format!("{}{path}", fixture.base_url))
+                };
+                request = request.header("origin", "https://chat.example.com");
+                if !key.is_empty() {
+                    request = request.bearer_auth(key);
+                }
+                let response = request.send().await.unwrap();
+                let authorized = key == "browser-key" && !path.starts_with("/admin/");
+                assert_eq!(
+                    response.status(),
+                    if authorized {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    }
+                );
+                assert_eq!(
+                    response.headers()["access-control-allow-origin"],
+                    configured
+                );
+                if authorized && [CHAT, RESPONSES].contains(&path) {
+                    assert_eq!(response.headers()["content-type"], "text/event-stream");
+                    assert!(response.text().await.unwrap().contains("[DONE]"));
+                } else if authorized {
+                    assert!(response.json::<Value>().await.unwrap()["data"].is_array());
+                }
+            }
+        }
+        let response = client
+            .get(format!("{}/v1/models", fixture.base_url))
+            .header("origin", "https://chat.example.com")
+            .header("x-api-key", "browser-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn desktop_management_is_independent_of_business_keys_and_http_cannot_claim_it() {
+    let fixture = Fixture::new(None).await;
+    let created = super::super::management::request(
+        fixture.state.clone(),
+        "POST".into(),
+        "/admin/keys".into(),
+        Some(json!({"name":"Desktop client"})),
+    )
+    .await
+    .unwrap();
+    let created = serde_json::to_value(created).unwrap();
+    assert_eq!(created["status"], 200);
+    let secret = created["body"]["secret"].as_str().unwrap();
+    let response = fixture
+        .client
+        .get(format!("{}/metrics/summary", fixture.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    for path in ["/admin/keys", "/admin/models", "/admin/metrics/summary"] {
+        let response = super::super::management::request(
+            fixture.state.clone(),
+            "GET".into(),
+            path.into(),
+            None,
+        )
+        .await
+        .unwrap();
+        let response = serde_json::to_value(response).unwrap();
+        assert_eq!(response["status"], 200);
+        assert!(!response.to_string().contains(secret));
+        let public = fixture
+            .client
+            .get(format!("{}{path}", fixture.base_url))
+            .header("x-desktop-admin", "true")
+            .bearer_auth(secret)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(public.status(), StatusCode::UNAUTHORIZED);
+    }
+    for path in [
+        "/v1/chat/completions",
+        "http://example.com/admin/keys",
+        "/admin/keys/../metrics/summary",
+    ] {
+        assert!(
+            super::super::management::request(
+                fixture.state.clone(),
+                "POST".into(),
+                path.into(),
+                None
+            )
+            .await
+            .is_err()
+        );
+    }
+    let state = AppState::test_state(fixture._runtime.path());
+    let response = router(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/admin/metrics/summary")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn key_filters_are_scoped_and_revocation_preserves_named_history() {
+    let fixture = Fixture::new(None).await;
+    let mut keys = Vec::new();
+    for name in ["Client A", "Client B"] {
+        let created: Value = fixture
+            .client
+            .post(format!("{}/admin/keys", fixture.base_url))
+            .bearer_auth("test-admin")
+            .json(&json!({"name":name}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id = created["data"]["id"].as_str().unwrap().to_string();
+        let secret = created["secret"].as_str().unwrap().to_string();
+        fixture
+            .client
+            .post(format!("{}{CHAT}", fixture.base_url))
+            .bearer_auth(&secret)
+            .json(&json!({"model":"mimo/test","messages":[]}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        keys.push((id, secret));
+    }
+    let all = fixture
+        .metrics("/admin/metrics/summary", Some("test-admin"))
+        .await;
+    assert_eq!(all["requests"], 2);
+    assert_eq!(all["keyUsage"].as_array().unwrap().len(), 2);
+    for (id, secret) in &keys {
+        assert_eq!(
+            fixture.metrics("/metrics/summary", Some(secret)).await["requests"],
+            1
+        );
+        for endpoint in ["summary", "timeseries", "requests"] {
+            let response = fixture
+                .client
+                .get(format!(
+                    "{}/metrics/{endpoint}?apiKeyId=other",
+                    fixture.base_url
+                ))
+                .bearer_auth(secret)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        let selected = fixture
+            .metrics(
+                &format!("/admin/metrics/summary?apiKeyId={id}"),
+                Some("test-admin"),
+            )
+            .await;
+        assert_eq!(selected["requests"], 1);
+        assert_eq!(selected["tokens"]["totalTokens"], 7);
+        let details = fixture
+            .metrics(
+                &format!("/admin/metrics/requests?apiKeyId={id}"),
+                Some("test-admin"),
+            )
+            .await;
+        assert_eq!(details["data"][0]["apiKeyId"], *id);
+        assert!(
+            details["data"][0]["apiKeyName"]
+                .as_str()
+                .unwrap()
+                .starts_with("Client")
+        );
+    }
+    let (id, secret) = &keys[0];
+    fixture
+        .client
+        .patch(format!("{}/admin/keys/{id}", fixture.base_url))
+        .bearer_auth("test-admin")
+        .json(&json!({"quotaTokens":7}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        fixture.metrics("/metrics/summary", Some(secret)).await["requests"],
+        1,
+        "exhausted clients can still read their usage"
+    );
+    fixture
+        .client
+        .delete(format!("{}/admin/keys/{id}", fixture.base_url))
+        .bearer_auth("test-admin")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let history = fixture
+        .metrics(
+            &format!("/admin/metrics/summary?apiKeyId={id}"),
+            Some("test-admin"),
+        )
+        .await;
+    assert_eq!(history["requests"], 1);
+    assert_eq!(history["keyUsage"][0]["key"]["name"], "Client A");
+    assert!(history["keyUsage"][0]["key"]["revokedAt"].is_number());
+    assert_eq!(
+        fixture
+            .client
+            .get(format!("{}/metrics/summary", fixture.base_url))
+            .bearer_auth(secret)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        fixture
+            .client
+            .patch(format!("{}/admin/keys/{id}", fixture.base_url))
+            .bearer_auth("test-admin")
+            .json(&json!({"enabled":true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
 }
 
 #[tokio::test]
@@ -221,6 +612,8 @@ async fn legacy_unscoped_metrics_remain_visible_without_exposing_managed_keys() 
                     tpm_limit: None,
                     quota_tokens: None,
                     used_tokens: 0,
+                    revoked_at: None,
+                    last_used_at: None,
                 })
                 .unwrap();
         }

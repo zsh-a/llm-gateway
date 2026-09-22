@@ -12,6 +12,7 @@ import {
   Select,
 } from "../../components/ui";
 import type { DesktopUpdates } from "../../lib/desktop-updates";
+import { isTauriRuntime } from "../../remote-sync";
 import type { NoticeTone, ThemePreference } from "../../types";
 import { ApplicationUpdateCard } from "./ApplicationUpdateCard";
 import { RemoteAuthSyncCard } from "./RemoteAuthSyncCard";
@@ -53,12 +54,13 @@ export function SettingsPage({
   }, []);
   const [apiKey, setApiKey] = useState(credentials.apiKey);
   const [adminKey, setAdminKey] = useState(credentials.adminKey);
-  const [useSameKey, setUseSameKey] = useState(
-    !credentials.adminKey || credentials.adminKey === credentials.apiKey,
-  );
+  const native = isTauriRuntime();
   const save = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const next = { apiKey: apiKey.trim(), adminKey: useSameKey ? apiKey.trim() : adminKey.trim() };
+    const next = {
+      apiKey: apiKey.trim(),
+      adminKey: native ? credentials.adminKey : adminKey.trim(),
+    };
     saveCredentials(next);
     onCredentials(next);
     onNotice("访问凭证已保存");
@@ -66,14 +68,12 @@ export function SettingsPage({
   const clear = () => {
     setApiKey("");
     setAdminKey("");
-    setUseSameKey(true);
     saveCredentials({ apiKey: "", adminKey: "" });
     onCredentials({ apiKey: "", adminKey: "" });
     onNotice("访问凭证已清除");
   };
   const dirty =
-    apiKey.trim() !== credentials.apiKey ||
-    (useSameKey ? apiKey.trim() : adminKey.trim()) !== credentials.adminKey;
+    apiKey.trim() !== credentials.apiKey || (!native && adminKey.trim() !== credentials.adminKey);
 
   return (
     <Tabs.Root
@@ -110,7 +110,9 @@ export function SettingsPage({
             <CardHeader>
               <CardTitle>访问凭证</CardTitle>
               <p className="text-sm text-muted-foreground">
-                仅在本次会话有效，不会修改网关的服务配置。
+                {native
+                  ? "本机控制台自动管理全部 Key。以下业务 Key 仅用于工作台模型调用，在本次会话有效。"
+                  : "业务 Key 用于模型调用；管理员 Key 用于管理全部 Key 和统计。凭证仅在本次会话有效。"}
               </p>
             </CardHeader>
             <CardContent>
@@ -124,16 +126,7 @@ export function SettingsPage({
                     autoComplete="off"
                   />
                 </Field>
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={useSameKey}
-                    onChange={(event) => setUseSameKey(event.target.checked)}
-                    className="size-4 accent-primary"
-                  />
-                  管理接口使用同一个 Key
-                </label>
-                {!useSameKey && (
+                {!native && (
                   <Field label="管理员 Key" htmlFor="settings-admin-key">
                     <PasswordInput
                       id="settings-admin-key"

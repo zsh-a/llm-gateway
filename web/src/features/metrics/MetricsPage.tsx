@@ -1,5 +1,5 @@
 import { Activity, Database, Gauge, ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { GatewayApi } from "../../api";
 import {
   DistributionList,
@@ -22,20 +22,34 @@ import {
 } from "../../components/ui";
 import { RequestTable } from "../../components/usage";
 import { emptySummary } from "../../lib/constants";
-import { formatCompact, formatDuration, formatNumber } from "../../lib/format";
+import { formatCompact, formatDuration, formatNumber, formatTime } from "../../lib/format";
 import { useMetrics } from "../../lib/gateway-queries";
-import type { DashboardData, MetricsQuery, MetricsWindow } from "../../types";
+import type { DashboardData, MetricsQuery, MetricsWindow, Navigate } from "../../types";
+import { KeyUsageTable } from "./KeyUsageTable";
 
 export function MetricsPage({
   data,
   api,
   enabled = true,
+  initialKeyId,
+  onNavigate,
 }: {
   data: DashboardData;
   api: GatewayApi;
   enabled?: boolean;
+  initialKeyId?: string;
+  onNavigate?: Navigate;
 }) {
-  const [filters, setFilters] = useState<MetricsQuery>({ window: "24h", limit: 50, offset: 0 });
+  const [filters, setFilters] = useState<MetricsQuery>({
+    window: "24h",
+    apiKeyId: initialKeyId,
+    limit: 50,
+    offset: 0,
+  });
+  useEffect(
+    () => setFilters((current) => ({ ...current, apiKeyId: initialKeyId, offset: 0 })),
+    [initialKeyId],
+  );
   const query = useMetrics(api, filters, enabled);
   const metrics = query.data ?? { summary: emptySummary, timeseries: [], recent: [], total: 0 };
   const summary = metrics.summary;
@@ -47,8 +61,14 @@ export function MetricsPage({
     if (!knownModels.has(group.key)) knownModels.set(group.key, { id: group.key });
   const models = [{ id: "", name: "全部模型" }, ...knownModels.values()];
   const hasFilters =
-    filters.window !== "24h" || Boolean(filters.provider || filters.model || filters.status);
+    filters.window !== "24h" ||
+    Boolean(filters.apiKeyId || filters.provider || filters.model || filters.status);
   const reset = () => setFilters({ window: "24h", limit: 50, offset: 0 });
+  const keyNames = new Map(data.keys.map((key) => [key.id, key.name]));
+  for (const entry of summary.keyUsage ?? []) keyNames.set(entry.key.id, entry.key.name);
+  const selectedName = filters.apiKeyId
+    ? (keyNames.get(filters.apiKeyId) ?? filters.apiKeyId)
+    : "全部 Key";
   const offset = filters.offset ?? 0;
   const limit = filters.limit ?? 50;
   const update = (next: Partial<MetricsQuery>) =>
@@ -57,7 +77,47 @@ export function MetricsPage({
 
   return (
     <div className="space-y-5">
-      <div className="grid items-end gap-3 rounded-xl border bg-card p-4 sm:grid-cols-2 xl:grid-cols-[10rem_1fr_1.5fr_9rem_auto]">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-semibold">
+            {api.isAdministrator ? selectedName : "当前 Key 的使用情况"}
+          </h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {api.isAdministrator ? "管理员视图 · 本网关" : "仅显示当前凭证有权访问的请求"}
+            {query.lastUpdated > 0 ? ` · 最后更新 ${formatTime(query.lastUpdated, true)}` : ""}
+          </p>
+        </div>
+        {api.isAdministrator && filters.apiKeyId && (
+          <Button variant="outline" size="sm" onClick={() => update({ apiKeyId: undefined })}>
+            返回全部 Key
+          </Button>
+        )}
+      </div>
+      {query.authError && (
+        <div role="alert" className="rounded-lg border border-warning/30 p-4 text-sm">
+          统计访问凭证无效或尚未配置。
+          <a className="ml-2 text-primary underline" href="#settings?tab=connection">
+            检查连接与凭证
+          </a>
+        </div>
+      )}
+      <div className="grid items-end gap-3 rounded-xl border bg-card p-4 sm:grid-cols-2 xl:grid-cols-3">
+        {api.isAdministrator && (
+          <Field label="API Key" htmlFor="metrics-key">
+            <Select
+              id="metrics-key"
+              value={filters.apiKeyId ?? ""}
+              onChange={(event) => update({ apiKeyId: event.target.value || undefined })}
+            >
+              <option value="">全部 Key</option>
+              {[...keyNames].map(([id, name]) => (
+                <option key={id} value={id}>
+                  {name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        )}
         <Field label="时间范围" htmlFor="metrics-window">
           <Select
             id="metrics-window"
@@ -120,7 +180,7 @@ export function MetricsPage({
               ? "筛选更新失败，当前显示上次结果。"
               : "正在应用筛选，暂时显示上次结果…"
             : query.data
-              ? `共 ${formatNumber(metrics.total)} 条记录`
+              ? `保留 ${formatNumber(metrics.total)} 条请求明细`
               : "请求统计"}
         </span>
         {query.isFetching ? (
@@ -143,6 +203,19 @@ export function MetricsPage({
       </div>
       <ResourceContent state={state} label="统计">
         <div className="space-y-5" aria-busy={query.isFetching}>
+          {summary.history?.legacyIncomplete &&
+            (summary.periodStart ?? 0) < summary.history.completeSince && (
+              <p className="rounded-lg bg-warning/10 p-3 text-sm text-warning">
+                历史统计自 {formatTime(summary.history.completeSince, true)}{" "}
+                起完整记录；更早的数据仅包含升级时保留的请求，无法恢复已清理明细。
+              </p>
+            )}
+          {Number(summary.tokens.requestsWithoutUsage) > 0 && (
+            <p className="text-sm text-warning">
+              {String(summary.tokens.requestsWithoutUsage)} 次请求未返回完整 Token 用量；以下 Token
+              数为已知用量。
+            </p>
+          )}
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <StatCard
               icon={Activity}
@@ -152,14 +225,18 @@ export function MetricsPage({
             />
             <StatCard
               icon={Database}
-              label="总 Token"
-              value={formatCompact(summary.tokens.totalTokens)}
-              detail={`${formatCompact(summary.tokens.inputTokens)} 输入 · ${formatCompact(summary.tokens.outputTokens)} 输出`}
+              label="已知 Token"
+              value={
+                summary.tokens.totalTokens === undefined
+                  ? "—"
+                  : formatCompact(summary.tokens.totalTokens)
+              }
+              detail={`${summary.tokens.inputTokens === undefined ? "未知" : formatCompact(summary.tokens.inputTokens)} 输入 · ${summary.tokens.outputTokens === undefined ? "未知" : formatCompact(summary.tokens.outputTokens)} 输出`}
               tone="cyan"
             />
             <StatCard
               icon={Gauge}
-              label="P50 / P95"
+              label="P50 / P95（约）"
               value={`${formatDuration(summary.latency.p50Ms)} / ${formatDuration(summary.latency.p95Ms)}`}
               detail={`最大 ${formatDuration(summary.latency.maxMs)}`}
               tone="amber"
@@ -174,6 +251,20 @@ export function MetricsPage({
               tone="green"
             />
           </div>
+          {api.isAdministrator && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Key 用量</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <KeyUsageTable
+                  items={summary.keyUsage ?? []}
+                  onSelect={(id) => update({ apiKeyId: id })}
+                  onManage={(id) => onNavigate?.("management", { apiKeyId: id })}
+                />
+              </CardContent>
+            </Card>
+          )}
           {!summary.requests ? (
             <div className="rounded-xl border bg-card p-6">
               <EmptyState
@@ -228,10 +319,13 @@ export function MetricsPage({
               </div>
               <Card>
                 <CardHeader className="flex-row items-center justify-between">
-                  <CardTitle>请求记录</CardTitle>
+                  <CardTitle>最近请求明细</CardTitle>
                   <Badge variant="muted">{limit} 条 / 页</Badge>
                 </CardHeader>
                 <CardContent>
+                  <p className="mb-3 text-xs text-muted-foreground">
+                    明细按保留上限清理；累计用量和趋势来自独立汇总，不随明细清理减少。时间范围按分钟对齐。
+                  </p>
                   <RequestTable rows={metrics.recent} />
                   <div className="mt-4 flex items-center justify-between gap-3 text-xs text-muted-foreground">
                     <span>

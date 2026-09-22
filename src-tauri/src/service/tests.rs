@@ -40,7 +40,8 @@ struct StreamingFixture {
 impl StreamingFixture {
     async fn new() -> Self {
         let runtime = tempfile::tempdir().unwrap();
-        let state = AppState::test_state(runtime.path());
+        let mut state = AppState::test_state(runtime.path());
+        state.config.proxy_admin_key = "test-admin".into();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         state.test_upstream(&format!("http://{}/", listener.local_addr().unwrap()));
         let release = Arc::new(Notify::new());
@@ -98,8 +99,11 @@ impl StreamingFixture {
                 "{}/admin/metrics/summary{filter}",
                 self.service.snapshot().base_url
             ))
+            .bearer_auth("test-admin")
             .send()
             .await
+            .unwrap()
+            .error_for_status()
             .unwrap()
             .json::<Value>()
             .await

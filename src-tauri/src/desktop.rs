@@ -464,3 +464,63 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
         _ => {}
     }
 }
+
+#[tauri::command]
+pub async fn management_request(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    method: String,
+    path: String,
+    body: Option<serde_json::Value>,
+) -> Result<crate::gateway::management::ManagementResponse, String> {
+    let url = window.url().map_err(|error| error.to_string())?;
+    if !is_management_window(window.label(), &url) {
+        return Err("管理操作仅允许本机控制台访问".into());
+    }
+    crate::gateway::management::request(state.inner().clone(), method, path, body).await
+}
+
+fn is_management_window(label: &str, url: &tauri::Url) -> bool {
+    label == "main"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && ((url.scheme() == "tauri"
+            && url.host_str() == Some("localhost")
+            && url.port().is_none())
+            || (matches!(url.scheme(), "http" | "https")
+                && url.host_str() == Some("tauri.localhost")
+                && url.port().is_none())
+            || (cfg!(debug_assertions)
+                && url.scheme() == "http"
+                && matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
+                && url.port() == Some(1420)))
+}
+
+#[cfg(test)]
+mod management_origin_tests {
+    use super::is_management_window;
+    #[test]
+    fn only_the_bundled_main_window_can_manage_the_gateway() {
+        for value in [
+            "tauri://localhost/",
+            "http://tauri.localhost/",
+            "https://tauri.localhost/",
+        ] {
+            let url = tauri::Url::parse(value).unwrap();
+            assert!(is_management_window("main", &url));
+            assert!(!is_management_window("other", &url));
+        }
+        for value in [
+            "https://example.com/",
+            "http://127.0.0.1:3000/",
+            "https://tauri.localhost.example.com/",
+            "http://tauri.localhost:1427/",
+            "tauri://user@localhost/",
+        ] {
+            assert!(!is_management_window(
+                "main",
+                &tauri::Url::parse(value).unwrap()
+            ));
+        }
+    }
+}

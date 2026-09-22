@@ -109,6 +109,7 @@ function RequestDetails({ row }: { row: RecentRequest }) {
       <div className="grid gap-2 md:grid-cols-2">
         <InfoRow label="模型" value={row.model || "—"} />
         <InfoRow label="协议" value={row.protocol || "chat"} />
+        <InfoRow label="API Key" value={row.apiKeyName || row.apiKeyId || "—"} />
         <InfoRow label="Request ID" value={row.id || "—"} />
         <InfoRow label="开始时间" value={formatTime(row.startedAt, true)} />
         <InfoRow label="完成时间" value={formatTime(row.completedAt, true)} />
@@ -160,6 +161,9 @@ export function RequestTable({ rows }: { rows: RecentRequest[] }) {
             <th scope="col" className="px-3 py-2.5 font-medium">
               模型
             </th>
+            <th scope="col" className="hidden px-3 py-2.5 font-medium md:table-cell">
+              API Key
+            </th>
             <th scope="col" className="hidden px-3 py-2.5 font-medium xl:table-cell">
               Provider
             </th>
@@ -208,6 +212,12 @@ export function RequestTable({ rows }: { rows: RecentRequest[] }) {
                   >
                     {row.model || "—"}
                   </td>
+                  <td
+                    className="hidden max-w-36 truncate px-3 py-3 text-muted-foreground md:table-cell"
+                    title={row.apiKeyId}
+                  >
+                    {row.apiKeyName || row.apiKeyId || "—"}
+                  </td>
                   <td className="hidden px-3 py-3 text-muted-foreground xl:table-cell">
                     {row.provider || "—"}
                   </td>
@@ -218,7 +228,9 @@ export function RequestTable({ rows }: { rows: RecentRequest[] }) {
                     {formatDuration(row.durationMs)}
                   </td>
                   <td className="px-3 py-3 font-mono text-muted-foreground">
-                    {formatCompact(usageTotal(row.usage ?? undefined))}
+                    {row.usage?.totalTokens === undefined && row.usage?.inputTokens === undefined
+                      ? "用量未知"
+                      : formatCompact(usageTotal(row.usage ?? undefined))}
                   </td>
                   <td className="px-3 py-3">
                     <StatusBadge
@@ -231,7 +243,7 @@ export function RequestTable({ rows }: { rows: RecentRequest[] }) {
                 </tr>
                 {isExpanded && (
                   <tr>
-                    <td colSpan={8} className="bg-muted/10 px-3 py-3">
+                    <td colSpan={9} className="bg-muted/10 px-3 py-3">
                       <RequestDetails row={row} />
                     </td>
                   </tr>

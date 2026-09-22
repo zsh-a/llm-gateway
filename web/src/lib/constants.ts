@@ -91,6 +91,7 @@ export const navigation: Array<{ key: PageKey; icon: typeof LayoutDashboard }> =
 export interface AppLocation {
   page: PageKey;
   modelId?: string;
+  apiKeyId?: string;
   settingsTab?: string;
 }
 
@@ -100,6 +101,9 @@ export function resolveLocation(hash: string): AppLocation {
   const modelId = new URLSearchParams(query).get("model") || undefined;
   return {
     page,
+    apiKeyId: ["metrics", "management"].includes(page)
+      ? new URLSearchParams(query).get("key") || undefined
+      : undefined,
     modelId: page === "playground" ? modelId : undefined,
     settingsTab:
       page === "settings" ? new URLSearchParams(query).get("tab") || undefined : undefined,

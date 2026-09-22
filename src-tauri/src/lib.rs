@@ -39,6 +39,7 @@ pub fn run() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
+            desktop::management_request,
             desktop::get_service_settings,
             desktop::save_service_settings,
             desktop::get_service_status,

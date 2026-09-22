@@ -90,6 +90,16 @@ pub(super) fn require_public_auth_identity(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<Identity, GatewayError> {
+    let identity = require_public_identity(state, headers)?;
+    state.authorize_limits(&identity)?;
+    Ok(identity)
+}
+
+// Reading one's own usage must remain possible when the inference quota is exhausted.
+pub(super) fn require_public_identity(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Identity, GatewayError> {
     let identity = state.authenticate(headers);
     if identity.is_none()
         || (!state.config.is_loopback()
@@ -104,15 +114,14 @@ pub(super) fn require_public_auth_identity(
         )));
     }
     let identity = identity.expect("checked above");
-    state.authorize_limits(&identity)?;
     Ok(identity)
 }
 
 pub(super) fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), GatewayError> {
-    if !state.config.is_loopback() && state.config.proxy_admin_key.is_empty() {
+    if state.config.proxy_admin_key.is_empty() {
         return Err(Box::new(error_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            "非本地监听必须配置 PROXY_ADMIN_KEY",
+            "HTTP 管理接口需要配置 PROXY_ADMIN_KEY；本机桌面可直接管理",
             "configuration_error",
         )));
     }

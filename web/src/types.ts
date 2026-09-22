@@ -5,6 +5,7 @@ export type ThemePreference = "light" | "dark" | "system";
 
 export interface NavigateOptions {
   modelId?: string;
+  apiKeyId?: string;
   replace?: boolean;
 }
 
@@ -15,6 +16,7 @@ export type MetricsStatus = "all" | "success" | "error" | "canceled";
 
 export interface MetricsQuery {
   window: MetricsWindow;
+  apiKeyId?: string;
   provider?: string;
   model?: string;
   status?: Exclude<MetricsStatus, "all">;
@@ -103,6 +105,10 @@ export interface MetricsSummary {
   byChannel: MetricGroup[];
   byModel: MetricGroup[];
   byApiKey: MetricGroup[];
+  keyUsage?: KeyUsage[];
+  scope?: "admin" | "self";
+  periodStart?: number;
+  history?: { completeSince: number; legacyIncomplete: boolean };
 }
 
 export interface MetricsSnapshot {
@@ -125,6 +131,8 @@ export interface TimeseriesPoint {
 
 export interface RecentRequest {
   id: string;
+  apiKeyId?: string;
+  apiKeyName?: string;
   startedAt: number;
   completedAt?: number;
   durationMs?: number;
@@ -165,6 +173,16 @@ export interface ApiKeyRecord {
   quotaTokens: number | null;
   usedTokens: number;
   remainingTokens: number | null;
+  expiresAt?: number | null;
+  revokedAt?: number | null;
+  lastUsedAt?: number | null;
+  readOnly?: boolean;
+}
+
+export interface KeyUsage {
+  key: ApiKeyRecord;
+  usage: MetricGroup & { lastUsedAt?: number | null; canceled?: number };
+  activeRequests: number;
 }
 
 export type ApiKeyInput = Pick<ApiKeyRecord, "name"> &

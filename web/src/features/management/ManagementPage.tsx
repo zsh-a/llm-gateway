@@ -1,7 +1,7 @@
 import { Tabs } from "@base-ui/react/tabs";
 import { useMutation } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { GatewayApi } from "../../api";
 import { CopyButton, ResourceContent } from "../../components/common";
 import { Button, ConfirmDialog, Sheet } from "../../components/ui";
@@ -27,10 +27,12 @@ type Editor = { kind: "channel"; item?: ChannelConfig } | { kind: "key"; item?: 
 export function ManagementPage({
   data,
   api,
+  initialKeyId,
   onNotice,
   onNavigate,
   serviceAvailable = true,
 }: {
+  initialKeyId?: string;
   data: DashboardData;
   api: GatewayApi;
   onNotice: (message: string, tone?: NoticeTone) => void;
@@ -40,6 +42,16 @@ export function ManagementPage({
   const [tab, setTab] = useState("channels");
   const [editor, setEditor] = useState<Editor | null>(null);
   const [dirty, setDirty] = useState(false);
+  const openedKey = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!initialKeyId || openedKey.current === initialKeyId) return;
+    const key = data.keys.find((item) => item.id === initialKeyId);
+    if (!key) return;
+    openedKey.current = initialKeyId;
+    setTab("keys");
+    if (!key.revokedAt) setEditor({ kind: "key", item: key });
+  }, [initialKeyId, data.keys]);
+
   const [discard, setDiscard] = useState(false);
   const [secret, setSecret] = useState("");
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
@@ -63,13 +75,13 @@ export function ManagementPage({
       }
       return (await api.createKey(input as ApiKeyInput)).secret;
     },
-    onSuccess: () => invalidate("keys"),
+    onSuccess: () => invalidate("keys", "models", "metrics"),
   });
   const removeMutation = useMutation({
     mutationFn: (target: Confirmation) =>
       target.kind === "channel" ? api.deleteChannel(target.item.id) : api.revokeKey(target.item.id),
     onSuccess: (_, target) =>
-      target.kind === "channel" ? invalidate("channels", "models") : invalidate("keys"),
+      target.kind === "channel" ? invalidate("channels", "models") : invalidate("keys", "metrics"),
   });
   const busy = channelMutation.isPending || keyMutation.isPending || removeMutation.isPending;
   const providers = Array.from(
@@ -160,6 +172,7 @@ export function ManagementPage({
         <Tabs.Panel value="keys">
           <ResourceContent state={data.resources.keys} label="API Keys">
             <ApiKeyList
+              onUsage={(id) => onNavigate("metrics", { apiKeyId: id })}
               items={data.keys}
               disabled={!serviceAvailable || busy || Boolean(data.resources.keys.error)}
               onEdit={(item) => {

@@ -11,6 +11,7 @@ use tracing::warn;
 mod activity;
 mod auth;
 mod http;
+pub(crate) mod management;
 mod metrics;
 mod model_catalog;
 #[cfg(test)]
@@ -338,7 +339,10 @@ impl AppState {
         }
         let hash = hash_secret(&credential);
         let key = self.db.find_api_key_by_hash(&hash).ok().flatten()?;
-        if !key.enabled || key.expires_at.is_some_and(|expires| expires <= now_ms()) {
+        if !key.enabled
+            || key.revoked_at.is_some()
+            || key.expires_at.is_some_and(|expires| expires <= now_ms())
+        {
             return None;
         }
         Some(Identity {
@@ -354,12 +358,8 @@ impl AppState {
     }
 
     fn admin_authorized(&self, headers: &HeaderMap) -> bool {
-        let admin_key = if !self.config.proxy_admin_key.is_empty() {
-            &self.config.proxy_admin_key
-        } else {
-            &self.config.proxy_api_key
-        };
-        admin_key.is_empty() || secret_equal(&request_credential(headers), admin_key)
+        !self.config.proxy_admin_key.is_empty()
+            && secret_equal(&request_credential(headers), &self.config.proxy_admin_key)
     }
 
     fn authorize_model(&self, identity: &Identity, model: &str) -> Result<(), GatewayError> {
@@ -698,18 +698,6 @@ impl MetricContext {
         drop(guard);
         if let Err(error) = self.state.db.insert_metric(&record) {
             warn!(%error, "写入 SQLite 指标失败");
-        }
-        if let Some(usage) = usage {
-            let tokens = usage
-                .get("total_tokens")
-                .or_else(|| usage.get("totalTokens"))
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-            if tokens > 0 {
-                if let Some(key_id) = record.api_key_id.as_deref() {
-                    let _ = self.state.db.add_usage(key_id, tokens);
-                }
-            }
         }
         let _ = self
             .state

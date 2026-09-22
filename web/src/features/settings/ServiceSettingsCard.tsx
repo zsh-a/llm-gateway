@@ -11,13 +11,18 @@ import {
   CardTitle,
   Input,
   Spinner,
+  Textarea,
 } from "../../components/ui";
 import { isTauriRuntime } from "../../remote-sync";
 import { getServiceSettings, saveServiceSettings } from "../../service-settings";
 import type { NoticeTone } from "../../types";
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "服务配置保存失败";
+  return error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : "服务配置保存失败";
 }
 
 export function ServiceSettingsCard({
@@ -28,6 +33,7 @@ export function ServiceSettingsCard({
   const available = isTauriRuntime();
   const [host, setHost] = useState("127.0.0.1");
   const [port, setPort] = useState("3000");
+  const [corsOrigin, setCorsOrigin] = useState("");
   const [loading, setLoading] = useState(available);
   const [saving, setSaving] = useState(false);
 
@@ -39,6 +45,7 @@ export function ServiceSettingsCard({
         if (!active) return;
         setHost(settings.host);
         setPort(String(settings.port));
+        setCorsOrigin(settings.corsOrigin ?? "");
       })
       .catch((error: unknown) => {
         if (active) onNotice(errorMessage(error), "error");
@@ -64,7 +71,11 @@ export function ServiceSettingsCard({
     }
     setSaving(true);
     try {
-      await saveServiceSettings({ host: normalizedHost, port: normalizedPort });
+      await saveServiceSettings({
+        host: normalizedHost,
+        port: normalizedPort,
+        corsOrigin: corsOrigin.trim(),
+      });
       onNotice("服务配置已保存，应用即将重启");
     } catch (error) {
       onNotice(errorMessage(error), "error");
@@ -80,7 +91,7 @@ export function ServiceSettingsCard({
         </CardHeader>
         <CardContent>
           <p className="text-sm leading-6 text-muted-foreground">
-            请在桌面应用中修改本机服务的监听地址和端口。
+            请在桌面应用中修改本机服务的监听地址、端口和允许跨域访问的网站来源。
           </p>
         </CardContent>
       </Card>
@@ -93,7 +104,7 @@ export function ServiceSettingsCard({
           <Globe2 className="size-4 text-warning" />
           <CardTitle>服务监听</CardTitle>
         </div>
-        <CardDescription>配置网关监听地址和端口，保存后应用会自动重启。</CardDescription>
+        <CardDescription>配置监听地址、端口和网页跨域访问，保存后应用会自动重启。</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-[1fr_10rem]">
@@ -122,6 +133,25 @@ export function ServiceSettingsCard({
             />
           </Field>
         </div>
+        <Field label="允许跨域来源（CORS）" htmlFor="service-cors-origin">
+          <Textarea
+            id="service-cors-origin"
+            value={corsOrigin}
+            onChange={(event) => setCorsOrigin(event.target.value)}
+            placeholder={"https://chat.example.com\nhttp://localhost:5173"}
+            rows={3}
+            spellCheck={false}
+            autoComplete="off"
+            aria-describedby="service-cors-help"
+            disabled={loading || saving}
+          />
+          <p id="service-cors-help" className="text-xs leading-5 text-muted-foreground">
+            填写调用网关的网页来源（协议、域名和端口），多个来源用换行或逗号分隔；留空仅允许桌面端，填写
+            * 允许所有网站。桌面端始终可访问。 网关使用默认 Host 时，网页中填写 http://127.0.0.1:
+            {port || "3000"}/v1 作为 API 地址，并填写已创建的 Gateway
+            Key。如浏览器提示访问本地网络，请允许该网站访问。
+          </p>
+        </Field>
         <Button onClick={() => void save()} disabled={loading || saving}>
           {saving ? <Spinner className="size-3.5" /> : <Save className="size-3.5" />}
           保存并重启
@@ -129,7 +159,7 @@ export function ServiceSettingsCard({
       </CardContent>
       <CardFooter className="border-t border-border/60 pt-4 text-[11px] leading-4 text-muted-foreground">
         <RotateCw className="mr-1.5 size-3.5 shrink-0" />
-        环境变量 BIND_HOST 和 PORT 优先级高于桌面端保存的配置。
+        环境变量 BIND_HOST、PORT 和 CORS_ORIGIN 优先级高于桌面端保存的配置。
       </CardFooter>
     </Card>
   );

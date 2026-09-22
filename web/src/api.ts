@@ -1,4 +1,6 @@
+import { invoke } from "@tauri-apps/api/core";
 import { EventSourceParserStream } from "eventsource-parser/stream";
+import { isTauriRuntime } from "./remote-sync";
 import type {
   ApiKeyInput,
   ApiKeyRecord,
@@ -64,15 +66,38 @@ export class GatewayApi {
     return `${this.baseUrl}${path}`;
   }
 
+  get isAdministrator(): boolean {
+    return isTauriRuntime() || Boolean(this.credentials.adminKey);
+  }
+
   private metricsPrefix(): "/metrics" | "/admin/metrics" {
-    return this.credentials.adminKey ? "/admin/metrics" : "/metrics";
+    return this.isAdministrator ? "/admin/metrics" : "/metrics";
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    if (isTauriRuntime() && path.startsWith("/admin/")) {
+      init.signal?.throwIfAborted();
+      let result: { status: number; body: Record<string, unknown> };
+      try {
+        result = await invoke("management_request", {
+          method: init.method ?? "GET",
+          path,
+          body: typeof init.body === "string" ? JSON.parse(init.body) : null,
+        });
+      } catch (error) {
+        throw new Error(error instanceof Error ? error.message : String(error));
+      }
+      init.signal?.throwIfAborted();
+      if (result.status >= 400) {
+        const error = result.body.error as { message?: string } | undefined;
+        throw new ApiError(error?.message ?? "管理请求失败", result.status);
+      }
+      return result.body as T;
+    }
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
     if (path.startsWith("/admin/")) {
-      const adminCredential = this.credentials.adminKey || this.credentials.apiKey;
+      const adminCredential = this.credentials.adminKey;
       if (adminCredential) headers.set("Authorization", `Bearer ${adminCredential}`);
     } else if (this.credentials.apiKey) {
       headers.set("Authorization", `Bearer ${this.credentials.apiKey}`);
@@ -106,7 +131,12 @@ export class GatewayApi {
   }
 
   async models(signal?: AbortSignal): Promise<GatewayModel[]> {
-    return (await this.request<{ data: GatewayModel[] }>("/v1/models", { signal })).data;
+    return (
+      await this.request<{ data: GatewayModel[] }>(
+        this.isAdministrator ? "/admin/models" : "/v1/models",
+        { signal },
+      )
+    ).data;
   }
 
   async channels(signal?: AbortSignal): Promise<ChannelConfig[]> {
@@ -119,6 +149,7 @@ export class GatewayApi {
 
   private metricParams(query: MetricsQuery): URLSearchParams {
     const params = new URLSearchParams({ window: query.window });
+    if (query.apiKeyId) params.set("apiKeyId", query.apiKeyId);
     if (query.provider) params.set("provider", query.provider);
     if (query.model) params.set("model", query.model);
     if (query.status) params.set("status", query.status);

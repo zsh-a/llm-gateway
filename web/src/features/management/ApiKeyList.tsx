@@ -1,8 +1,10 @@
 import { KeyRound } from "lucide-react";
 import { EmptyState } from "../../components/common";
 import { ResourceActions } from "../../components/ResourceActions";
+import { Badge, Button } from "../../components/ui";
 import { formatCompact } from "../../lib/format";
 import type { ApiKeyRecord } from "../../types";
+import { keyStatus } from "../metrics/KeyUsageTable";
 
 export function ApiKeyList({
   items,
@@ -10,7 +12,9 @@ export function ApiKeyList({
   onEdit,
   onToggle,
   onRevoke,
+  onUsage,
 }: {
+  onUsage?: (id: string) => void;
   items: ApiKeyRecord[];
   disabled: boolean;
   onEdit: (item: ApiKeyRecord) => void;
@@ -51,15 +55,21 @@ export function ApiKeyList({
               )}
             </div>
           </div>
-          <ResourceActions
-            name={item.name}
-            enabled={item.enabled}
-            disabled={disabled}
-            onEdit={() => onEdit(item)}
-            onToggle={() => onToggle(item)}
-            onRemove={() => onRevoke(item)}
-            removeLabel="撤销 Key"
-          />
+          <Button variant="ghost" size="sm" onClick={() => onUsage?.(item.id)}>
+            查看用量
+          </Button>
+          <Badge variant="muted">{keyStatus(item)}</Badge>
+          {!item.revokedAt && (
+            <ResourceActions
+              name={item.name}
+              enabled={item.enabled}
+              disabled={disabled}
+              onEdit={() => onEdit(item)}
+              onToggle={() => onToggle(item)}
+              onRemove={() => onRevoke(item)}
+              removeLabel="撤销 Key"
+            />
+          )}
         </div>
       ))}
     </div>

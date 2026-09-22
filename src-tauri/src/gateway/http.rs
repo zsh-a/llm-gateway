@@ -1,21 +1,22 @@
+use super::management::AdminAccess;
 // HTTP routing and request handlers for the gateway.
 use super::AppState;
 use super::auth::{
-    GatewayError, database_error, error_response, hash_secret, now_ms, require_admin,
-    require_public_auth, require_public_auth_identity, string_array,
+    GatewayError, database_error, error_response, hash_secret, now_ms, require_public_auth,
+    require_public_auth_identity, string_array,
 };
 use super::metrics::{MetricQuery, MetricView, metrics_response};
 use super::protocols::{
     StreamAccumulator, build_upstream_body, chat_to_response, parse_upstream_response,
     responses_to_chat,
 };
-use crate::config::Config;
+use crate::config::{Config, parse_cors_origins};
 use crate::db::{ApiKeyRecord, ChannelRecord, Db};
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::header::{self, HeaderValue};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
@@ -26,15 +27,15 @@ use std::convert::Infallible;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::time::timeout;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
-use tracing::{debug, info};
+use tower_http::cors::{AllowHeaders, AllowOrigin, AllowPrivateNetwork, Any, CorsLayer};
+use tracing::{debug, info, warn};
 
 const MAX_UPSTREAM_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests;
 
-fn router(state: AppState) -> Router {
+pub(super) fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(health))
         .route("/health", get(health))
@@ -51,6 +52,7 @@ fn router(state: AppState) -> Router {
         .route("/admin/metrics/summary", get(admin_metrics_summary))
         .route("/admin/metrics/timeseries", get(admin_metrics_timeseries))
         .route("/admin/metrics/requests", get(admin_metrics_requests))
+        .route("/admin/models", get(admin_models))
         .route("/admin/channels", get(list_channels).post(save_channel))
         .route("/admin/channels/{id}", delete(delete_channel))
         .route("/admin/keys", get(list_keys).post(create_key))
@@ -61,30 +63,45 @@ fn router(state: AppState) -> Router {
 }
 
 fn cors_layer(config: &Config) -> CorsLayer {
-    let base = CorsLayer::new().allow_methods(Any).allow_headers(Any);
-    if config.cors_origin.trim().is_empty() {
-        let defaults = [
-            "http://127.0.0.1:1420",
-            "http://localhost:1420",
-            "tauri://localhost",
-            "http://tauri.localhost",
-            "https://tauri.localhost",
-        ]
-        .into_iter()
-        .filter_map(|origin| HeaderValue::from_str(origin).ok())
-        .collect::<Vec<_>>();
-        return base.allow_origin(AllowOrigin::list(defaults));
+    let base = CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::HEAD,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        // Authorization must be explicitly named in the preflight response;
+        // Access-Control-Allow-Headers: * does not cover it in browsers.
+        .allow_headers(AllowHeaders::mirror_request());
+    let configured = parse_cors_origins(&config.cors_origin).unwrap_or_else(|error| {
+        warn!(%error, "CORS 配置无效，仅允许桌面端来源");
+        Vec::new()
+    });
+    if configured.iter().any(|origin| origin == "*") {
+        return base.allow_origin(Any).allow_private_network(true);
     }
-    let origins = config
-        .cors_origin
-        .split(',')
-        .filter_map(|origin| HeaderValue::from_str(origin.trim()).ok())
-        .collect::<Vec<_>>();
-    if origins.is_empty() {
-        base.allow_origin(Any)
-    } else {
-        base.allow_origin(AllowOrigin::list(origins))
-    }
+    let mut origins = [
+        "http://127.0.0.1:1420",
+        "http://localhost:1420",
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+    ]
+    .into_iter()
+    .map(HeaderValue::from_static)
+    .collect::<Vec<_>>();
+    origins.extend(
+        configured
+            .iter()
+            .filter_map(|origin| HeaderValue::from_str(origin).ok()),
+    );
+    let private_origins = origins.clone();
+    base.allow_origin(AllowOrigin::list(origins))
+        .allow_private_network(AllowPrivateNetwork::predicate(move |origin, _| {
+            private_origins.contains(origin)
+        }))
 }
 
 pub(crate) async fn serve(state: AppState) -> anyhow::Result<()> {
@@ -484,10 +501,7 @@ async fn read_upstream_body(response: reqwest::Response) -> Result<Vec<u8>, &'st
     Ok(body)
 }
 
-async fn list_channels(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_admin(&state, &headers) {
-        return *response;
-    }
+async fn list_channels(State(state): State<AppState>, _admin: AdminAccess) -> Response {
     match state.db.list_channels() {
         Ok(data) => Json(json!({ "object": "llm-gateway.channels", "data": data })).into_response(),
         Err(error) => database_error(error),
@@ -496,12 +510,9 @@ async fn list_channels(State(state): State<AppState>, headers: HeaderMap) -> Res
 
 async fn save_channel(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    _admin: AdminAccess,
     Json(value): Json<Value>,
 ) -> Response {
-    if let Err(response) = require_admin(&state, &headers) {
-        return *response;
-    }
     let Some(object) = value.as_object() else {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -566,12 +577,9 @@ async fn save_channel(
 
 async fn delete_channel(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    _admin: AdminAccess,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(response) = require_admin(&state, &headers) {
-        return *response;
-    }
     match state.db.delete_channel(&id) {
         Ok(true) => {
             Json(json!({ "object": "llm-gateway.channel.deleted", "id": id })).into_response()
@@ -581,10 +589,7 @@ async fn delete_channel(
     }
 }
 
-async fn list_keys(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_admin(&state, &headers) {
-        return *response;
-    }
+async fn list_keys(State(state): State<AppState>, _admin: AdminAccess) -> Response {
     match state.db.list_api_keys() {
         Ok(keys) => Json(json!({ "object": "llm-gateway.api_keys", "data": keys.into_iter().map(public_key).collect::<Vec<_>>() })).into_response(),
         Err(error) => database_error(error),
@@ -593,12 +598,9 @@ async fn list_keys(State(state): State<AppState>, headers: HeaderMap) -> Respons
 
 async fn create_key(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    _admin: AdminAccess,
     Json(value): Json<Value>,
 ) -> Response {
-    if let Err(response) = require_admin(&state, &headers) {
-        return *response;
-    }
     let object = value.as_object().cloned().unwrap_or_default();
     let name = object
         .get("name")
@@ -622,6 +624,8 @@ async fn create_key(
         tpm_limit: object.get("tpmLimit").and_then(Value::as_i64),
         quota_tokens: object.get("quotaTokens").and_then(Value::as_i64),
         used_tokens: 0,
+        revoked_at: None,
+        last_used_at: None,
     };
     match state.db.upsert_api_key(&key) {
         Ok(()) => Json(json!({
@@ -637,13 +641,10 @@ async fn create_key(
 
 async fn update_key(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    _admin: AdminAccess,
     Path(id): Path<String>,
     Json(value): Json<Value>,
 ) -> Response {
-    if let Err(response) = require_admin(&state, &headers) {
-        return *response;
-    }
     let Some(mut key) = state
         .db
         .list_api_keys()
@@ -656,6 +657,16 @@ async fn update_key(
             "invalid_request_error",
         );
     };
+    if key.revoked_at.is_some() {
+        return error_response(
+            StatusCode::CONFLICT,
+            "已撤销的 Key 不可恢复或修改",
+            "invalid_request_error",
+        );
+    }
+    if value.get("expiresAt").is_some() {
+        key.expires_at = value.get("expiresAt").and_then(Value::as_i64);
+    }
     if let Some(name) = value.get("name").and_then(Value::as_str) {
         key.name = name.into();
     }
@@ -683,12 +694,9 @@ async fn update_key(
 
 async fn revoke_key(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    _admin: AdminAccess,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(response) = require_admin(&state, &headers) {
-        return *response;
-    }
     match state.db.delete_api_key(&id) {
         Ok(true) => {
             Json(json!({ "object": "llm-gateway.api_key.revoked", "id": id })).into_response()
@@ -726,6 +734,7 @@ async fn metrics_requests(
 async fn admin_metrics_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
+    _admin: AdminAccess,
     Query(query): Query<MetricQuery>,
 ) -> Response {
     metrics_response(&state, &headers, &query, true, MetricView::Summary).await
@@ -733,6 +742,7 @@ async fn admin_metrics_summary(
 async fn admin_metrics_timeseries(
     State(state): State<AppState>,
     headers: HeaderMap,
+    _admin: AdminAccess,
     Query(query): Query<MetricQuery>,
 ) -> Response {
     metrics_response(&state, &headers, &query, true, MetricView::Timeseries).await
@@ -740,11 +750,16 @@ async fn admin_metrics_timeseries(
 async fn admin_metrics_requests(
     State(state): State<AppState>,
     headers: HeaderMap,
+    _admin: AdminAccess,
     Query(query): Query<MetricQuery>,
 ) -> Response {
     metrics_response(&state, &headers, &query, true, MetricView::Requests).await
 }
 
-fn public_key(key: ApiKeyRecord) -> Value {
-    json!({ "id": key.id, "name": key.name, "prefix": key.prefix, "enabled": key.enabled, "createdAt": key.created_at, "expiresAt": key.expires_at, "allowedModels": key.allowed_models, "rpmLimit": key.rpm_limit, "tpmLimit": key.tpm_limit, "quotaTokens": key.quota_tokens, "usedTokens": key.used_tokens, "remainingTokens": key.quota_tokens.map(|quota| (quota-key.used_tokens).max(0)) })
+pub(super) fn public_key(key: ApiKeyRecord) -> Value {
+    json!({ "id": key.id, "name": key.name, "prefix": key.prefix, "enabled": key.enabled, "createdAt": key.created_at, "expiresAt": key.expires_at, "allowedModels": key.allowed_models, "rpmLimit": key.rpm_limit, "tpmLimit": key.tpm_limit, "quotaTokens": key.quota_tokens, "usedTokens": key.used_tokens, "revokedAt": key.revoked_at, "lastUsedAt": key.last_used_at, "remainingTokens": key.quota_tokens.map(|quota| (quota-key.used_tokens).max(0)) })
+}
+
+async fn admin_models(State(state): State<AppState>, _admin: AdminAccess) -> Response {
+    Json(json!({"object":"list","data":state.models().await})).into_response()
 }

@@ -10,6 +10,8 @@ pub(crate) const DEFAULT_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 pub struct ServiceSettings {
     pub host: String,
     pub port: u16,
+    #[serde(default)]
+    pub cors_origin: String,
 }
 
 impl ServiceSettings {
@@ -36,6 +38,7 @@ impl ServiceSettings {
             "服务 Host 格式无效"
         );
         anyhow::ensure!(self.port > 0, "服务 Port 必须在 1-65535 范围内");
+        parse_cors_origins(&self.cors_origin)?;
         Ok(())
     }
 
@@ -43,13 +46,113 @@ impl ServiceSettings {
         Self {
             host: self.host.trim().to_string(),
             port: self.port,
+            cors_origin: parse_cors_origins(&self.cors_origin)
+                .map(|origins| origins.join(","))
+                .unwrap_or_else(|_| self.cors_origin.trim().to_owned()),
         }
     }
+}
+
+/// Empty means desktop origins only; a lone `*` explicitly allows any origin.
+pub(crate) fn parse_cors_origins(value: &str) -> anyhow::Result<Vec<String>> {
+    let mut origins = Vec::new();
+    for value in value
+        .split([',', '\n', '\r'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if value == "*" {
+            origins.push(value.to_owned());
+            continue;
+        }
+        let invalid = || {
+            anyhow::anyhow!(
+                "CORS 来源格式无效：请填写 http:// 或 https:// 开头的网站来源，不含路径、查询参数或账号"
+            )
+        };
+        let url = reqwest::Url::parse(value).map_err(|_| invalid())?;
+        if !matches!(url.scheme(), "http" | "https")
+            || !value
+                .to_ascii_lowercase()
+                .starts_with(&format!("{}://", url.scheme()))
+            || value.chars().any(char::is_whitespace)
+            || value.contains(['*', '\\'])
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(invalid());
+        }
+        let origin = url.origin().ascii_serialization();
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    anyhow::ensure!(
+        !origins.iter().any(|origin| origin == "*") || origins.len() == 1,
+        "CORS 的 * 必须单独填写，不能与其他来源混用"
+    );
+    Ok(origins)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cors_sources_are_normalized_and_invalid_origins_are_rejected() {
+        assert!(parse_cors_origins(" \n,").unwrap().is_empty());
+        assert_eq!(parse_cors_origins(" * ").unwrap(), ["*"]);
+        assert_eq!(
+            parse_cors_origins(
+                "https://CHAT.example.com:443/\nhttp://localhost:5173,https://chat.example.com"
+            )
+            .unwrap(),
+            ["https://chat.example.com", "http://localhost:5173"]
+        );
+        for invalid in [
+            "*,https://chat.example.com",
+            "https://*.example.com",
+            "null",
+            "chat.example.com",
+            "https:chat.example.com",
+            "ftp://chat.example.com",
+            "https://chat.example.com/chat",
+            "https://chat.example.com?key=secret",
+            "https://chat.example.com#fragment",
+            "https://user:secret@chat.example.com",
+            "https://chat.exam\tple.com",
+        ] {
+            assert!(parse_cors_origins(invalid).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn cors_settings_persist_and_older_service_files_still_load() {
+        let runtime = tempfile::tempdir().unwrap();
+        let config = crate::gateway::AppState::test_state(runtime.path()).config;
+        let path = runtime.path().join(SERVICE_SETTINGS_FILE);
+        std::fs::write(&path, r#"{"host":"127.0.0.1","port":3000}"#).unwrap();
+        let mut settings = load_service_settings(runtime.path()).unwrap();
+        assert!(settings.cors_origin.is_empty());
+        settings.cors_origin = "https://chat.example.com/\nhttp://localhost:5173".into();
+        config.save_service_settings(&settings).unwrap();
+        let saved = load_service_settings(runtime.path()).unwrap();
+        assert_eq!(
+            saved.cors_origin,
+            "https://chat.example.com,http://localhost:5173"
+        );
+        assert_eq!(saved.host, "127.0.0.1");
+        settings.cors_origin = "invalid".into();
+        assert!(config.save_service_settings(&settings).is_err());
+        assert_eq!(
+            load_service_settings(runtime.path()).unwrap().cors_origin,
+            saved.cors_origin
+        );
+    }
 
     #[test]
     fn client_addresses_are_not_wildcard_bind_addresses() {
@@ -65,7 +168,8 @@ mod tests {
             assert_eq!(
                 ServiceSettings {
                     host: host.into(),
-                    port: 3000
+                    port: 3000,
+                    cors_origin: String::new(),
                 }
                 .base_url(),
                 expected
@@ -165,6 +269,14 @@ impl Config {
         let port = env_port("PORT")
             .or_else(|| persisted_service.as_ref().map(|value| value.port))
             .unwrap_or(3000);
+        let cors_origin = env::var("CORS_ORIGIN")
+            .ok()
+            .or_else(|| {
+                persisted_service
+                    .as_ref()
+                    .map(|value| value.cors_origin.clone())
+            })
+            .unwrap_or_default();
 
         Self {
             bind_host,
@@ -173,7 +285,7 @@ impl Config {
             max_body_bytes: env_u64("MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES as u64) as usize,
             proxy_api_key: env::var("PROXY_API_KEY").unwrap_or_default(),
             proxy_admin_key: env::var("PROXY_ADMIN_KEY").unwrap_or_default(),
-            cors_origin: env::var("CORS_ORIGIN").unwrap_or_default(),
+            cors_origin,
             runtime_dir: runtime_dir.clone(),
             auth_cache_dir,
             channels_file: env::var("CHANNELS_FILE")
@@ -228,6 +340,7 @@ impl Config {
         ServiceSettings {
             host: self.bind_host.clone(),
             port: self.port,
+            cors_origin: self.cors_origin.clone(),
         }
     }
 

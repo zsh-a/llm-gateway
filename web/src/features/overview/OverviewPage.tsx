@@ -40,6 +40,15 @@ export function OverviewPage({
         </div>
       </div>
       <ResourceContent state={data.resources.metrics} label="统计">
+        <p className="mb-3 text-xs text-muted-foreground">
+          统计范围：{summary.scope === "admin" ? "全部 Key · 本网关" : "当前 Key"}
+        </p>
+        {summary.history?.legacyIncomplete &&
+          (summary.periodStart ?? 0) < summary.history.completeSince && (
+            <p className="mb-3 text-xs text-warning">
+              升级前部分请求明细可能已清理；历史数据不完整。
+            </p>
+          )}
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <StatCard
             icon={Activity}
@@ -60,14 +69,22 @@ export function OverviewPage({
             icon={Gauge}
             label="平均延迟"
             value={formatDuration(summary.latency.averageMs)}
-            detail={`P95 ${formatDuration(summary.latency.p95Ms)}`}
+            detail={`P95 约 ${formatDuration(summary.latency.p95Ms)}`}
             tone="cyan"
           />
           <StatCard
             icon={Database}
-            label="Token 用量"
-            value={formatCompact(summary.tokens.totalTokens)}
-            detail={`${formatCompact(summary.tokens.cachedTokens)} 缓存 · ${formatCompact(summary.tokens.reasoningTokens)} 思考`}
+            label="已知 Token 用量"
+            value={
+              summary.tokens.totalTokens === undefined
+                ? "—"
+                : formatCompact(summary.tokens.totalTokens)
+            }
+            detail={
+              Number(summary.tokens.requestsWithoutUsage) > 0
+                ? `${String(summary.tokens.requestsWithoutUsage)} 次请求用量未知`
+                : "按上游返回用量累计"
+            }
             tone="amber"
           />
         </div>

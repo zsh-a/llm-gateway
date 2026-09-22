@@ -105,6 +105,16 @@ Headless 服务默认监听 `127.0.0.1:3000`。如果需要远程访问，请设
 `BIND_HOST=0.0.0.0` 并同时配置 `PROXY_API_KEY` 与 `PROXY_ADMIN_KEY`。
 收到 SIGINT、SIGTERM 或 Windows Ctrl-C 后，服务会停止接收新连接并优雅退出。
 
+## Key 管理与用量统计
+
+- 桌面控制台通过仅限主窗口的 Tauri 原生命令管理本机网关，不需要填写业务 Key 就能查看所有 Key、模型目录和统计。创建或撤销业务 Key 不会影响管理页面。工作台调用模型仍使用「设置 → 连接与凭证」中的 Gateway Key，调用用量归属于该 Key。
+- HTTP 管理接口 `/admin/*` 必须使用独立的 `PROXY_ADMIN_KEY`，包括本机回环访问；不再默认匿名开放，也不再复用 `PROXY_API_KEY`。浏览器控制台的「管理员 Key」填写该凭证。「Gateway Key」用于模型调用及 `/metrics/*` 自己的统计。
+- 「统计分析」默认显示管理员有权访问的全部 Key，可按 Key、时间、Provider、模型和请求状态筛选；Key 用量表支持名称搜索、状态过滤和用量排序。点击 Key 查看趋势和请求明细，点击「管理」调整权限与限额。客户端凭证只能访问自己的统计，不能通过 `apiKeyId` 查询其他 Key。
+- 请求明细显示 `apiKeyId` / `apiKeyName`；`/admin/metrics/summary` 提供 `keyUsage`、`scope`、`periodStart` 和 `history`。三类统计接口均支持 `apiKeyId` 筛选。撤销 Key 保留名称、累计用量和历史归属，且不可重新启用；需要继续调用时请创建新 Key。
+- 用量按分钟汇总，趋势默认按小时展示；时间窗口起点按分钟对齐。汇总和累计配额不受 `METRICS_MAX_RECORDS` 明细保留上限影响。P50/P95 来自延迟直方图，为近似值；平均值和最大值为实际记录值。上游未返回的 Token 用量标记为未知，不按零消耗显示。
+- 升级会在事务内迁移现有数据库、补算尚存明细，不重复累计 Key 配额。升级前已清理的明细无法恢复，控制台会注明历史数据的完整起点。明细、汇总和配额在同一事务内更新，并按请求 ID 去重。
+- 每台网关独立统计。远端认证同步只同步 Provider 登录凭证，不同步 API Keys、SQLite 数据库或使用情况。
+
 ## GitHub Actions 发布
 
 [`.github/workflows/desktop.yml`](./.github/workflows/desktop.yml) 会在 Pull Request、`main`
@@ -227,13 +237,37 @@ MODEL_DISCOVERY_TIMEOUT_MS=30000
 METRICS_MAX_RECORDS=2000
 # WORKBUDDY_MODEL_FILE=/path/to/workbuddy-models.json
 # DEFAULT_MODEL=provider/model-id
-# CORS_ORIGIN=http://localhost:1420
+# CORS_ORIGIN=https://chat.example.com,http://localhost:5173
 ```
 
-桌面应用可以在“设置 → 服务监听”中配置 Host 和 Port，保存后自动重启并写入
-`RUNTIME_DIR/service.json`。环境变量 `BIND_HOST` 和 `PORT` 优先级更高，适合 headless、容器和
+桌面应用可以在“设置 → 服务监听”中配置 Host、Port 和允许跨域来源（CORS），保存后自动重启并写入
+`RUNTIME_DIR/service.json`。环境变量 `BIND_HOST`、`PORT` 和 `CORS_ORIGIN` 优先级更高，适合 headless、容器和
 systemd/launchd 服务。debug 模式默认使用项目下的 `.runtime`；release 应用默认使用系统用户数据目录。
 macOS 路径为 `~/Library/Application Support/LLM Gateway`。设置 `RUNTIME_DIR` 可以固定到其他目录。
+
+### 从其他网站的网页调用网关
+
+1. 在桌面“设置 → 服务监听 → 允许跨域来源（CORS）”填写网页的来源，例如 `https://chat.example.com`。
+   只填写协议、域名和端口，不含页面路径；多个来源用逗号或换行分隔。填 `*` 允许所有网站，留空仅允许桌面端来源。
+   自定义来源不会影响桌面端访问。保存后应用会自动重启；headless 可设置 `CORS_ORIGIN`，无效值会记录警告并仅允许桌面端来源。
+2. 为该网页创建一个 Gateway Key。在网页的 OpenAI 兼容接口设置中填写 Base URL `http://127.0.0.1:3000/v1`
+   （按实际端口调整）以及该 Key。浏览器和网关在同一台机器上时，Host 保持 `127.0.0.1` 即可。
+3. 若浏览器提示访问本地网络，请允许该网站访问。该权限由浏览器控制，参见 [Chrome 本地网络访问说明](https://developer.chrome.com/blog/local-network-access)。
+
+模型查询、Chat Completions、Responses 和 SSE 流式输出均支持跨域；OPTIONS 预检无需 Key，实际请求仍进行原有 Key 校验。
+可使用 `Authorization: Bearer <Gateway Key>` 或 `x-api-key`，不使用 Cookie 认证。例如：
+
+```js
+const response = await fetch("http://127.0.0.1:3000/v1/models", {
+  headers: { Authorization: "Bearer YOUR_GATEWAY_KEY" },
+  credentials: "omit",
+});
+if (!response.ok) throw new Error(await response.text());
+const models = await response.json();
+```
+
+网页需要支持浏览器直接请求；如果请求实际由网站服务器转发，`127.0.0.1` 指向的是网站服务器。
+网站自身的 CSP 也必须允许连接网关地址。跨域配置不会授予管理权限，业务 Key 仍只能查看自己的用量。
 
 HTTP 请求体默认上限为 8 MiB（8,388,608 字节），由 `MAX_BODY_BYTES` 控制；它按整个 JSON 的
 字节数计算，与模型的 token 上下文限制无关，历史 `reasoning_content` 和 tool 输出也会占用。
