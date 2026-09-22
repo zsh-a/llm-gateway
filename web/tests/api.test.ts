@@ -92,4 +92,15 @@ describe("gateway data and streaming", () => {
       "upstream unavailable",
     );
   });
+  it("keeps partial output and reports a timed out stream as 504 without a success update", async () => {
+    mockStream(
+      'data: {"choices":[{"delta":{"content":"partial"}}]}\n\nevent: error\ndata: {"error":{"message":"等待后续数据超时","status":504,"code":"upstream_idle_timeout"}}\n\n',
+    );
+    const updates: ChatStreamUpdate[] = [];
+    await expect(
+      api.streamChat({ id: "test" }, "hello", "auto", (update) => updates.push(update)),
+    ).rejects.toMatchObject({ status: 504, message: "等待后续数据超时" });
+    expect(updates[0].content).toBe("partial");
+    expect(updates.some((update) => update.done)).toBe(false);
+  });
 });

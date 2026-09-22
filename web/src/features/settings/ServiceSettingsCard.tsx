@@ -34,6 +34,9 @@ export function ServiceSettingsCard({
   const [host, setHost] = useState("127.0.0.1");
   const [port, setPort] = useState("3000");
   const [corsOrigin, setCorsOrigin] = useState("");
+  const [connectTimeout, setConnectTimeout] = useState("15");
+  const [firstByteTimeout, setFirstByteTimeout] = useState("180");
+  const [idleTimeout, setIdleTimeout] = useState("180");
   const [loading, setLoading] = useState(available);
   const [saving, setSaving] = useState(false);
 
@@ -46,6 +49,9 @@ export function ServiceSettingsCard({
         setHost(settings.host);
         setPort(String(settings.port));
         setCorsOrigin(settings.corsOrigin ?? "");
+        setConnectTimeout(String((settings.connectTimeoutMs ?? 15000) / 1000));
+        setFirstByteTimeout(String((settings.firstByteTimeoutMs ?? 180000) / 1000));
+        setIdleTimeout(String((settings.idleTimeoutMs ?? 180000) / 1000));
       })
       .catch((error: unknown) => {
         if (active) onNotice(errorMessage(error), "error");
@@ -69,12 +75,20 @@ export function ServiceSettingsCard({
       onNotice("服务 Port 必须是 1-65535 的整数", "error");
       return;
     }
+    const timeouts = [connectTimeout, firstByteTimeout, idleTimeout].map(Number);
+    if (timeouts.some((value) => !Number.isFinite(value) || value <= 0 || value > 86400)) {
+      onNotice("超时时间必须大于 0 且不超过 86400 秒", "error");
+      return;
+    }
     setSaving(true);
     try {
       await saveServiceSettings({
         host: normalizedHost,
         port: normalizedPort,
         corsOrigin: corsOrigin.trim(),
+        connectTimeoutMs: Math.round(timeouts[0] * 1000),
+        firstByteTimeoutMs: Math.round(timeouts[1] * 1000),
+        idleTimeoutMs: Math.round(timeouts[2] * 1000),
       });
       onNotice("服务配置已保存，应用即将重启");
     } catch (error) {
@@ -91,7 +105,7 @@ export function ServiceSettingsCard({
         </CardHeader>
         <CardContent>
           <p className="text-sm leading-6 text-muted-foreground">
-            请在桌面应用中修改本机服务的监听地址、端口和允许跨域访问的网站来源。
+            请在桌面应用中修改本机服务的监听地址、端口、跨域来源和上游超时。
           </p>
         </CardContent>
       </Card>
@@ -104,7 +118,9 @@ export function ServiceSettingsCard({
           <Globe2 className="size-4 text-warning" />
           <CardTitle>服务监听</CardTitle>
         </div>
-        <CardDescription>配置监听地址、端口和网页跨域访问，保存后应用会自动重启。</CardDescription>
+        <CardDescription>
+          配置监听地址、网页跨域访问和上游超时，保存后应用会自动重启。
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-[1fr_10rem]">
@@ -152,6 +168,34 @@ export function ServiceSettingsCard({
             Key。如浏览器提示访问本地网络，请允许该网站访问。
           </p>
         </Field>
+        <div className="space-y-2">
+          <div className="grid gap-4 sm:grid-cols-3">
+            {(
+              [
+                ["connect", "连接超时（秒）", connectTimeout, setConnectTimeout],
+                ["first-byte", "首包超时（秒）", firstByteTimeout, setFirstByteTimeout],
+                ["idle", "数据空闲超时（秒）", idleTimeout, setIdleTimeout],
+              ] as const
+            ).map(([id, label, value, setValue]) => (
+              <Field key={id} label={label} htmlFor={`service-timeout-${id}`}>
+                <Input
+                  id={`service-timeout-${id}`}
+                  type="number"
+                  min={0.001}
+                  max={86400}
+                  step="any"
+                  value={value}
+                  onChange={(event) => setValue(event.target.value)}
+                  disabled={loading || saving}
+                />
+              </Field>
+            ))}
+          </div>
+          <p className="text-xs leading-5 text-muted-foreground">
+            连接超时限制 DNS、TCP 和 TLS
+            握手；首包等待从每次渠道请求开始计时，直到收到首个响应体数据。之后只限制连续无数据的时间，持续输出不会因总时长达到三分钟而中断。心跳也计为数据。
+          </p>
+        </div>
         <Button onClick={() => void save()} disabled={loading || saving}>
           {saving ? <Spinner className="size-3.5" /> : <Save className="size-3.5" />}
           保存并重启
@@ -159,7 +203,7 @@ export function ServiceSettingsCard({
       </CardContent>
       <CardFooter className="border-t border-border/60 pt-4 text-[11px] leading-4 text-muted-foreground">
         <RotateCw className="mr-1.5 size-3.5 shrink-0" />
-        环境变量 BIND_HOST、PORT 和 CORS_ORIGIN 优先级高于桌面端保存的配置。
+        对应的监听、跨域和超时环境变量优先级高于桌面端保存的配置。
       </CardFooter>
     </Card>
   );

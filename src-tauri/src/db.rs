@@ -61,6 +61,7 @@ pub struct MetricRecord {
     pub finish_reason: Option<String>,
     pub api_key_id: Option<String>,
     pub usage_json: Option<String>,
+    pub diagnostics_json: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -77,6 +78,7 @@ pub struct MetricRow {
     pub finish_reason: Option<String>,
     pub api_key_id: Option<String>,
     pub usage_json: Option<String>,
+    pub diagnostics_json: Option<String>,
 }
 
 impl Db {
@@ -136,6 +138,16 @@ impl Db {
             ",
         )?;
         usage::migrate(&mut connection)?;
+        let has_diagnostics = connection
+            .prepare("PRAGMA table_info(request_metrics)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|name| name == "diagnostics_json");
+        if !has_diagnostics {
+            connection
+                .execute_batch("ALTER TABLE request_metrics ADD COLUMN diagnostics_json TEXT;")?;
+        }
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -355,8 +367,8 @@ impl Db {
         }
         tx.execute(
             "INSERT OR REPLACE INTO request_metrics
-             (id,started_at,completed_at,protocol,provider,channel_id,model,status,status_code,finish_reason,api_key_id,usage_json)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+             (id,started_at,completed_at,protocol,provider,channel_id,model,status,status_code,finish_reason,api_key_id,usage_json,diagnostics_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![
                 metric.id,
                 metric.started_at,
@@ -370,6 +382,7 @@ impl Db {
                 metric.finish_reason,
                 metric.api_key_id,
                 metric.usage_json,
+                metric.diagnostics_json,
             ],
         )?;
         tx.commit()?;
@@ -380,7 +393,7 @@ impl Db {
         let connection = self.connection.lock().expect("sqlite mutex poisoned");
         let mut statement = connection.prepare(
             "SELECT id,started_at,completed_at,protocol,provider,channel_id,model,status,
-                    status_code,finish_reason,api_key_id,usage_json
+                    status_code,finish_reason,api_key_id,usage_json,diagnostics_json
              FROM request_metrics WHERE started_at>=?1 ORDER BY started_at DESC",
         )?;
         let rows = statement.query_map(params![since], |row| {
@@ -397,6 +410,7 @@ impl Db {
                 finish_reason: row.get(9)?,
                 api_key_id: row.get(10)?,
                 usage_json: row.get(11)?,
+                diagnostics_json: row.get(12)?,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())

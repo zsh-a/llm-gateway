@@ -18,6 +18,7 @@ mod model_catalog;
 mod model_catalog_tests;
 mod protocols;
 mod sync;
+mod upstream;
 
 use activity::{Activity, RequestGuard};
 pub(crate) use http::serve;
@@ -118,6 +119,7 @@ struct MetricDraft {
     api_key_id: Option<String>,
     usage_json: Option<String>,
     finished: bool,
+    diagnostics: upstream::RequestDiagnostics,
 }
 
 impl AppState {
@@ -127,7 +129,9 @@ impl AppState {
         let config = Config {
             bind_host: "127.0.0.1".into(),
             port: 0,
-            request_timeout_ms: 5000,
+            connect_timeout_ms: 1000,
+            first_byte_timeout_ms: 5000,
+            idle_timeout_ms: 5000,
             max_body_bytes: crate::config::DEFAULT_MAX_BODY_BYTES,
             proxy_api_key: String::new(),
             proxy_admin_key: String::new(),
@@ -207,7 +211,7 @@ impl AppState {
         let auth = load_auth_cache(&config);
         let client = Client::builder()
             .user_agent("llm-gateway-rust/1.0")
-            .connect_timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
             .pool_max_idle_per_host(8)
             .build()?;
         Ok(Self {
@@ -649,6 +653,49 @@ impl AppState {
 }
 
 impl MetricContext {
+    fn id(&self) -> String {
+        self.draft
+            .lock()
+            .map(|draft| draft.id.clone())
+            .unwrap_or_default()
+    }
+
+    fn headers_received(&self) {
+        if let Ok(mut draft) = self.draft.lock() {
+            draft.diagnostics.response_headers_ms = Some((now_ms() - draft.started_at).max(0));
+        }
+    }
+
+    fn observe_chunk(&self, bytes: usize, accumulator: &protocols::StreamAccumulator) {
+        if let Ok(mut draft) = self.draft.lock() {
+            let elapsed = (now_ms() - draft.started_at).max(0);
+            draft.diagnostics.first_byte_ms.get_or_insert(elapsed);
+            draft.diagnostics.last_byte_ms = Some(elapsed);
+            draft.diagnostics.received_bytes += bytes as u64;
+            draft.diagnostics.received_chunks += 1;
+            if let Some(usage) = &accumulator.usage {
+                draft.usage_json = Some(usage.to_string());
+            }
+            if let Some(reason) = &accumulator.finish_reason {
+                draft.finish_reason = Some(reason.clone());
+            }
+        }
+    }
+
+    fn fail(&self, failure: &upstream::UpstreamFailure) {
+        if let Ok(mut draft) = self.draft.lock() {
+            if draft.finished {
+                return;
+            }
+            draft.diagnostics.error = Some(failure.clone());
+            warn!(request_id = %draft.id, provider = ?draft.provider, channel = ?draft.channel_id,
+                error_code = failure.code, stage = failure.stage, timeout_ms = ?failure.timeout_ms,
+                received_bytes = draft.diagnostics.received_bytes, first_byte_ms = ?draft.diagnostics.first_byte_ms,
+                last_byte_ms = ?draft.diagnostics.last_byte_ms, "上游请求失败");
+        }
+        self.finish("error", Some(failure.status_code()), None, None);
+    }
+
     fn set_route(&self, route: &Route, model: &str) {
         if let Ok(mut draft) = self.draft.lock() {
             if let Some(active) = &draft.active {
@@ -657,6 +704,10 @@ impl MetricContext {
             draft.provider = Some(route.provider.clone());
             draft.channel_id = Some(route.channel_id.clone());
             draft.model = Some(model.to_string());
+            draft.diagnostics = upstream::RequestDiagnostics {
+                attempts: draft.diagnostics.attempts + 1,
+                ..Default::default()
+            };
         }
     }
 
@@ -678,8 +729,12 @@ impl MetricContext {
         let active = guard.active.take();
         guard.status = Some(status.to_string());
         guard.status_code = code.map(|value| value.as_u16() as i64);
-        guard.finish_reason = finish_reason.map(str::to_string);
-        guard.usage_json = usage.map(Value::to_string);
+        if let Some(reason) = finish_reason {
+            guard.finish_reason = Some(reason.to_string());
+        }
+        if let Some(usage) = usage {
+            guard.usage_json = Some(usage.to_string());
+        }
         let completed_at = now_ms();
         let record = MetricRecord {
             id: guard.id.clone(),
@@ -694,6 +749,7 @@ impl MetricContext {
             finish_reason: guard.finish_reason.clone(),
             api_key_id: guard.api_key_id.clone(),
             usage_json: guard.usage_json.clone(),
+            diagnostics_json: serde_json::to_string(&guard.diagnostics).ok(),
         };
         drop(guard);
         if let Err(error) = self.state.db.insert_metric(&record) {

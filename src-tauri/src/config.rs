@@ -5,6 +5,13 @@ use std::path::{Path, PathBuf};
 const SERVICE_SETTINGS_FILE: &str = "service.json";
 pub(crate) const DEFAULT_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
+fn default_connect_timeout_ms() -> u64 {
+    15_000
+}
+fn default_data_timeout_ms() -> u64 {
+    180_000
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceSettings {
@@ -12,6 +19,12 @@ pub struct ServiceSettings {
     pub port: u16,
     #[serde(default)]
     pub cors_origin: String,
+    #[serde(default = "default_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
+    #[serde(default = "default_data_timeout_ms")]
+    pub first_byte_timeout_ms: u64,
+    #[serde(default = "default_data_timeout_ms")]
+    pub idle_timeout_ms: u64,
 }
 
 impl ServiceSettings {
@@ -39,6 +52,16 @@ impl ServiceSettings {
         );
         anyhow::ensure!(self.port > 0, "服务 Port 必须在 1-65535 范围内");
         parse_cors_origins(&self.cors_origin)?;
+        for value in [
+            self.connect_timeout_ms,
+            self.first_byte_timeout_ms,
+            self.idle_timeout_ms,
+        ] {
+            anyhow::ensure!(
+                (1..=86_400_000).contains(&value),
+                "超时时间必须大于 0 且不超过 24 小时"
+            );
+        }
         Ok(())
     }
 
@@ -49,6 +72,9 @@ impl ServiceSettings {
             cors_origin: parse_cors_origins(&self.cors_origin)
                 .map(|origins| origins.join(","))
                 .unwrap_or_else(|_| self.cors_origin.trim().to_owned()),
+            connect_timeout_ms: self.connect_timeout_ms,
+            first_byte_timeout_ms: self.first_byte_timeout_ms,
+            idle_timeout_ms: self.idle_timeout_ms,
         }
     }
 }
@@ -138,6 +164,12 @@ mod tests {
         std::fs::write(&path, r#"{"host":"127.0.0.1","port":3000}"#).unwrap();
         let mut settings = load_service_settings(runtime.path()).unwrap();
         assert!(settings.cors_origin.is_empty());
+        assert_eq!(settings.connect_timeout_ms, 15_000);
+        assert_eq!(settings.first_byte_timeout_ms, 180_000);
+        assert_eq!(settings.idle_timeout_ms, 180_000);
+        settings.connect_timeout_ms = 5000;
+        settings.first_byte_timeout_ms = 600_000;
+        settings.idle_timeout_ms = 90_000;
         settings.cors_origin = "https://chat.example.com/\nhttp://localhost:5173".into();
         config.save_service_settings(&settings).unwrap();
         let saved = load_service_settings(runtime.path()).unwrap();
@@ -146,6 +178,9 @@ mod tests {
             "https://chat.example.com,http://localhost:5173"
         );
         assert_eq!(saved.host, "127.0.0.1");
+        assert_eq!(saved.connect_timeout_ms, 5000);
+        assert_eq!(saved.first_byte_timeout_ms, 600_000);
+        assert_eq!(saved.idle_timeout_ms, 90_000);
         settings.cors_origin = "invalid".into();
         assert!(config.save_service_settings(&settings).is_err());
         assert_eq!(
@@ -170,6 +205,9 @@ mod tests {
                     host: host.into(),
                     port: 3000,
                     cors_origin: String::new(),
+                    connect_timeout_ms: default_connect_timeout_ms(),
+                    first_byte_timeout_ms: default_data_timeout_ms(),
+                    idle_timeout_ms: default_data_timeout_ms(),
                 }
                 .base_url(),
                 expected
@@ -182,7 +220,9 @@ mod tests {
 pub struct Config {
     pub bind_host: String,
     pub port: u16,
-    pub request_timeout_ms: u64,
+    pub connect_timeout_ms: u64,
+    pub first_byte_timeout_ms: u64,
+    pub idle_timeout_ms: u64,
     pub max_body_bytes: usize,
     pub proxy_api_key: String,
     pub proxy_admin_key: String,
@@ -277,11 +317,37 @@ impl Config {
                     .map(|value| value.cors_origin.clone())
             })
             .unwrap_or_default();
+        // Legacy REQUEST_TIMEOUT_MS now supplies data-wait limits, never a total stream lifetime.
+        let data_fallback = |saved| env_u64("REQUEST_TIMEOUT_MS", saved);
+        let connect_timeout_ms = env_u64(
+            "UPSTREAM_CONNECT_TIMEOUT_MS",
+            persisted_service
+                .as_ref()
+                .map_or(default_connect_timeout_ms(), |s| s.connect_timeout_ms),
+        );
+        let first_byte_timeout_ms = env_u64(
+            "UPSTREAM_FIRST_BYTE_TIMEOUT_MS",
+            data_fallback(
+                persisted_service
+                    .as_ref()
+                    .map_or(default_data_timeout_ms(), |s| s.first_byte_timeout_ms),
+            ),
+        );
+        let idle_timeout_ms = env_u64(
+            "UPSTREAM_IDLE_TIMEOUT_MS",
+            data_fallback(
+                persisted_service
+                    .as_ref()
+                    .map_or(default_data_timeout_ms(), |s| s.idle_timeout_ms),
+            ),
+        );
 
         Self {
             bind_host,
             port,
-            request_timeout_ms: env_u64("REQUEST_TIMEOUT_MS", 180_000),
+            connect_timeout_ms,
+            first_byte_timeout_ms,
+            idle_timeout_ms,
             max_body_bytes: env_u64("MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES as u64) as usize,
             proxy_api_key: env::var("PROXY_API_KEY").unwrap_or_default(),
             proxy_admin_key: env::var("PROXY_ADMIN_KEY").unwrap_or_default(),
@@ -341,6 +407,9 @@ impl Config {
             host: self.bind_host.clone(),
             port: self.port,
             cors_origin: self.cors_origin.clone(),
+            connect_timeout_ms: self.connect_timeout_ms,
+            first_byte_timeout_ms: self.first_byte_timeout_ms,
+            idle_timeout_ms: self.idle_timeout_ms,
         }
     }
 

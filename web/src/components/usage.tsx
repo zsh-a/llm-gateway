@@ -104,8 +104,40 @@ export function UsageDetails({ usage }: { usage?: Usage | null }) {
 }
 
 function RequestDetails({ row }: { row: RecentRequest }) {
+  const diagnostics = row.diagnostics;
+  const failure = diagnostics?.error;
+  const stageNames: Record<string, string> = {
+    connect: "建立连接",
+    response_headers: "等待响应头",
+    first_byte: "等待首个数据",
+    stream_idle: "等待后续数据",
+    response_body: "读取响应体",
+  };
   return (
     <div className="space-y-4 rounded-xl border border-border/70 bg-muted/15 p-3.5">
+      {failure && (
+        <div
+          className="rounded-xl border border-destructive/25 bg-destructive/5 p-3 text-sm"
+          role="alert"
+        >
+          <p className="font-medium">{failure.message}</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {stageNames[failure.stage] || failure.stage} · {failure.code}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {diagnostics.receivedBytes > 0
+              ? "中断前已收到上游数据；缺少 usage 不代表没有生成输出。"
+              : diagnostics.responseHeadersMs !== null
+                ? "已收到上游响应头，但尚未收到响应体数据。"
+                : "尚未收到上游响应头或响应体数据。"}
+          </p>
+        </div>
+      )}
+      {row.status === "error" && !diagnostics && (
+        <p className="text-xs text-muted-foreground">
+          此历史记录未保存错误阶段，无法区分连接、首包或数据中断。
+        </p>
+      )}
       <div className="grid gap-2 md:grid-cols-2">
         <InfoRow label="模型" value={row.model || "—"} />
         <InfoRow label="协议" value={row.protocol || "chat"} />
@@ -114,6 +146,7 @@ function RequestDetails({ row }: { row: RecentRequest }) {
         <InfoRow label="开始时间" value={formatTime(row.startedAt, true)} />
         <InfoRow label="完成时间" value={formatTime(row.completedAt, true)} />
         <InfoRow label="耗时" value={formatDuration(row.durationMs)} />
+        <InfoRow label="结果状态码" value={row.statusCode == null ? "—" : String(row.statusCode)} />
         <InfoRow label="Provider" value={row.provider || "—"} />
         <InfoRow label="渠道" value={row.channelId || "—"} />
         <InfoRow label="思考强度" value={row.reasoningEffort || "—"} />
@@ -123,12 +156,57 @@ function RequestDetails({ row }: { row: RecentRequest }) {
           value={row.toolCalls === undefined ? "—" : formatNumber(row.toolCalls)}
         />
       </div>
+      {diagnostics && (
+        <div className="grid gap-2 md:grid-cols-2">
+          <InfoRow label="渠道尝试次数" value={String(diagnostics.attempts)} />
+          <InfoRow
+            label="收到响应头"
+            value={
+              diagnostics.responseHeadersMs === null
+                ? "未收到"
+                : formatDuration(diagnostics.responseHeadersMs)
+            }
+          />
+          <InfoRow
+            label="首个数据到达"
+            value={
+              diagnostics.firstByteMs === null ? "未收到" : formatDuration(diagnostics.firstByteMs)
+            }
+          />
+          <InfoRow
+            label="最后数据到达"
+            value={
+              diagnostics.lastByteMs === null ? "未收到" : formatDuration(diagnostics.lastByteMs)
+            }
+          />
+          <InfoRow
+            label="已收数据"
+            value={`${formatNumber(diagnostics.receivedBytes)} 字节 / ${formatNumber(diagnostics.receivedChunks)} 块`}
+          />
+          {failure?.timeoutMs != null && (
+            <InfoRow label="超时阈值" value={formatDuration(failure.timeoutMs)} />
+          )}
+        </div>
+      )}
       <div>
-        <div className="mb-2 text-xs font-medium text-foreground">Token 用量</div>
+        <div className="mb-2 text-xs font-medium text-foreground">
+          {row.status !== "success" && row.usage ? "中断前 Token 用量（可能不完整）" : "Token 用量"}
+        </div>
         <UsageDetails usage={row.usage} />
       </div>
     </div>
   );
+}
+
+function requestStatusLabel(row: RecentRequest): string {
+  if (row.status === "success") return "成功";
+  if (row.status !== "error") return "取消";
+  const labels: Record<string, string> = {
+    upstream_connect_timeout: "连接超时",
+    upstream_first_byte_timeout: "首包超时",
+    upstream_idle_timeout: "数据中断超时",
+  };
+  return labels[row.diagnostics?.error?.code ?? ""] ?? "失败";
 }
 
 export function RequestTable({ rows }: { rows: RecentRequest[] }) {
@@ -233,12 +311,7 @@ export function RequestTable({ rows }: { rows: RecentRequest[] }) {
                       : formatCompact(usageTotal(row.usage ?? undefined))}
                   </td>
                   <td className="px-3 py-3">
-                    <StatusBadge
-                      status={row.status}
-                      label={
-                        row.status === "success" ? "成功" : row.status === "error" ? "失败" : "取消"
-                      }
-                    />
+                    <StatusBadge status={row.status} label={requestStatusLabel(row)} />
                   </td>
                 </tr>
                 {isExpanded && (

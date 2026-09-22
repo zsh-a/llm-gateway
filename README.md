@@ -230,7 +230,9 @@ BIND_HOST=127.0.0.1
 RUNTIME_DIR=./.runtime
 # AUTH_CACHE_DIR=./.runtime/auth
 # DATABASE_FILE=./.runtime/gateway.sqlite3
-REQUEST_TIMEOUT_MS=180000
+UPSTREAM_CONNECT_TIMEOUT_MS=15000
+UPSTREAM_FIRST_BYTE_TIMEOUT_MS=180000
+UPSTREAM_IDLE_TIMEOUT_MS=180000
 MAX_BODY_BYTES=8388608
 MODEL_DISCOVERY=true
 MODEL_DISCOVERY_TIMEOUT_MS=30000
@@ -244,6 +246,33 @@ METRICS_MAX_RECORDS=2000
 `RUNTIME_DIR/service.json`。环境变量 `BIND_HOST`、`PORT` 和 `CORS_ORIGIN` 优先级更高，适合 headless、容器和
 systemd/launchd 服务。debug 模式默认使用项目下的 `.runtime`；release 应用默认使用系统用户数据目录。
 macOS 路径为 `~/Library/Application Support/LLM Gateway`。设置 `RUNTIME_DIR` 可以固定到其他目录。
+
+### 上游超时与请求诊断
+
+桌面“设置 → 服务监听”可分别配置连接、首包和数据空闲超时，保存后重启生效：
+
+| 配置 | 默认值 | 含义 |
+| --- | --- | --- |
+| `UPSTREAM_CONNECT_TIMEOUT_MS` | 15000 | DNS、TCP、TLS 等建立连接阶段的上限 |
+| `UPSTREAM_FIRST_BYTE_TIMEOUT_MS` | 180000 | 从每次渠道请求开始，到首个非空响应体数据的等待上限；包含连接与等待响应头，收到响应头不会重新计时 |
+| `UPSTREAM_IDLE_TIMEOUT_MS` | 180000 | 首个数据之后，每次读取新数据的空闲等待上限，收到数据后重置；SSE 心跳也算数据 |
+
+模型调用没有总时长上限，持续输出的流式请求可超过三分钟。非流式调用也使用同样的分阶段限制，
+因为网关从上游读取流后再汇总返回。新的环境变量优先于旧 `REQUEST_TIMEOUT_MS`；旧变量仅作为
+首包和空闲等待的回退值，不再限制整个请求的时长。环境变量覆盖桌面保存的值。
+
+请求详情显示错误码、失败阶段、阈值、响应头/首包/最后数据到达时间、收到的字节数和渠道尝试次数。
+连接超时为 `upstream_connect_timeout`，未收到首包为 `upstream_first_byte_timeout`，
+收到数据后停滞为 `upstream_idle_timeout`；连接拒绝、读取中断和流提前结束分别记录其他错误码。
+这些超时在尚未发送响应时返回 HTTP 504；流式 HTTP 200 已发送后，通过 SSE `event: error`
+发送相同的错误信息并结束流，不伪造成功完成标记。结果状态码记录为 504，表示处理结果。
+
+诊断与请求明细一起持久化到 SQLite 的 `request_metrics.diagnostics_json`，并由统计接口返回 `diagnostics`。
+通过响应头 `x-request-id` 或错误中的 `requestId` 可与详情中的 Request ID 对照；跨域网页也可以读取该响应头。
+失败时还会输出带 Request ID、渠道、错误码、阶段和已收数据量的 warning 日志。诊断不会保存提示词、响应内容、
+认证头或完整上游 URL。日志仍输出到进程标准输出；桌面没有独立日志文件，排查优先查看持久化的请求详情。
+诊断遵循请求明细保留上限；旧版本记录没有这些信息，无法事后还原超时阶段。
+中断前已返回的 usage 会保留；“用量未知”只表示缺少 usage，不能证明没有收到输出。
 
 ### 从其他网站的网页调用网关
 

@@ -142,6 +142,22 @@ export interface RecentRequest {
   model?: string;
   reasoningEffort?: string;
   status?: "success" | "error" | "canceled";
+  statusCode?: number | null;
+  diagnostics?: {
+    attempts: number;
+    responseHeadersMs: number | null;
+    firstByteMs: number | null;
+    lastByteMs: number | null;
+    receivedBytes: number;
+    receivedChunks: number;
+    error: {
+      code: string;
+      stage: string;
+      message: string;
+      status: number;
+      timeoutMs: number | null;
+    } | null;
+  } | null;
   finishReason?: string;
   toolCalls?: number;
   usage?: Usage | null;

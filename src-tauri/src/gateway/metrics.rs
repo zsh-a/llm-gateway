@@ -233,6 +233,7 @@ fn metric_json(row: &MetricRow, names: &HashMap<&str, &str>) -> Value {
         "durationMs":row.completed_at-row.started_at,"protocol":row.protocol,
         "provider":row.provider,"channelId":row.channel_id,"model":row.model,
         "status":row.status,"statusCode":row.status_code,"finishReason":row.finish_reason,
+        "diagnostics":row.diagnostics_json.as_deref().and_then(|raw| serde_json::from_str::<Value>(raw).ok()),
         "apiKeyId":id,"apiKeyName":names.get(id).copied().unwrap_or(match id { "anonymous"=>"匿名请求", "environment"=>"环境变量 Key", "legacy"=>"历史未归属请求", _=>"历史 Key" }),
         "usage":row.usage_json.as_deref().and_then(|raw| serde_json::from_str::<Value>(raw).ok())
     })

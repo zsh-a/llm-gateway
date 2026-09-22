@@ -258,7 +258,7 @@ export class GatewayApi {
         if (value.data.trim() === "[DONE]") break;
         if (!value.data.trim()) continue;
         const payload = JSON.parse(value.data) as {
-          error?: { message?: string };
+          error?: { message?: string; status?: number };
           choices?: Array<{
             delta?: {
               content?: string | Array<{ text?: string }> | null;
@@ -268,7 +268,8 @@ export class GatewayApi {
           }>;
           usage?: Usage;
         };
-        if (payload.error) throw new ApiError(payload.error.message || "模型响应失败", 502);
+        if (payload.error)
+          throw new ApiError(payload.error.message || "模型响应失败", payload.error.status ?? 502);
         const choice = payload.choices?.[0];
         const delta = choice?.delta;
         const content = Array.isArray(delta?.content)

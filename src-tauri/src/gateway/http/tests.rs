@@ -581,6 +581,7 @@ async fn legacy_unscoped_metrics_remain_visible_without_exposing_managed_keys() 
                     finish_reason: Some("stop".into()),
                     api_key_id: identity.map(str::to_string),
                     usage_json: Some(json!({"totalTokens":7}).to_string()),
+                    diagnostics_json: None,
                 })
                 .unwrap();
         }

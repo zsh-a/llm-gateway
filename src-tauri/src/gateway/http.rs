@@ -1,15 +1,15 @@
 use super::management::AdminAccess;
 // HTTP routing and request handlers for the gateway.
-use super::AppState;
 use super::auth::{
     GatewayError, database_error, error_response, hash_secret, now_ms, require_public_auth,
     require_public_auth_identity, string_array,
 };
 use super::metrics::{MetricQuery, MetricView, metrics_response};
 use super::protocols::{
-    StreamAccumulator, build_upstream_body, chat_to_response, parse_upstream_response,
-    responses_to_chat,
+    build_upstream_body, chat_to_response, parse_upstream_response, responses_to_chat,
 };
+use super::upstream::{UpstreamBody, UpstreamFailure};
+use super::{AppState, MetricContext, Route};
 use crate::config::{Config, parse_cors_origins};
 use crate::db::{ApiKeyRecord, ChannelRecord, Db};
 use axum::body::{Body, Bytes};
@@ -21,12 +21,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use base64::Engine;
-use futures_util::stream::StreamExt;
 use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout_at};
 use tower_http::cors::{AllowHeaders, AllowOrigin, AllowPrivateNetwork, Any, CorsLayer};
 use tracing::{debug, info, warn};
 
@@ -34,6 +33,8 @@ const MAX_UPSTREAM_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod timeout_tests;
 
 pub(super) fn router(state: AppState) -> Router {
     Router::new()
@@ -74,7 +75,8 @@ fn cors_layer(config: &Config) -> CorsLayer {
         ])
         // Authorization must be explicitly named in the preflight response;
         // Access-Control-Allow-Headers: * does not cover it in browsers.
-        .allow_headers(AllowHeaders::mirror_request());
+        .allow_headers(AllowHeaders::mirror_request())
+        .expose_headers([header::HeaderName::from_static("x-request-id")]);
     let configured = parse_cors_origins(&config.cors_origin).unwrap_or_else(|error| {
         warn!(%error, "CORS 配置无效，仅允许桌面端来源");
         Vec::new()
@@ -256,6 +258,7 @@ async fn responses(
     if stream || !response.status().is_success() {
         return response;
     }
+    let request_id = response.headers().get("x-request-id").cloned();
     let bytes = match axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024).await {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -267,11 +270,15 @@ async fn responses(
         }
     };
     let chat_body: Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}));
-    Json(chat_to_response(
+    let mut output = Json(chat_to_response(
         &chat_body,
         body.get("model").and_then(Value::as_str).unwrap_or(""),
     ))
-    .into_response()
+    .into_response();
+    if let Some(id) = request_id {
+        output.headers_mut().insert("x-request-id", id);
+    }
+    output
 }
 
 fn inference_body(
@@ -333,116 +340,129 @@ async fn proxy_chat(
             "service_stopping",
         );
     };
+    let request_id = metric.id();
+    let mut response = proxy_upstream(state, body, responses_mode, &model, routes, metric).await;
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert("x-request-id", value);
+    }
+    response
+}
+
+fn upstream_error(failure: &UpstreamFailure, metric: &MetricContext) -> Response {
+    metric.fail(failure);
+    (failure.status_code(), Json(failure.payload(&metric.id()))).into_response()
+}
+
+async fn proxy_upstream(
+    state: AppState,
+    body: &Value,
+    responses_mode: bool,
+    model: &str,
+    routes: Vec<Route>,
+    metric: MetricContext,
+) -> Response {
     let mut response = None;
-    let mut last_status = StatusCode::BAD_GATEWAY;
+    let mut last_failure = UpstreamFailure::new(
+        "upstream_request_error",
+        "response_headers",
+        "无法连接上游服务",
+        StatusCode::BAD_GATEWAY,
+    );
     for (index, route) in routes.iter().enumerate() {
-        metric.set_route(route, &model);
+        metric.set_route(route, model);
         let upstream_body = build_upstream_body(body, route, responses_mode);
         let auth_headers = state.auth_headers(&route.auth_ref).unwrap_or_default();
+        // The first-byte deadline spans headers and the first nonempty body chunk.
+        // There is deliberately no reqwest total timeout on a streaming request.
+        let first_deadline =
+            Instant::now() + Duration::from_millis(state.config.first_byte_timeout_ms);
         let request = state
             .client
             .post(&route.upstream_url)
             .headers(auth_headers)
             .header(header::CONTENT_TYPE, "application/json")
-            .timeout(Duration::from_millis(state.config.request_timeout_ms))
             .json(&upstream_body);
-        match timeout(
-            Duration::from_millis(state.config.request_timeout_ms),
-            request.send(),
-        )
-        .await
-        {
+        last_failure = match timeout_at(first_deadline, request.send()).await {
             Ok(Ok(upstream)) if upstream.status().is_success() => {
-                response = Some(upstream);
+                metric.headers_received();
+                response = Some((upstream, first_deadline));
                 break;
             }
             Ok(Ok(upstream)) => {
+                metric.headers_received();
                 let status = upstream.status();
-                last_status = status;
-                let retryable = matches!(status.as_u16(), 401 | 403 | 408 | 409 | 429)
-                    || status.is_server_error();
-                if retryable && index + 1 < routes.len() {
-                    debug!(provider = %route.provider, channel = %route.channel_id, status = status.as_u16(), "上游响应可重试，切换下一个渠道");
-                    continue;
-                }
+                UpstreamFailure::new(
+                    "upstream_http_error",
+                    "response_headers",
+                    format!("上游接口返回 HTTP {}", status.as_u16()),
+                    status,
+                )
             }
-            Ok(Err(error)) => {
-                debug!(%error, provider = %route.provider, channel = %route.channel_id, "上游请求失败");
-                if index + 1 < routes.len() {
-                    continue;
-                }
-            }
+            Ok(Err(error)) => UpstreamFailure::request(&error, &state.config),
             Err(_) => {
-                last_status = StatusCode::GATEWAY_TIMEOUT;
-                if index + 1 < routes.len() {
-                    continue;
-                }
+                UpstreamFailure::timeout("response_headers", state.config.first_byte_timeout_ms)
             }
-        }
-        break;
-    }
-    let Some(response) = response else {
-        metric.finish("error", Some(last_status), None, None);
-        let message = if last_status == StatusCode::GATEWAY_TIMEOUT {
-            "上游请求超时".to_string()
-        } else if last_status == StatusCode::BAD_GATEWAY {
-            "无法连接上游服务".to_string()
-        } else {
-            format!("上游接口返回 HTTP {}", last_status.as_u16())
         };
-        return error_response(
-            last_status,
-            message,
-            if last_status == StatusCode::GATEWAY_TIMEOUT {
-                "timeout_error"
-            } else {
-                "upstream_error"
-            },
-        );
+        let retryable = last_failure.code != "upstream_http_error"
+            || matches!(last_failure.status, 401 | 403 | 408 | 409 | 429)
+            || last_failure.status >= 500;
+        if !retryable || index + 1 == routes.len() {
+            break;
+        }
+        warn!(request_id = %metric.id(), provider = %route.provider, channel = %route.channel_id,
+            error_code = last_failure.code, stage = last_failure.stage,
+            "上游尝试失败，切换下一个渠道");
+    }
+    let Some((response, first_deadline)) = response else {
+        return upstream_error(&last_failure, &metric);
     };
     let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    if !stream
+        && response
+            .content_length()
+            .is_some_and(|length| length > MAX_UPSTREAM_BODY_BYTES as u64)
+    {
+        return upstream_error(&body_too_large(), &metric);
+    }
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from_static("text/event-stream"));
+    let mut upstream = UpstreamBody::new(response, first_deadline, &state.config, metric.clone());
+    // Delay downstream response headers until data arrives so a stalled first body
+    // can still return HTTP 504 rather than a misleading HTTP 200.
+    let first = match upstream.next_chunk().await {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => Bytes::new(),
+        Err(failure) => return upstream_error(&failure, &metric),
+    };
     if stream {
-        let status = response.status();
-        let content_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .cloned()
-            .unwrap_or_else(|| HeaderValue::from_static("text/event-stream"));
-        let upstream = response.bytes_stream();
-        let status_for_stream = status;
         let stream = futures_util::stream::unfold(
-            (upstream, Some(metric.clone()), StreamAccumulator::default()),
-            move |(mut upstream, metric, mut accumulator)| async move {
-                match upstream.next().await {
-                    Some(Ok(bytes)) => {
-                        accumulator.observe(&bytes);
-                        Some((
-                            Ok::<Bytes, Infallible>(bytes),
-                            (upstream, metric, accumulator),
-                        ))
-                    }
-                    Some(Err(error)) => {
-                        if let Some(metric) = metric.as_ref() {
-                            metric.finish(
-                                "error",
-                                Some(StatusCode::BAD_GATEWAY),
-                                accumulator.finish_reason.as_deref(),
-                                accumulator.usage.as_ref(),
-                            );
+            (Some(first), Some(upstream)),
+            move |(mut first, upstream)| async move {
+                let mut upstream = upstream?;
+                let next = if let Some(first) = first.take() {
+                    Ok(Some(first))
+                } else {
+                    upstream.next_chunk().await
+                };
+                match next {
+                    Ok(Some(bytes)) => {
+                        if upstream.accumulator.done {
+                            upstream.metric.finish("success", Some(status), None, None);
                         }
-                        let _ = error;
+                        Some((Ok::<Bytes, Infallible>(bytes), (None, Some(upstream))))
+                    }
+                    Ok(None) => {
+                        upstream.metric.finish("success", Some(status), None, None);
                         None
                     }
-                    None => {
-                        if let Some(metric) = metric.as_ref() {
-                            metric.finish(
-                                "success",
-                                Some(status_for_stream),
-                                accumulator.finish_reason.as_deref(),
-                                accumulator.usage.as_ref(),
-                            );
-                        }
-                        None
+                    Err(failure) => {
+                        upstream.metric.fail(&failure);
+                        let event = failure.stream_event(&upstream.metric.id());
+                        Some((Ok(event), (None, None)))
                     }
                 }
             },
@@ -455,23 +475,12 @@ async fn proxy_chat(
             .headers_mut()
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
         output
-            .headers_mut()
-            .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
-        output
     } else {
-        let bytes = match read_upstream_body(response).await {
+        let bytes = match read_upstream_body(upstream, first).await {
             Ok(bytes) => bytes,
-            Err(error) => {
-                debug!(?error, "读取上游响应失败");
-                metric.finish("error", Some(StatusCode::BAD_GATEWAY), None, None);
-                return error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "读取上游响应失败",
-                    "upstream_error",
-                );
-            }
+            Err(failure) => return upstream_error(&failure, &metric),
         };
-        let (output, usage, finish_reason) = parse_upstream_response(&bytes, &model);
+        let (output, usage, finish_reason) = parse_upstream_response(&bytes, model);
         metric.finish(
             "success",
             Some(StatusCode::OK),
@@ -482,19 +491,26 @@ async fn proxy_chat(
     }
 }
 
-async fn read_upstream_body(response: reqwest::Response) -> Result<Vec<u8>, &'static str> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_UPSTREAM_BODY_BYTES as u64)
-    {
-        return Err("上游响应超过大小限制");
+fn body_too_large() -> UpstreamFailure {
+    UpstreamFailure::new(
+        "upstream_body_too_large",
+        "response_body",
+        "上游响应超过大小限制",
+        StatusCode::BAD_GATEWAY,
+    )
+}
+
+async fn read_upstream_body(
+    mut upstream: UpstreamBody,
+    first: Bytes,
+) -> Result<Vec<u8>, UpstreamFailure> {
+    if first.len() > MAX_UPSTREAM_BODY_BYTES {
+        return Err(body_too_large());
     }
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| "读取上游响应失败")?;
+    let mut body = first.to_vec();
+    while let Some(chunk) = upstream.next_chunk().await? {
         if body.len().saturating_add(chunk.len()) > MAX_UPSTREAM_BODY_BYTES {
-            return Err("上游响应超过大小限制");
+            return Err(body_too_large());
         }
         body.extend_from_slice(&chunk);
     }

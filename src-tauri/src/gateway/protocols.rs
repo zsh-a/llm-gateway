@@ -7,15 +7,21 @@ pub(super) struct StreamAccumulator {
     pub(super) buffer: String,
     pub(super) usage: Option<Value>,
     pub(super) finish_reason: Option<String>,
+    pub(super) done: bool,
+    pub(super) has_error: bool,
 }
 
 impl StreamAccumulator {
     pub(super) fn observe(&mut self, bytes: &[u8]) {
         self.buffer.push_str(&String::from_utf8_lossy(bytes));
         if self.buffer.len() > 64 * 1024 {
-            let keep_from = self.buffer.len() - 64 * 1024;
+            let mut keep_from = self.buffer.len() - 64 * 1024;
+            while !self.buffer.is_char_boundary(keep_from) {
+                keep_from += 1;
+            }
             self.buffer = self.buffer.split_off(keep_from);
         }
+        self.buffer = self.buffer.replace("\r\n", "\n");
         let blocks = self.buffer.split("\n\n").collect::<Vec<_>>();
         let trailing = blocks.last().copied().unwrap_or_default().to_string();
         let complete = blocks.len().saturating_sub(1);
@@ -26,12 +32,17 @@ impl StreamAccumulator {
                 .map(str::trim)
                 .collect::<Vec<_>>()
                 .join("\n");
-            if data.is_empty() || data == "[DONE]" {
+            if data == "[DONE]" {
+                self.done = true;
+                continue;
+            }
+            if data.is_empty() {
                 continue;
             }
             let Ok(value) = serde_json::from_str::<Value>(&data) else {
                 continue;
             };
+            self.has_error |= value.get("error").is_some_and(|error| !error.is_null());
             if let Some(usage) = value.get("usage") {
                 self.usage = Some(normalize_usage(usage));
             }

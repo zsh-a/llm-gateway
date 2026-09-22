@@ -5,6 +5,9 @@ export interface ServiceSettings {
   host: string;
   port: number;
   corsOrigin: string;
+  connectTimeoutMs: number;
+  firstByteTimeoutMs: number;
+  idleTimeoutMs: number;
 }
 
 export interface ServiceStatus {

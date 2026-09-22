@@ -196,6 +196,7 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<()> {
                         finish_reason: r.get(9)?,
                         api_key_id: r.get(10)?,
                         usage_json: r.get(11)?,
+                        diagnostics_json: None,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
@@ -318,7 +319,27 @@ mod tests {
             finish_reason: None,
             api_key_id: Some("key-a".into()),
             usage_json: usage.map(|v| v.to_string()),
+            diagnostics_json: None,
         }
+    }
+
+    #[test]
+    fn request_diagnostics_survive_database_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("metrics.sqlite3");
+        let diagnostics = json!({"receivedBytes":123,"error":{"code":"upstream_idle_timeout","stage":"stream_idle"}}).to_string();
+        {
+            let db = Db::open(&path).unwrap();
+            let mut record = metric(0, None);
+            record.status = "error".into();
+            record.diagnostics_json = Some(diagnostics.clone());
+            db.insert_metric(&record).unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.metric_rows(0).unwrap()[0].diagnostics_json.as_ref(),
+            Some(&diagnostics)
+        );
     }
     fn totals(db: &Db) -> UsageAggregate {
         let mut total = UsageAggregate::default();
