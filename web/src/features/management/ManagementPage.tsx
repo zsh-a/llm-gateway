@@ -1,10 +1,12 @@
 import { Tabs } from "@base-ui/react/tabs";
 import { useMutation } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
+import type { ComponentProps } from "react";
 import { useEffect, useRef, useState } from "react";
 import type { GatewayApi } from "../../api";
 import { CopyButton, ResourceContent } from "../../components/common";
 import { Button, ConfirmDialog, Sheet } from "../../components/ui";
+import { useAuth, useChannels, useKeys, useModels } from "../../lib/gateway-queries";
 import { gatewayQueryKeys, queryClient } from "../../lib/query";
 import type {
   ApiKeyInput,
@@ -33,7 +35,9 @@ export function ManagementPage({
   serviceAvailable = true,
 }: {
   initialKeyId?: string;
-  data: DashboardData;
+  data: Pick<DashboardData, "health" | "auth" | "models" | "channels" | "keys"> & {
+    resources: Pick<DashboardData["resources"], "channels" | "keys">;
+  };
   api: GatewayApi;
   onNotice: (message: string, tone?: NoticeTone) => void;
   onNavigate: Navigate;
@@ -293,5 +297,28 @@ export function ManagementPage({
         }}
       />
     </div>
+  );
+}
+
+export function ManagementScreen({
+  health,
+  ...props
+}: Omit<ComponentProps<typeof ManagementPage>, "data"> & { health: DashboardData["health"] }) {
+  const auth = useAuth(props.api, props.serviceAvailable);
+  const models = useModels(props.api, props.serviceAvailable);
+  const channels = useChannels(props.api, props.serviceAvailable);
+  const keys = useKeys(props.api, props.serviceAvailable);
+  return (
+    <ManagementPage
+      {...props}
+      data={{
+        health,
+        auth: auth.data,
+        models: models.data,
+        channels: channels.data,
+        keys: keys.data,
+        resources: { channels: channels.resource, keys: keys.resource },
+      }}
+    />
   );
 }

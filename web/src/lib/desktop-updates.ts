@@ -8,7 +8,7 @@ import {
   type UpdateAction,
   type UpdateStatus,
 } from "../app-updates";
-import { isTauriRuntime } from "../remote-sync";
+import { isTauriRuntime } from "../platform";
 import type { NoticeTone } from "../types";
 import { queryErrorMessage } from "./query";
 

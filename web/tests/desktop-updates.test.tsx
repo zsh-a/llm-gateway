@@ -14,7 +14,7 @@ const bridge = vi.hoisted(() => ({
   run: vi.fn(),
   cancel: vi.fn(),
 }));
-vi.mock("../src/remote-sync", () => ({ isTauriRuntime: bridge.native }));
+vi.mock("../src/platform", () => ({ isTauriRuntime: bridge.native }));
 vi.mock("../src/app-updates", () => ({
   listenUpdateStatus: bridge.listen,
   getUpdateStatus: bridge.status,
@@ -151,15 +151,17 @@ describe("application update UI", () => {
   });
   it("dismissing an available update does not trigger installation", async () => {
     const updates = controller({ phase: "available", version: "1.2.4" });
-    render(<UpdateBanner updates={updates} activeRequests={0} />);
+    render(<UpdateBanner onNavigate={vi.fn()} updates={updates} activeRequests={0} />);
     await userEvent.setup().click(screen.getByRole("button", { name: "稍后提醒" }));
     expect(screen.queryByRole("status")).toBeNull();
     expect(updates.run).not.toHaveBeenCalled();
   });
-  it("opens the update tab from the tray deep link", () => {
+  it("renders the controlled update tab", () => {
     window.history.replaceState(null, "", "#settings?tab=updates");
     render(
       <SettingsPage
+        tab="updates"
+        onTabChange={vi.fn()}
         credentials={{ apiKey: "", adminKey: "" }}
         onCredentials={vi.fn()}
         themePreference="system"

@@ -6,14 +6,17 @@ import {
   updateMessage,
 } from "../features/settings/ApplicationUpdateCard";
 import type { DesktopUpdates } from "../lib/desktop-updates";
+import type { Navigate } from "../types";
 import { Button } from "./ui";
 
 export function UpdateBanner({
   updates,
   activeRequests,
+  onNavigate,
 }: {
   updates: DesktopUpdates;
   activeRequests: number;
+  onNavigate: Navigate;
 }) {
   const [dismissed, setDismissed] = useState("");
   const { status } = updates;
@@ -44,7 +47,7 @@ export function UpdateBanner({
             size="sm"
             variant="ghost"
             onClick={() => {
-              window.location.hash = "#settings?tab=updates";
+              onNavigate("settings", { settingsTab: "updates" });
             }}
           >
             详情

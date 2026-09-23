@@ -26,6 +26,16 @@ impl Fixture {
     }
 
     async fn with_cors(limit: Option<usize>, api_key: &str, cors_origin: &str) -> Self {
+        Self::with_reply(limit, api_key, cors_origin,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\ndata: [DONE]\n\n".into()).await
+    }
+
+    async fn with_reply(
+        limit: Option<usize>,
+        api_key: &str,
+        cors_origin: &str,
+        reply: String,
+    ) -> Self {
         let runtime = tempfile::tempdir().unwrap();
         let mut state = AppState::test_state(runtime.path());
         state.config.proxy_api_key = api_key.into();
@@ -37,17 +47,29 @@ impl Fixture {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let observed = seen.clone();
         let upstream_router = Router::new()
-            .route("/", post(move |Json(body): Json<Value>| {
-                let observed = observed.clone();
-                async move {
-                    let messages = body["messages"].as_array().unwrap();
-                    let reasoning = messages.iter().filter_map(|message| message["reasoning_content"].as_str()).map(str::len).sum();
-                    let tools = messages.iter().filter(|message| message["role"] == "tool").filter_map(|message| message["content"].as_str()).map(str::len).sum();
-                    observed.lock().unwrap().push((reasoning, tools));
-                    ([("content-type", "text/event-stream")],
-                        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\ndata: [DONE]\n\n")
-                }
-            }))
+            .route(
+                "/",
+                post(move |Json(body): Json<Value>| {
+                    let observed = observed.clone();
+                    let reply = reply.clone();
+                    async move {
+                        let messages = body["messages"].as_array().unwrap();
+                        let reasoning = messages
+                            .iter()
+                            .filter_map(|message| message["reasoning_content"].as_str())
+                            .map(str::len)
+                            .sum();
+                        let tools = messages
+                            .iter()
+                            .filter(|message| message["role"] == "tool")
+                            .filter_map(|message| message["content"].as_str())
+                            .map(str::len)
+                            .sum();
+                        observed.lock().unwrap().push((reasoning, tools));
+                        ([("content-type", "text/event-stream")], reply)
+                    }
+                }),
+            )
             .layer(DefaultBodyLimit::disable());
         let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         state.test_upstream(&format!(
@@ -120,6 +142,98 @@ impl Drop for Fixture {
         self.gateway.abort();
         self.upstream.abort();
     }
+}
+
+#[tokio::test]
+async fn tool_calls_survive_streaming_chat_aggregation_and_responses_conversion() {
+    let raw = super::super::protocol_tests::tool_stream("\r\n");
+    let fixture = Fixture::with_reply(None, "", "", raw.clone()).await;
+    let streamed = fixture
+        .send(
+            CHAT,
+            json!({"model":"mimo/test","messages":[],"stream":true}).to_string(),
+        )
+        .await;
+    assert_eq!(streamed.status(), StatusCode::OK);
+    assert_eq!(streamed.text().await.unwrap(), raw);
+    let chat = fixture
+        .send(
+            CHAT,
+            json!({"model":"mimo/test","messages":[],"stream":false}).to_string(),
+        )
+        .await
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        chat["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+        "{\"city\":\"上海\"}"
+    );
+    assert_eq!(chat["choices"].as_array().unwrap().len(), 2);
+    let response = fixture
+        .send(
+            RESPONSES,
+            json!({"model":"mimo/test","input":"weather","stream":false}).to_string(),
+        )
+        .await;
+    assert!(response.headers().contains_key("x-request-id"));
+    let response = response.json::<Value>().await.unwrap();
+    assert_eq!(response["object"], "response");
+    assert_eq!(response["output"][1]["type"], "function_call");
+    assert_eq!(response["output"][1]["call_id"], "call-weather");
+    assert_eq!(response["usage"]["total_tokens"], 7);
+    assert_eq!(
+        fixture.metrics("/metrics/summary", None).await["tokens"]["totalTokens"],
+        21
+    );
+}
+
+#[tokio::test]
+async fn inference_limits_do_not_block_models_or_usage_and_rejections_do_not_consume_slots() {
+    let fixture = Fixture::new(None).await;
+    let created = super::super::management::execute(
+        &fixture.state,
+        ManagementRequest::CreateKey {
+            body: json!({"name":"limited","rpmLimit":1}),
+        },
+    )
+    .await
+    .unwrap();
+    let secret = created["secret"].as_str().unwrap();
+    let send = |model: &str| {
+        fixture
+            .client
+            .post(format!("{}{CHAT}", fixture.base_url))
+            .bearer_auth(secret)
+            .json(&json!({"model":model,"messages":[],"stream":false}))
+    };
+    assert_eq!(
+        send("unknown/test").send().await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        send("mimo/test").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        send("mimo/test").send().await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        fixture
+            .client
+            .get(format!("{}/v1/models", fixture.base_url))
+            .bearer_auth(secret)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        fixture.metrics("/metrics/summary", Some(secret)).await["requests"],
+        1
+    );
 }
 
 #[tokio::test]
@@ -300,13 +414,12 @@ async fn cors_actual_requests_keep_authentication_and_support_models_and_streami
 async fn desktop_management_is_independent_of_business_keys_and_http_cannot_claim_it() {
     let fixture = Fixture::new(None).await;
     let created = super::super::management::request(
-        fixture.state.clone(),
-        "POST".into(),
-        "/admin/keys".into(),
-        Some(json!({"name":"Desktop client"})),
+        &fixture.state,
+        ManagementRequest::CreateKey {
+            body: json!({"name":"Desktop client"}),
+        },
     )
-    .await
-    .unwrap();
+    .await;
     let created = serde_json::to_value(created).unwrap();
     assert_eq!(created["status"], 200);
     let secret = created["body"]["secret"].as_str().unwrap();
@@ -319,13 +432,17 @@ async fn desktop_management_is_independent_of_business_keys_and_http_cannot_clai
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     for path in ["/admin/keys", "/admin/models", "/admin/metrics/summary"] {
         let response = super::super::management::request(
-            fixture.state.clone(),
-            "GET".into(),
-            path.into(),
-            None,
+            &fixture.state,
+            match path {
+                "/admin/keys" => ManagementRequest::ListKeys {},
+                "/admin/models" => ManagementRequest::Models {},
+                _ => ManagementRequest::Metrics {
+                    query: serde_json::from_value(json!({})).unwrap(),
+                    view: MetricView::Summary,
+                },
+            },
         )
-        .await
-        .unwrap();
+        .await;
         let response = serde_json::to_value(response).unwrap();
         assert_eq!(response["status"], 200);
         assert!(!response.to_string().contains(secret));
@@ -339,33 +456,12 @@ async fn desktop_management_is_independent_of_business_keys_and_http_cannot_clai
             .unwrap();
         assert_eq!(public.status(), StatusCode::UNAUTHORIZED);
     }
-    for path in [
-        "/v1/chat/completions",
-        "http://example.com/admin/keys",
-        "/admin/keys/../metrics/summary",
+    for request in [
+        json!({"operation":"chat"}),
+        json!({"operation":"list_keys","path":"http://example.com/admin/keys"}),
     ] {
-        assert!(
-            super::super::management::request(
-                fixture.state.clone(),
-                "POST".into(),
-                path.into(),
-                None
-            )
-            .await
-            .is_err()
-        );
+        assert!(serde_json::from_value::<ManagementRequest>(request).is_err());
     }
-    let state = AppState::test_state(fixture._runtime.path());
-    let response = router(state)
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/admin/metrics/summary")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
@@ -570,8 +666,8 @@ async fn legacy_unscoped_metrics_remain_visible_without_exposing_managed_keys() 
                 .db
                 .insert_metric(&MetricRecord {
                     id: id.into(),
-                    started_at: super::super::auth::now_ms(),
-                    completed_at: super::super::auth::now_ms(),
+                    started_at: now_ms(),
+                    completed_at: now_ms(),
                     protocol: "chat".into(),
                     provider: Some("mimo".into()),
                     channel_id: Some("test".into()),

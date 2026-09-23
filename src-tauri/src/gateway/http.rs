@@ -1,17 +1,16 @@
-use super::management::AdminAccess;
+use super::management::ManagementRequest;
 // HTTP routing and request handlers for the gateway.
-use super::auth::{
-    GatewayError, database_error, error_response, hash_secret, now_ms, require_public_auth,
-    require_public_auth_identity, string_array,
-};
-use super::metrics::{MetricQuery, MetricView, metrics_response};
-use super::protocols::{
-    build_upstream_body, chat_to_response, parse_upstream_response, responses_to_chat,
-};
+use super::auth::{require_admin, require_public_identity};
+use super::error::GatewayError;
+use super::metrics::{MetricQuery, MetricScope, MetricView};
+use super::protocols::{Protocol, build_upstream_body, responses_to_chat};
 use super::upstream::{UpstreamBody, UpstreamFailure};
+#[cfg(test)]
+use super::util::now_ms;
 use super::{AppState, MetricContext, Route};
+use super::{policy, routing};
 use crate::config::{Config, parse_cors_origins};
-use crate::db::{ApiKeyRecord, ChannelRecord, Db};
+
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -20,7 +19,6 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
-use base64::Engine;
 use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::time::Duration;
@@ -176,11 +174,11 @@ async fn health() -> impl IntoResponse {
 }
 
 async fn health_auth(State(state): State<AppState>) -> impl IntoResponse {
-    Json(state.auth_status())
+    Json(state.auth.status(&state.config))
 }
 
 async fn health_ready(State(state): State<AppState>) -> Response {
-    let auth = state.auth_status();
+    let auth = state.auth.status(&state.config);
     let models = state.models().await;
     let authenticated = auth.get("ready").and_then(Value::as_bool).unwrap_or(false);
     let ready = authenticated && !models.is_empty();
@@ -209,23 +207,23 @@ async fn capabilities(State(state): State<AppState>) -> impl IntoResponse {
         "object": "llm-gateway.capabilities",
         "version": 1,
         "service": "llm-gateway",
-        "authRequired": state.requires_authentication(),
+        "authRequired": !state.config.proxy_api_key.is_empty() || state.db.count_api_keys().map(|count| count > 0).unwrap_or(true),
         "limits": { "maxBodyBytes": state.config.max_body_bytes },
         "protocols": {
             "chatCompletions": { "path": "/v1/chat/completions", "stream": true, "tools": true, "reasoningContent": true, "usageChunk": true },
             "responses": { "path": "/v1/responses", "stream": true, "reasoningText": true, "functionCalls": true }
         },
         "providers": [
-            { "id": "mimo", "name": "MiMo", "authenticated": state.has_auth("mimo") },
-            { "id": "workbuddy", "name": "WorkBuddy", "authenticated": state.has_auth("workbuddy") }
+            { "id": "mimo", "name": "MiMo", "authenticated": state.auth.contains("mimo") },
+            { "id": "workbuddy", "name": "WorkBuddy", "authenticated": state.auth.contains("workbuddy") }
         ],
         "models": models
     }))
 }
 
 async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_public_auth(&state, &headers) {
-        return *response;
+    if let Err(response) = require_public_identity(&state, &headers) {
+        return response.into_response();
     }
     let data = state.models().await;
     Json(json!({ "object": "list", "data": data })).into_response()
@@ -240,7 +238,7 @@ async fn chat_completions(
         Ok(body) => body,
         Err(response) => return *response,
     };
-    proxy_chat(state, headers, &mut body, false).await
+    proxy_chat(state, headers, &mut body, Protocol::Chat).await
 }
 
 async fn responses(
@@ -252,39 +250,14 @@ async fn responses(
         Ok(body) => body,
         Err(response) => return *response,
     };
-    let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let mut chat = responses_to_chat(&body);
-    let response = proxy_chat(state, headers, &mut chat, true).await;
-    if stream || !response.status().is_success() {
-        return response;
-    }
-    let request_id = response.headers().get("x-request-id").cloned();
-    let bytes = match axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024).await {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                "读取上游响应失败",
-                "upstream_error",
-            );
-        }
-    };
-    let chat_body: Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}));
-    let mut output = Json(chat_to_response(
-        &chat_body,
-        body.get("model").and_then(Value::as_str).unwrap_or(""),
-    ))
-    .into_response();
-    if let Some(id) = request_id {
-        output.headers_mut().insert("x-request-id", id);
-    }
-    output
+    proxy_chat(state, headers, &mut chat, Protocol::Responses).await
 }
 
 fn inference_body(
     body: Result<Json<Value>, JsonRejection>,
     max_body_bytes: usize,
-) -> Result<Value, GatewayError> {
+) -> Result<Value, Box<Response>> {
     body.map(|Json(value)| value).map_err(|rejection| {
         if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
             Box::new((StatusCode::PAYLOAD_TOO_LARGE, Json(json!({
@@ -307,11 +280,11 @@ async fn proxy_chat(
     state: AppState,
     headers: HeaderMap,
     body: &mut Value,
-    responses_mode: bool,
+    protocol: Protocol,
 ) -> Response {
-    let identity = match require_public_auth_identity(&state, &headers) {
+    let identity = match require_public_identity(&state, &headers) {
         Ok(identity) => identity,
-        Err(response) => return *response,
+        Err(response) => return response.into_response(),
     };
     let model = body
         .get("model")
@@ -325,23 +298,30 @@ async fn proxy_chat(
             }
         })
         .to_string();
-    if let Err(response) = state.authorize_model(&identity, &model) {
-        return *response;
+    if let Err(response) = policy::authorize_model(&identity, &model) {
+        return response.into_response();
     }
-    let routes = match state.select_routes(&model) {
+    let routes = match state
+        .db
+        .list_channels()
+        .map_err(GatewayError::database)
+        .and_then(|channels| routing::select_routes(channels, &state.auth, &model))
+    {
         Ok(routes) => routes,
-        Err(response) => return *response,
+        Err(response) => return response.into_response(),
     };
-    let Some(metric) = state.metric(if responses_mode { "responses" } else { "chat" }, &identity)
-    else {
-        return error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "网关正在停止，请稍后重试",
-            "service_stopping",
-        );
+    let metric = match MetricContext::begin(
+        &state.db,
+        &state.activity,
+        state.config.metrics_max_records,
+        protocol.name(),
+        &identity,
+    ) {
+        Ok(metric) => metric,
+        Err(error) => return error.into_response(),
     };
     let request_id = metric.id();
-    let mut response = proxy_upstream(state, body, responses_mode, &model, routes, metric).await;
+    let mut response = proxy_upstream(state, body, protocol, &model, routes, metric).await;
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         response.headers_mut().insert("x-request-id", value);
     }
@@ -356,7 +336,7 @@ fn upstream_error(failure: &UpstreamFailure, metric: &MetricContext) -> Response
 async fn proxy_upstream(
     state: AppState,
     body: &Value,
-    responses_mode: bool,
+    protocol: Protocol,
     model: &str,
     routes: Vec<Route>,
     metric: MetricContext,
@@ -370,8 +350,8 @@ async fn proxy_upstream(
     );
     for (index, route) in routes.iter().enumerate() {
         metric.set_route(route, model);
-        let upstream_body = build_upstream_body(body, route, responses_mode);
-        let auth_headers = state.auth_headers(&route.auth_ref).unwrap_or_default();
+        let upstream_body = build_upstream_body(body, route, protocol);
+        let auth_headers = state.auth.headers(&route.auth_ref).unwrap_or_default();
         // The first-byte deadline spans headers and the first nonempty body chunk.
         // There is deliberately no reqwest total timeout on a streaming request.
         let first_deadline =
@@ -430,7 +410,13 @@ async fn proxy_upstream(
         .get(header::CONTENT_TYPE)
         .cloned()
         .unwrap_or_else(|| HeaderValue::from_static("text/event-stream"));
-    let mut upstream = UpstreamBody::new(response, first_deadline, &state.config, metric.clone());
+    let mut upstream = UpstreamBody::new(
+        response,
+        first_deadline,
+        &state.config,
+        metric.clone(),
+        !stream,
+    );
     // Delay downstream response headers until data arrives so a stalled first body
     // can still return HTTP 504 rather than a misleading HTTP 200.
     let first = match upstream.next_chunk().await {
@@ -476,18 +462,24 @@ async fn proxy_upstream(
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
         output
     } else {
-        let bytes = match read_upstream_body(upstream, first).await {
-            Ok(bytes) => bytes,
+        loop {
+            match upstream.next_chunk().await {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(failure) => return upstream_error(&failure, &metric),
+            }
+        }
+        let (output, usage, finish_reason) = match upstream.completion(model) {
+            Ok(result) => result,
             Err(failure) => return upstream_error(&failure, &metric),
         };
-        let (output, usage, finish_reason) = parse_upstream_response(&bytes, model);
         metric.finish(
             "success",
             Some(StatusCode::OK),
             finish_reason.as_deref(),
             usage.as_ref(),
         );
-        Json(output).into_response()
+        Json(protocol.render(output, model)).into_response()
     }
 }
 
@@ -500,230 +492,53 @@ fn body_too_large() -> UpstreamFailure {
     )
 }
 
-async fn read_upstream_body(
-    mut upstream: UpstreamBody,
-    first: Bytes,
-) -> Result<Vec<u8>, UpstreamFailure> {
-    if first.len() > MAX_UPSTREAM_BODY_BYTES {
-        return Err(body_too_large());
+async fn managed(state: AppState, request: ManagementRequest) -> Response {
+    match super::management::execute(&state, request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
     }
-    let mut body = first.to_vec();
-    while let Some(chunk) = upstream.next_chunk().await? {
-        if body.len().saturating_add(chunk.len()) > MAX_UPSTREAM_BODY_BYTES {
-            return Err(body_too_large());
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
-
 async fn list_channels(State(state): State<AppState>, _admin: AdminAccess) -> Response {
-    match state.db.list_channels() {
-        Ok(data) => Json(json!({ "object": "llm-gateway.channels", "data": data })).into_response(),
-        Err(error) => database_error(error),
-    }
+    managed(state, ManagementRequest::ListChannels {}).await
 }
-
 async fn save_channel(
     State(state): State<AppState>,
     _admin: AdminAccess,
-    Json(value): Json<Value>,
+    Json(body): Json<Value>,
 ) -> Response {
-    let Some(object) = value.as_object() else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "渠道配置必须是 JSON 对象",
-            "invalid_request_error",
-        );
-    };
-    let id = object
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim();
-    let provider = object
-        .get("providerId")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim();
-    if id.is_empty() || !["mimo", "workbuddy"].contains(&provider) {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "渠道需要有效的 id 和 providerId",
-            "invalid_request_error",
-        );
-    }
-    let channel = ChannelRecord {
-        id: id.into(),
-        name: object
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or(id)
-            .into(),
-        provider_id: provider.into(),
-        auth_ref: object
-            .get("authRef")
-            .and_then(Value::as_str)
-            .unwrap_or(provider)
-            .into(),
-        upstream_url: object
-            .get("upstreamUrl")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        enabled: object
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        priority: object.get("priority").and_then(Value::as_i64).unwrap_or(0),
-        weight: object
-            .get("weight")
-            .and_then(Value::as_i64)
-            .unwrap_or(1)
-            .max(1),
-        model_mappings: object
-            .get("modelMappings")
-            .cloned()
-            .unwrap_or_else(|| json!({})),
-    };
-    match state.db.upsert_channel(&channel) {
-        Ok(()) => Json(json!({ "object": "llm-gateway.channel", "data": channel })).into_response(),
-        Err(error) => database_error(error),
-    }
+    managed(state, ManagementRequest::SaveChannel { body }).await
 }
-
 async fn delete_channel(
     State(state): State<AppState>,
     _admin: AdminAccess,
     Path(id): Path<String>,
 ) -> Response {
-    match state.db.delete_channel(&id) {
-        Ok(true) => {
-            Json(json!({ "object": "llm-gateway.channel.deleted", "id": id })).into_response()
-        }
-        Ok(false) => error_response(StatusCode::NOT_FOUND, "渠道不存在", "invalid_request_error"),
-        Err(error) => database_error(error),
-    }
+    managed(state, ManagementRequest::DeleteChannel { id }).await
 }
-
 async fn list_keys(State(state): State<AppState>, _admin: AdminAccess) -> Response {
-    match state.db.list_api_keys() {
-        Ok(keys) => Json(json!({ "object": "llm-gateway.api_keys", "data": keys.into_iter().map(public_key).collect::<Vec<_>>() })).into_response(),
-        Err(error) => database_error(error),
-    }
+    managed(state, ManagementRequest::ListKeys {}).await
 }
-
 async fn create_key(
     State(state): State<AppState>,
     _admin: AdminAccess,
-    Json(value): Json<Value>,
+    Json(body): Json<Value>,
 ) -> Response {
-    let object = value.as_object().cloned().unwrap_or_default();
-    let name = object
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("未命名 Key")
-        .trim();
-    let secret = format!(
-        "sk-gw-{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 24]>())
-    );
-    let key = ApiKeyRecord {
-        id: Db::new_id(),
-        name: name.into(),
-        prefix: secret.chars().take(10).collect(),
-        hash: hash_secret(&secret),
-        enabled: true,
-        created_at: now_ms(),
-        expires_at: object.get("expiresAt").and_then(Value::as_i64),
-        allowed_models: string_array(object.get("allowedModels")),
-        rpm_limit: object.get("rpmLimit").and_then(Value::as_i64),
-        tpm_limit: object.get("tpmLimit").and_then(Value::as_i64),
-        quota_tokens: object.get("quotaTokens").and_then(Value::as_i64),
-        used_tokens: 0,
-        revoked_at: None,
-        last_used_at: None,
-    };
-    match state.db.upsert_api_key(&key) {
-        Ok(()) => Json(json!({
-            "object": "llm-gateway.api_key",
-            "data": public_key(key),
-            "secret": secret,
-            "warning": "secret 只在本次响应中返回，请立即保存"
-        }))
-        .into_response(),
-        Err(error) => database_error(error),
-    }
+    managed(state, ManagementRequest::CreateKey { body }).await
 }
-
 async fn update_key(
     State(state): State<AppState>,
     _admin: AdminAccess,
     Path(id): Path<String>,
-    Json(value): Json<Value>,
+    Json(body): Json<Value>,
 ) -> Response {
-    let Some(mut key) = state
-        .db
-        .list_api_keys()
-        .ok()
-        .and_then(|keys| keys.into_iter().find(|key| key.id == id))
-    else {
-        return error_response(
-            StatusCode::NOT_FOUND,
-            "API Key 不存在",
-            "invalid_request_error",
-        );
-    };
-    if key.revoked_at.is_some() {
-        return error_response(
-            StatusCode::CONFLICT,
-            "已撤销的 Key 不可恢复或修改",
-            "invalid_request_error",
-        );
-    }
-    if value.get("expiresAt").is_some() {
-        key.expires_at = value.get("expiresAt").and_then(Value::as_i64);
-    }
-    if let Some(name) = value.get("name").and_then(Value::as_str) {
-        key.name = name.into();
-    }
-    if let Some(enabled) = value.get("enabled").and_then(Value::as_bool) {
-        key.enabled = enabled;
-    }
-    if value.get("allowedModels").is_some() {
-        key.allowed_models = string_array(value.get("allowedModels"));
-    }
-    for (field, target) in [
-        ("rpmLimit", &mut key.rpm_limit),
-        ("tpmLimit", &mut key.tpm_limit),
-        ("quotaTokens", &mut key.quota_tokens),
-    ] {
-        if value.get(field).is_some() {
-            *target = value.get(field).and_then(Value::as_i64);
-        }
-    }
-    match state.db.upsert_api_key(&key) {
-        Ok(()) => Json(json!({ "object": "llm-gateway.api_key", "data": public_key(key) }))
-            .into_response(),
-        Err(error) => database_error(error),
-    }
+    managed(state, ManagementRequest::UpdateKey { id, body }).await
 }
-
 async fn revoke_key(
     State(state): State<AppState>,
     _admin: AdminAccess,
     Path(id): Path<String>,
 ) -> Response {
-    match state.db.delete_api_key(&id) {
-        Ok(true) => {
-            Json(json!({ "object": "llm-gateway.api_key.revoked", "id": id })).into_response()
-        }
-        Ok(false) => error_response(
-            StatusCode::NOT_FOUND,
-            "API Key 不存在",
-            "invalid_request_error",
-        ),
-        Err(error) => database_error(error),
-    }
+    managed(state, ManagementRequest::RevokeKey { id }).await
 }
 
 async fn metrics_summary(
@@ -772,10 +587,49 @@ async fn admin_metrics_requests(
     metrics_response(&state, &headers, &query, true, MetricView::Requests).await
 }
 
-pub(super) fn public_key(key: ApiKeyRecord) -> Value {
-    json!({ "id": key.id, "name": key.name, "prefix": key.prefix, "enabled": key.enabled, "createdAt": key.created_at, "expiresAt": key.expires_at, "allowedModels": key.allowed_models, "rpmLimit": key.rpm_limit, "tpmLimit": key.tpm_limit, "quotaTokens": key.quota_tokens, "usedTokens": key.used_tokens, "revokedAt": key.revoked_at, "lastUsedAt": key.last_used_at, "remainingTokens": key.quota_tokens.map(|quota| (quota-key.used_tokens).max(0)) })
+async fn admin_models(State(state): State<AppState>, _admin: AdminAccess) -> Response {
+    managed(state, ManagementRequest::Models {}).await
 }
 
-async fn admin_models(State(state): State<AppState>, _admin: AdminAccess) -> Response {
-    Json(json!({"object":"list","data":state.models().await})).into_response()
+struct AdminAccess;
+impl axum::extract::FromRequestParts<AppState> for AdminAccess {
+    type Rejection = Response;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Response> {
+        require_admin(state, &parts.headers).map_err(IntoResponse::into_response)?;
+        Ok(Self)
+    }
+}
+
+async fn metrics_response(
+    state: &AppState,
+    headers: &HeaderMap,
+    query: &MetricQuery,
+    admin: bool,
+    view: MetricView,
+) -> Response {
+    let scope = if admin {
+        MetricScope::Admin
+    } else {
+        match require_public_identity(state, headers) {
+            Ok(identity) => MetricScope::Identity(identity),
+            Err(error) => return error.into_response(),
+        }
+    };
+    match super::metrics::query_metrics(state, query, scope, view) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+impl IntoResponse for GatewayError {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::from_u16(self.status()).expect("gateway error status"),
+            Json(self.payload()),
+        )
+            .into_response()
+    }
 }

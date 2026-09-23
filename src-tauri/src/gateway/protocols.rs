@@ -1,70 +1,37 @@
-use super::{Route, now_ms};
-use crate::db::Db;
+mod responses;
+mod stream;
+pub(super) use responses::{chat_to_response, responses_to_chat};
+pub(super) use stream::StreamAccumulator;
+
+use super::routing::Route;
 use serde_json::{Map, Value, json};
 
-#[derive(Default)]
-pub(super) struct StreamAccumulator {
-    pub(super) buffer: String,
-    pub(super) usage: Option<Value>,
-    pub(super) finish_reason: Option<String>,
-    pub(super) done: bool,
-    pub(super) has_error: bool,
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Protocol {
+    Chat,
+    Responses,
 }
-
-impl StreamAccumulator {
-    pub(super) fn observe(&mut self, bytes: &[u8]) {
-        self.buffer.push_str(&String::from_utf8_lossy(bytes));
-        if self.buffer.len() > 64 * 1024 {
-            let mut keep_from = self.buffer.len() - 64 * 1024;
-            while !self.buffer.is_char_boundary(keep_from) {
-                keep_from += 1;
-            }
-            self.buffer = self.buffer.split_off(keep_from);
+impl Protocol {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Responses => "responses",
         }
-        self.buffer = self.buffer.replace("\r\n", "\n");
-        let blocks = self.buffer.split("\n\n").collect::<Vec<_>>();
-        let trailing = blocks.last().copied().unwrap_or_default().to_string();
-        let complete = blocks.len().saturating_sub(1);
-        for block in blocks.into_iter().take(complete) {
-            let data = block
-                .lines()
-                .filter_map(|line| line.strip_prefix("data:"))
-                .map(str::trim)
-                .collect::<Vec<_>>()
-                .join("\n");
-            if data == "[DONE]" {
-                self.done = true;
-                continue;
-            }
-            if data.is_empty() {
-                continue;
-            }
-            let Ok(value) = serde_json::from_str::<Value>(&data) else {
-                continue;
-            };
-            self.has_error |= value.get("error").is_some_and(|error| !error.is_null());
-            if let Some(usage) = value.get("usage") {
-                self.usage = Some(normalize_usage(usage));
-            }
-            self.finish_reason = value
-                .get("choices")
-                .and_then(Value::as_array)
-                .and_then(|items| items.first())
-                .and_then(|choice| choice.get("finish_reason"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| self.finish_reason.clone());
+    }
+    pub fn render(self, chat: Value, model: &str) -> Value {
+        match self {
+            Self::Chat => chat,
+            Self::Responses => chat_to_response(&chat, model),
         }
-        self.buffer = trailing;
     }
 }
 
-pub(super) fn build_upstream_body(body: &Value, route: &Route, responses_mode: bool) -> Value {
+pub(super) fn build_upstream_body(body: &Value, route: &Route, protocol: Protocol) -> Value {
     let mut output = body.clone();
     if let Some(object) = output.as_object_mut() {
         object.insert("model".into(), Value::String(route.upstream_model.clone()));
         object.insert("stream".into(), Value::Bool(true));
-        if responses_mode {
+        if protocol == Protocol::Responses {
             object.remove("input");
             object.remove("instructions");
             if let Some(max_output_tokens) = object.remove("max_output_tokens") {
@@ -93,155 +60,22 @@ pub(super) fn build_upstream_body(body: &Value, route: &Route, responses_mode: b
     output
 }
 
-pub(super) fn responses_to_chat(body: &Value) -> Value {
-    let mut chat = Map::new();
-    if let Some(model) = body.get("model") {
-        chat.insert("model".into(), model.clone());
-    }
-    if let Some(stream) = body.get("stream") {
-        chat.insert("stream".into(), stream.clone());
-    }
-    let mut messages = Vec::new();
-    if let Some(instructions) = body.get("instructions").and_then(Value::as_str) {
-        messages.push(json!({ "role": "system", "content": instructions }));
-    }
-    if let Some(input) = body.get("input") {
-        if let Some(text) = input.as_str() {
-            messages.push(json!({ "role": "user", "content": text }));
-        } else if let Some(items) = input.as_array() {
-            for item in items {
-                if item.get("role").is_some() {
-                    messages.push(json!({
-                        "role": item.get("role").cloned().unwrap_or_else(|| json!("user")),
-                        "content": item.get("content").cloned().unwrap_or_else(|| json!(""))
-                    }));
-                }
-            }
-        }
-    }
-    chat.insert("messages".into(), Value::Array(messages));
-    for key in [
-        "temperature",
-        "top_p",
-        "max_output_tokens",
-        "reasoning_effort",
-        "tools",
-        "tool_choice",
-    ] {
-        if let Some(value) = body.get(key) {
-            chat.insert(key.into(), value.clone());
-        }
-    }
-    Value::Object(chat)
-}
-
-pub(super) fn chat_to_response(body: &Value, model: &str) -> Value {
-    let choice = body
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first());
-    let message = choice
-        .and_then(|choice| choice.get("message"))
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let text = message
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    json!({
-        "id": body.get("id").cloned().unwrap_or_else(|| json!(format!("resp_{}", Db::new_id()))),
-        "object": "response",
-        "created_at": now_ms() / 1000,
-        "model": if model.is_empty() { body.get("model").and_then(Value::as_str).unwrap_or("default") } else { model },
-        "output": [{
-            "type": "message",
-            "id": format!("msg_{}", Db::new_id()),
-            "role": "assistant",
-            "content": [{ "type": "output_text", "text": text, "annotations": [] }]
-        }],
-        "status": "completed",
-        "usage": body.get("usage").cloned().unwrap_or_else(|| json!({}))
-    })
-}
-
-pub(super) fn parse_upstream_response(
+pub(super) fn parse_json_response(
     bytes: &[u8],
     model: &str,
-) -> (Value, Option<Value>, Option<String>) {
-    if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
-        if value.get("choices").is_some() {
-            return (
-                normalize_chat_response(value.clone(), model),
-                value.get("usage").cloned(),
-                value
-                    .get("choices")
-                    .and_then(Value::as_array)
-                    .and_then(|items| items.first())
-                    .and_then(|choice| choice.get("finish_reason"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            );
-        }
-    }
-    let text = String::from_utf8_lossy(bytes);
-    let mut id = format!("chatcmpl-{}", Db::new_id());
-    let mut content = String::new();
-    let mut reasoning = String::new();
-    let mut finish_reason = None;
-    let mut usage = None;
-    for block in text.split("\n\n") {
-        let data = block
-            .lines()
-            .filter_map(|line| line.strip_prefix("data:"))
-            .map(str::trim)
-            .collect::<Vec<_>>()
-            .join("\n");
-        if data.is_empty() || data == "[DONE]" {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(&data) else {
-            continue;
-        };
-        if let Some(value_id) = value.get("id").and_then(Value::as_str) {
-            id = value_id.to_string();
-        }
-        if let Some(choice) = value
-            .get("choices")
-            .and_then(Value::as_array)
-            .and_then(|items| items.first())
-        {
-            if let Some(delta) = choice.get("delta") {
-                append_content(&mut content, delta.get("content"));
-                append_content(
-                    &mut reasoning,
-                    delta
-                        .get("reasoning_content")
-                        .or_else(|| delta.get("reasoning")),
-                );
-            }
-            finish_reason = choice
-                .get("finish_reason")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or(finish_reason);
-        }
-        if let Some(value_usage) = value.get("usage") {
-            usage = Some(normalize_usage(value_usage));
-        }
-    }
-    let mut message = json!({ "role": "assistant", "content": content });
-    if !reasoning.is_empty() {
-        message["reasoning_content"] = Value::String(reasoning);
-    }
-    let output = json!({
-        "id": id,
-        "object": "chat.completion",
-        "created": now_ms() / 1000,
-        "model": model,
-        "choices": [{ "index": 0, "message": message, "finish_reason": finish_reason.clone().unwrap_or_else(|| "stop".into()) }],
-        "usage": usage.clone().unwrap_or_else(|| json!({}))
-    });
-    (output, usage, finish_reason)
+) -> Option<(Value, Option<Value>, Option<String>)> {
+    let value: Value = serde_json::from_slice(bytes).ok()?;
+    value.get("choices")?.as_array()?;
+    let usage = value
+        .get("usage")
+        .filter(|usage| usage.is_object())
+        .map(normalize_usage);
+    let reason = value["choices"]
+        .as_array()?
+        .iter()
+        .find_map(|choice| choice["finish_reason"].as_str())
+        .map(str::to_string);
+    Some((normalize_chat_response(value, model), usage, reason))
 }
 
 fn normalize_chat_response(mut value: Value, model: &str) -> Value {

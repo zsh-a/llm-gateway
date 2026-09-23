@@ -1,3 +1,5 @@
+mod channels;
+mod limits;
 pub mod usage;
 
 use anyhow::Context;
@@ -88,10 +90,17 @@ impl Db {
         }
         let mut connection = Connection::open(path)
             .with_context(|| format!("无法打开 SQLite 数据库 {}", path.display()))?;
+        let existing_channels: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='channels')",
+            [],
+            |row| row.get(0),
+        )?;
+        let existing_metadata: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='gateway_metadata')", [], |row| row.get(0))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "busy_timeout", 5000_i64)?;
         connection.execute_batch(
             "
+            CREATE TABLE IF NOT EXISTS gateway_metadata (name TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS channels (
               id TEXT PRIMARY KEY,
               name TEXT NOT NULL,
@@ -137,7 +146,15 @@ impl Db {
               ON request_metrics(model);
             ",
         )?;
+        if existing_channels && !existing_metadata {
+            // Upgrades preserve intentionally empty channel configurations too.
+            connection.execute(
+                "INSERT OR IGNORE INTO gateway_metadata VALUES('channels_initialized','1')",
+                [],
+            )?;
+        }
         usage::migrate(&mut connection)?;
+        limits::migrate(&connection)?;
         let has_diagnostics = connection
             .prepare("PRAGMA table_info(request_metrics)")?
             .query_map([], |row| row.get::<_, String>(1))?
@@ -151,22 +168,6 @@ impl Db {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
-    }
-
-    pub fn seed_channels(&self, path: &Path) -> anyhow::Result<()> {
-        if !self.list_channels()?.is_empty() || !path.is_file() {
-            return Ok(());
-        }
-        let raw = std::fs::read_to_string(path)?;
-        let value: serde_json::Value = serde_json::from_str(&raw)?;
-        if let Some(items) = value.get("channels").and_then(|value| value.as_array()) {
-            for item in items {
-                if let Ok(channel) = serde_json::from_value::<ChannelRecord>(item.clone()) {
-                    self.upsert_channel(&channel)?;
-                }
-            }
-        }
-        Ok(())
     }
 
     pub fn seed_api_keys(&self, path: &Path) -> anyhow::Result<()> {
@@ -226,27 +227,7 @@ impl Db {
 
     pub fn upsert_channel(&self, channel: &ChannelRecord) -> anyhow::Result<()> {
         let connection = self.connection.lock().expect("sqlite mutex poisoned");
-        connection.execute(
-            "INSERT INTO channels
-             (id,name,provider_id,auth_ref,upstream_url,enabled,priority,weight,model_mappings)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
-             ON CONFLICT(id) DO UPDATE SET
-             name=excluded.name,provider_id=excluded.provider_id,auth_ref=excluded.auth_ref,
-             upstream_url=excluded.upstream_url,enabled=excluded.enabled,priority=excluded.priority,
-             weight=excluded.weight,model_mappings=excluded.model_mappings",
-            params![
-                channel.id,
-                channel.name,
-                channel.provider_id,
-                channel.auth_ref,
-                channel.upstream_url,
-                i64::from(channel.enabled),
-                channel.priority,
-                channel.weight.max(1),
-                serde_json::to_string(&channel.model_mappings)?,
-            ],
-        )?;
-        Ok(())
+        channels::save(&connection, channel)
     }
 
     pub fn delete_channel(&self, id: &str) -> anyhow::Result<bool> {
@@ -365,6 +346,7 @@ impl Db {
         if !usage::account(&tx, metric, true)? {
             return Ok(());
         }
+        limits::settle(&tx, metric)?;
         tx.execute(
             "INSERT OR REPLACE INTO request_metrics
              (id,started_at,completed_at,protocol,provider,channel_id,model,status,status_code,finish_reason,api_key_id,usage_json,diagnostics_json)

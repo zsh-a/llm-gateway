@@ -1,4 +1,6 @@
 import { Activity, ArrowUpRight, Database, Gauge, ShieldCheck, TrendingUp } from "lucide-react";
+import type { ComponentProps } from "react";
+import type { GatewayApi } from "../../api";
 import {
   CopyButton,
   EmptyState,
@@ -10,7 +12,9 @@ import {
 import { ModelPicker } from "../../components/ModelPicker";
 import { Button, Card, CardContent, CardHeader, CardTitle } from "../../components/ui";
 import { RequestTable } from "../../components/usage";
+import { emptySummary } from "../../lib/constants";
 import { formatCompact, formatDuration, formatNumber, formatTime } from "../../lib/format";
+import { useAuth, useMetrics, useModels } from "../../lib/gateway-queries";
 import type { DashboardData, Navigate } from "../../types";
 
 export function OverviewPage({
@@ -18,7 +22,9 @@ export function OverviewPage({
   gatewayUrl,
   onNavigate,
 }: {
-  data: DashboardData;
+  data: Pick<DashboardData, "auth" | "models" | "summary" | "timeseries" | "recent"> & {
+    resources: Pick<DashboardData["resources"], "auth" | "models" | "metrics">;
+  };
   gatewayUrl: string;
   onNavigate: Navigate;
 }) {
@@ -176,5 +182,36 @@ export function OverviewPage({
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+export function OverviewScreen({
+  api,
+  enabled,
+  ...props
+}: Omit<ComponentProps<typeof OverviewPage>, "data"> & { api: GatewayApi; enabled: boolean }) {
+  const auth = useAuth(api, enabled);
+  const models = useModels(api, enabled);
+  const metrics = useMetrics(api, { window: "24h", limit: 6, offset: 0 }, enabled);
+  return (
+    <OverviewPage
+      {...props}
+      data={{
+        auth: auth.data,
+        models: models.data,
+        summary: metrics.data?.summary ?? emptySummary,
+        timeseries: metrics.data?.timeseries ?? [],
+        recent: metrics.data?.recent ?? [],
+        resources: {
+          auth: auth.resource,
+          models: models.resource,
+          metrics: {
+            pending: metrics.isPending,
+            error: metrics.error,
+            hasData: Boolean(metrics.data),
+          },
+        },
+      }}
+    />
   );
 }

@@ -1,3 +1,11 @@
+export type SettingsTab = "connection" | "service" | "sync" | "appearance" | "updates";
+export interface AppLocation {
+  page: PageKey;
+  modelId?: string;
+  apiKeyId?: string;
+  settingsTab?: SettingsTab;
+}
+
 export type PageKey = "overview" | "playground" | "metrics" | "management" | "settings";
 
 export type NoticeTone = "success" | "error" | "warning" | "info";
@@ -7,6 +15,7 @@ export interface NavigateOptions {
   modelId?: string;
   apiKeyId?: string;
   replace?: boolean;
+  settingsTab?: SettingsTab;
 }
 
 export type Navigate = (page: PageKey, options?: NavigateOptions) => void;

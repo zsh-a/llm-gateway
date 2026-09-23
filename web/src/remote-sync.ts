@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { isTauriRuntime } from "./platform";
 
 export interface RemoteSyncSettings {
   url: string;
@@ -33,14 +34,6 @@ function configuredSyncUrl(): string {
   return (import.meta.env.VITE_SYNC_URL ?? import.meta.env.SYNC_URL ?? "")
     .trim()
     .replace(/\/+$/, "");
-}
-
-interface TauriWindow extends Window {
-  __TAURI_INTERNALS__?: unknown;
-}
-
-export function isTauriRuntime(): boolean {
-  return typeof window !== "undefined" && Boolean((window as TauriWindow).__TAURI_INTERNALS__);
 }
 
 function readStorage(storage: Storage, key: string): string {

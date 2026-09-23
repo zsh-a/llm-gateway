@@ -129,6 +129,9 @@ pub(super) struct UpstreamBody {
     idle_timeout_ms: u64,
     received: bool,
     event_stream: bool,
+    json_body: Vec<u8>,
+    collect: bool,
+    collected_bytes: usize,
     pub accumulator: StreamAccumulator,
     pub metric: MetricContext,
 }
@@ -139,12 +142,13 @@ impl UpstreamBody {
         first_deadline: Instant,
         config: &Config,
         metric: MetricContext,
+        collect: bool,
     ) -> Self {
         let event_stream = response
             .headers()
             .get("content-type")
             .and_then(|h| h.to_str().ok())
-            .is_some_and(|h| h.starts_with("text/event-stream"));
+            .is_none_or(|h| h.starts_with("text/event-stream"));
         Self {
             stream: Box::pin(response.bytes_stream()),
             first_deadline,
@@ -152,9 +156,41 @@ impl UpstreamBody {
             idle_timeout_ms: config.idle_timeout_ms,
             received: false,
             event_stream,
-            accumulator: StreamAccumulator::default(),
+            accumulator: if collect {
+                StreamAccumulator::collecting()
+            } else {
+                StreamAccumulator::default()
+            },
+            json_body: Vec::new(),
+            collect,
+            collected_bytes: 0,
             metric,
         }
+    }
+
+    pub fn completion(
+        &self,
+        model: &str,
+    ) -> Result<(Value, Option<Value>, Option<String>), UpstreamFailure> {
+        let result = if self.event_stream {
+            self.accumulator.completion(model).map(|value| {
+                (
+                    value,
+                    self.accumulator.usage.clone(),
+                    self.accumulator.finish_reason.clone(),
+                )
+            })
+        } else {
+            super::protocols::parse_json_response(&self.json_body, model)
+        };
+        result.ok_or_else(|| {
+            UpstreamFailure::new(
+                "upstream_invalid_response",
+                "response_body",
+                "上游返回了无效的模型响应",
+                StatusCode::BAD_GATEWAY,
+            )
+        })
     }
 
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, UpstreamFailure> {
@@ -207,7 +243,22 @@ impl UpstreamBody {
                 Ok(Some(Ok(bytes))) if bytes.is_empty() => continue,
                 Ok(Some(Ok(bytes))) => {
                     self.received = true;
-                    self.accumulator.observe(&bytes);
+                    if self.collect {
+                        self.collected_bytes = self.collected_bytes.saturating_add(bytes.len());
+                        if self.collected_bytes > 8 * 1024 * 1024 {
+                            return Err(UpstreamFailure::new(
+                                "upstream_body_too_large",
+                                "response_body",
+                                "上游响应超过大小限制",
+                                StatusCode::BAD_GATEWAY,
+                            ));
+                        }
+                    }
+                    if self.event_stream {
+                        self.accumulator.observe(&bytes);
+                    } else if self.collect {
+                        self.json_body.extend_from_slice(&bytes);
+                    }
                     self.metric.observe_chunk(bytes.len(), &self.accumulator);
                     if self.accumulator.has_error {
                         return Err(UpstreamFailure::new(

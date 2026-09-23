@@ -17,7 +17,8 @@ Tauri 2
 ## 目录
 
 ```text
-src-tauri/src/gateway/ Rust 网关 HTTP、协议、认证、指标和模型目录
+src-tauri/src/gateway/ Rust 网关：HTTP/桌面管理适配、认证策略、路由、协议和模型目录
+src-tauri/src/db/      渠道初始化、准入限流和持久化用量
 src-tauri/src/desktop.rs Tauri 启动与系统托盘
 src-tauri/src/service.rs 网关生命周期与优雅退出（独立于窗口）
 web/src/               React + Vite + Tailwind 控制台、Base UI 交互组件和 TanStack Query 状态管理
@@ -30,6 +31,10 @@ src-tauri/icons/       应用与托盘图标
 ```
 
 运行时只包含 Rust/Tauri 网关；认证工具在首次捕获凭据时使用 Node 和 mitmweb，网关运行时不会启动它们。
+
+`AppState` 负责组装依赖；认证策略、渠道选路、模型缓存与请求生命周期分别由独立模块管理。
+HTTP 和桌面 IPC 调用同一组管理操作，分别在入口检查管理员凭证和本机窗口权限。
+React 根组件维护路由与服务状态，各功能页面组合自己的资源查询，共用 TanStack Query 缓存。
 
 ## 安装、开发和打包
 
@@ -113,6 +118,7 @@ Headless 服务默认监听 `127.0.0.1:3000`。如果需要远程访问，请设
 - 请求明细显示 `apiKeyId` / `apiKeyName`；`/admin/metrics/summary` 提供 `keyUsage`、`scope`、`periodStart` 和 `history`。三类统计接口均支持 `apiKeyId` 筛选。撤销 Key 保留名称、累计用量和历史归属，且不可重新启用；需要继续调用时请创建新 Key。
 - 用量按分钟汇总，趋势默认按小时展示；时间窗口起点按分钟对齐。汇总和累计配额不受 `METRICS_MAX_RECORDS` 明细保留上限影响。P50/P95 来自延迟直方图，为近似值；平均值和最大值为实际记录值。上游未返回的 Token 用量标记为未知，不按零消耗显示。
 - 升级会在事务内迁移现有数据库、补算尚存明细，不重复累计 Key 配额。升级前已清理的明细无法恢复，控制台会注明历史数据的完整起点。明细、汇总和配额在同一事务内更新，并按请求 ID 去重。
+- RPM 在模型请求获准进入时原子计数，包含尚未结束的请求；TPM 按请求结束时已知的 Token 用量统计最近 60 秒，长流不会因开始时间较早而漏记。正在生成、尚未结算的 Token 不预估扣减，因此 TPM 和累计配额不是对进行中输出的硬截断。限流记录独立保存在 SQLite，重启和明细清理不重置当前窗口；读取模型和自身用量不会占用推理限额。
 - 每台网关独立统计。远端认证同步只同步 Provider 登录凭证，不同步 API Keys、SQLite 数据库或使用情况。
 
 ## GitHub Actions 发布
@@ -306,7 +312,7 @@ Chat Completions / Responses 请求超限时返回 HTTP 413 和 `request_body_to
 不会生效；已设置的环境变量会覆盖默认值。旧版默认 1 MiB 的网关也可通过设置
 `MAX_BODY_BYTES=8388608` 提高上限，无需改动模型配置。
 
-SQLite 默认路径为 `RUNTIME_DIR/gateway.sqlite3`。启动时会从旧的 `channels.json` 和 `api-keys.json` 做一次性导入；后续管理数据以 SQLite 为准。
+SQLite 默认路径为 `RUNTIME_DIR/gateway.sqlite3`。首次初始化渠道时从旧的 `channels.json` 导入；没有旧文件时才创建默认渠道，并持久化初始化标记。删除全部渠道后重启不会重新生成默认渠道，禁用或删除某个 Provider 的全部渠道后，模型请求返回无可用渠道错误。升级保留已有数据库的渠道配置，包括空配置。旧 `api-keys.json` 仍在数据库没有 Key 时导入；后续管理数据以 SQLite 为准。
 
 ## HTTP 接口
 
@@ -336,18 +342,21 @@ GET    /admin/metrics/requests
 
 Chat Completions 支持流式和非流式调用。网关以流式方式请求上游，`stream: false` 时在 Rust 内聚合响应。模型可直接使用原始 ID，也可以使用 `mimo/model-id` 或 `workbuddy/model-id` 指定 Provider。
 
-Responses 的非流式请求会转换为标准 `response` 对象；流式 Responses 当前透传上游 SSE。Chat 的流式指标、usage、超时、客户端断开和渠道重试由 Rust 网关处理。
+非流式 Chat 与流式诊断共用增量 SSE 解析器，聚合保留多个 choice、工具调用参数和 reasoning；支持跨网络分片的 UTF-8 以及 LF/CRLF/CR 换行。
+Responses 的非流式请求会转换为 `response` 对象，保留函数调用的 `call_id`、名称和参数，并支持将函数结果作为后续输入；流式 Responses 当前仍透传上游 Chat SSE，尚未转换成 Responses 事件序列。Chat 的流式指标、usage、超时、客户端断开和渠道重试由 Rust 网关处理。
 
 ## 管理渠道和 Key
 
-本地监听且未配置管理员 Key 时，管理 API 可直接访问。远程监听必须配置 `PROXY_ADMIN_KEY`。
+HTTP 管理 API 无论本地或远程监听都需要独立的 `PROXY_ADMIN_KEY`。桌面控制台通过本机窗口权限直接管理。
 
 ```bash
 curl -X POST http://127.0.0.1:3000/admin/channels \
+  -H 'Authorization: Bearer <PROXY_ADMIN_KEY>' \
   -H 'Content-Type: application/json' \
   -d '{"id":"mimo-secondary","providerId":"mimo","authRef":"mimo-secondary","priority":50}'
 
 curl -X POST http://127.0.0.1:3000/admin/keys \
+  -H 'Authorization: Bearer <PROXY_ADMIN_KEY>' \
   -H 'Content-Type: application/json' \
   -d '{"name":"local-client","allowedModels":["mimo-pro"],"rpmLimit":60}'
 ```

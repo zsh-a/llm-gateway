@@ -1,13 +1,12 @@
 use super::AppState;
-use super::auth::{database_error, error_response, now_ms, parse_window, require_public_identity};
+use super::util::{now_ms, parse_window};
+use super::{
+    error::{ErrorKind, GatewayError},
+    policy::Identity,
+};
 use crate::db::{
     MetricRow,
     usage::{BUCKET_MS, UsageAggregate, UsageBucket},
-};
-use axum::{
-    Json,
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -15,7 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct MetricQuery {
+pub(crate) struct MetricQuery {
     window: Option<String>,
     provider: Option<String>,
     model: Option<String>,
@@ -26,36 +25,36 @@ pub(super) struct MetricQuery {
     bucket: Option<String>,
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum MetricView {
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MetricView {
     Summary,
     Timeseries,
     Requests,
 }
 
-pub(super) async fn metrics_response(
+pub(super) enum MetricScope {
+    Admin,
+    Identity(Identity),
+}
+
+pub(super) fn query_metrics(
     state: &AppState,
-    headers: &HeaderMap,
     query: &MetricQuery,
-    admin: bool,
+    scope: MetricScope,
     view: MetricView,
-) -> Response {
-    // Admin HTTP handlers and the private desktop transport both require AdminAccess.
-    let identity = if admin {
-        None
-    } else {
-        match require_public_identity(state, headers) {
-            Ok(identity) => Some(identity),
-            Err(response) => return *response,
-        }
+) -> Result<Value, GatewayError> {
+    let admin = matches!(scope, MetricScope::Admin);
+    let identity = match scope {
+        MetricScope::Admin => None,
+        MetricScope::Identity(identity) => Some(identity),
     };
     if let (Some(identity), Some(key)) = (&identity, &query.api_key_id) {
         if key != &identity.key_id {
-            return error_response(
-                StatusCode::FORBIDDEN,
+            return Err(GatewayError::new(
+                ErrorKind::Forbidden,
                 "只能查看当前 Key 的使用情况",
-                "permission_error",
-            );
+            ));
         }
     }
     let since = (now_ms() - parse_window(query.window.as_deref()).as_millis() as i64).max(0)
@@ -81,7 +80,7 @@ pub(super) async fn metrics_response(
     };
     let keys = match state.db.list_api_keys() {
         Ok(keys) => keys,
-        Err(error) => return database_error(error),
+        Err(error) => return Err(GatewayError::database(error)),
     };
     let names: HashMap<_, _> = keys
         .iter()
@@ -90,7 +89,7 @@ pub(super) async fn metrics_response(
     if let MetricView::Requests = view {
         let rows = match state.db.metric_rows(since) {
             Ok(rows) => rows,
-            Err(error) => return database_error(error),
+            Err(error) => return Err(GatewayError::database(error)),
         };
         let rows: Vec<_> = rows
             .into_iter()
@@ -109,11 +108,13 @@ pub(super) async fn metrics_response(
             .take(query.limit.unwrap_or(50).clamp(1, 500))
             .map(|row| metric_json(row, &names))
             .collect();
-        return Json(json!({"data":data,"total":rows.len(),"retentionLimit":state.config.metrics_max_records})).into_response();
+        return Ok(
+            json!({"data":data,"total":rows.len(),"retentionLimit":state.config.metrics_max_records}),
+        );
     }
     let rows = match state.db.usage_buckets(since) {
         Ok(rows) => rows,
-        Err(error) => return database_error(error),
+        Err(error) => return Err(GatewayError::database(error)),
     };
     let rows: Vec<_> = rows
         .into_iter()
@@ -142,7 +143,7 @@ pub(super) async fn metrics_response(
                 value
             })
             .collect();
-        return Json(json!({"data":data})).into_response();
+        return Ok(json!({"data":data}));
     }
     let mut total = UsageAggregate::default();
     for row in &rows {
@@ -182,7 +183,7 @@ pub(super) async fn metrics_response(
     summary["granularityMs"] = json!(BUCKET_MS);
     summary["history"] = match state.db.usage_history() {
         Ok(history) => history,
-        Err(error) => return database_error(error),
+        Err(error) => return Err(GatewayError::database(error)),
     };
     let mut by_key: BTreeMap<String, UsageAggregate> = BTreeMap::new();
     for row in &rows {
@@ -194,7 +195,7 @@ pub(super) async fn metrics_response(
     let mut key_usage = Vec::new();
     for key in keys.iter().filter(|key| allowed_key(&key.id)) {
         let usage = by_key.remove(&key.id).unwrap_or_default();
-        key_usage.push(json!({"key":super::http::public_key(key.clone()),"usage":usage.json(),"activeRequests":active(Some(&key.id))}));
+        key_usage.push(json!({"key":super::management::public_key(key.clone()),"usage":usage.json(),"activeRequests":active(Some(&key.id))}));
     }
     for (id, usage) in by_key {
         let (display_id, name) = match id.as_str() {
@@ -206,7 +207,7 @@ pub(super) async fn metrics_response(
         key_usage.push(json!({"key":{"id":display_id,"name":name,"prefix":"","enabled":false,"readOnly":true,"lastUsedAt":usage.last_used_at},"usage":usage.json(),"activeRequests":active(Some(&id))}));
     }
     summary["keyUsage"] = json!(key_usage);
-    Json(summary).into_response()
+    Ok(summary)
 }
 
 fn groups<'a>(rows: &'a [UsageBucket], key: impl Fn(&'a UsageBucket) -> &'a str) -> Value {

@@ -13,7 +13,7 @@ import {
   Spinner,
   Textarea,
 } from "../../components/ui";
-import { isTauriRuntime } from "../../remote-sync";
+import { isTauriRuntime } from "../../platform";
 import { getServiceSettings, saveServiceSettings } from "../../service-settings";
 import type { NoticeTone } from "../../types";
 

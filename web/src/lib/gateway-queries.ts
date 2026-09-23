@@ -1,17 +1,9 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import { ApiError, type GatewayApi } from "../api";
-import type {
-  DashboardData,
-  MetricsQuery,
-  MetricsSnapshot,
-  PageKey,
-  ResourceState,
-} from "../types";
+import type { MetricsQuery, MetricsSnapshot, ResourceState } from "../types";
 import { emptyDashboard } from "./constants";
 import { gatewayQueryKeys, queryErrorMessage } from "./query";
-
-const overviewMetrics: MetricsQuery = { window: "24h", limit: 6, offset: 0 };
 
 function resourceState(query: {
   isPending: boolean;
@@ -76,65 +68,57 @@ export function useMetrics(api: GatewayApi, filters: MetricsQuery, enabled = tru
   };
 }
 
-export function useGatewayDashboard(api: GatewayApi, enabled: boolean, page: PageKey) {
-  const health = useQuery({
+export function useGatewayHealth(api: GatewayApi, enabled: boolean) {
+  const query = useQuery({
     queryKey: gatewayQueryKeys.resource(api.baseUrl, "health"),
     queryFn: ({ signal }) => api.health(signal),
     enabled,
     refetchInterval: enabled ? 10000 : false,
   });
-  const auth = useQuery({
+  return {
+    data: query.isError ? { status: "offline" } : (query.data ?? { status: "starting" }),
+    error: query.error ? queryErrorMessage(query.error, "无法连接网关") : "",
+  };
+}
+
+export function useAuth(api: GatewayApi, enabled = true) {
+  const query = useQuery({
     queryKey: gatewayQueryKeys.resource(api.baseUrl, "auth"),
     queryFn: ({ signal }) => api.auth(signal),
-    enabled: enabled && (page === "overview" || page === "management"),
+    enabled,
     staleTime: 30000,
-    refetchInterval: page === "overview" || page === "management" ? 30000 : false,
+    refetchInterval: enabled ? 30000 : false,
   });
-  const models = useQuery({
+  return { data: query.data ?? emptyDashboard.auth, resource: resourceState(query) };
+}
+
+export function useModels(api: GatewayApi, enabled = true) {
+  const query = useQuery({
     queryKey: gatewayQueryKeys.resource(api.baseUrl, "models"),
     queryFn: ({ signal }) => api.models(signal),
-    enabled: enabled && page !== "settings",
+    enabled,
     staleTime: 60000,
-    refetchInterval: page !== "settings" ? 60000 : false,
+    refetchInterval: enabled ? 60000 : false,
   });
-  const channels = useQuery({
+  return { data: query.data ?? emptyDashboard.models, resource: resourceState(query) };
+}
+
+export function useChannels(api: GatewayApi, enabled = true) {
+  const query = useQuery({
     queryKey: gatewayQueryKeys.resource(api.baseUrl, "channels"),
     queryFn: ({ signal }) => api.channels(signal),
-    enabled: enabled && page === "management",
+    enabled,
     staleTime: 30000,
   });
-  const keys = useQuery({
+  return { data: query.data ?? emptyDashboard.channels, resource: resourceState(query) };
+}
+
+export function useKeys(api: GatewayApi, enabled = true) {
+  const query = useQuery({
     queryKey: gatewayQueryKeys.resource(api.baseUrl, "keys"),
     queryFn: ({ signal }) => api.keys(signal),
-    enabled: enabled && (page === "management" || (page === "metrics" && api.isAdministrator)),
+    enabled,
     staleTime: 30000,
   });
-  const metrics = useMetrics(api, overviewMetrics, enabled && page === "overview");
-  const data: DashboardData = {
-    ...emptyDashboard,
-    health: health.isError ? { status: "offline" } : (health.data ?? { status: "starting" }),
-    auth: auth.data ?? emptyDashboard.auth,
-    models: models.data ?? [],
-    channels: channels.data ?? [],
-    keys: keys.data ?? [],
-    summary: metrics.data?.summary ?? emptyDashboard.summary,
-    timeseries: metrics.data?.timeseries ?? [],
-    recent: metrics.data?.recent ?? [],
-    adminError: [channels.error, keys.error]
-      .filter(Boolean)
-      .map((error) => queryErrorMessage(error, "管理接口不可用"))
-      .join("；"),
-    resources: {
-      auth: resourceState(auth),
-      models: resourceState(models),
-      channels: resourceState(channels),
-      keys: resourceState(keys),
-      metrics: { pending: metrics.isPending, error: metrics.error, hasData: Boolean(metrics.data) },
-    },
-  };
-  return {
-    data,
-    healthError: health.error ? queryErrorMessage(health.error, "无法连接网关") : "",
-    lastUpdated: health.dataUpdatedAt || null,
-  };
+  return { data: query.data ?? emptyDashboard.keys, resource: resourceState(query) };
 }

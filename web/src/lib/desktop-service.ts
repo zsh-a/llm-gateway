@@ -1,6 +1,6 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useState } from "react";
-import { isTauriRuntime } from "../remote-sync";
+import { isTauriRuntime } from "../platform";
 import {
   controlService,
   forceQuit,

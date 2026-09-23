@@ -5,7 +5,7 @@ import {
   Settings2,
   ShieldCheck,
 } from "lucide-react";
-import type { DashboardData, MetricsSummary, PageKey } from "../types";
+import type { AppLocation, DashboardData, MetricsSummary, PageKey, SettingsTab } from "../types";
 
 const emptyTokens = {
   inputTokens: 0,
@@ -88,16 +88,9 @@ export const navigation: Array<{ key: PageKey; icon: typeof LayoutDashboard }> =
   { key: "settings", icon: Settings2 },
 ];
 
-export interface AppLocation {
-  page: PageKey;
-  modelId?: string;
-  apiKeyId?: string;
-  settingsTab?: string;
-}
-
 export function resolveLocation(hash: string): AppLocation {
   const [pageValue, query = ""] = hash.replace(/^#/, "").split("?", 2);
-  const page = pageValue in pageMeta ? (pageValue as PageKey) : "overview";
+  const page = Object.hasOwn(pageMeta, pageValue) ? (pageValue as PageKey) : "overview";
   const modelId = new URLSearchParams(query).get("model") || undefined;
   return {
     page,
@@ -106,10 +99,26 @@ export function resolveLocation(hash: string): AppLocation {
       : undefined,
     modelId: page === "playground" ? modelId : undefined,
     settingsTab:
-      page === "settings" ? new URLSearchParams(query).get("tab") || undefined : undefined,
+      page === "settings" ? resolveSettingsTab(new URLSearchParams(query).get("tab")) : undefined,
   };
 }
 
 export function resolvePage(hash: string): PageKey {
   return resolveLocation(hash).page;
+}
+
+function resolveSettingsTab(tab: string | null): SettingsTab {
+  return tab && ["connection", "service", "sync", "appearance", "updates"].includes(tab)
+    ? (tab as SettingsTab)
+    : "connection";
+}
+
+export function serializeLocation(location: AppLocation): string {
+  const params = new URLSearchParams();
+  if (["metrics", "management"].includes(location.page) && location.apiKeyId)
+    params.set("key", location.apiKeyId);
+  if (location.page === "playground" && location.modelId) params.set("model", location.modelId);
+  if (location.page === "settings" && location.settingsTab && location.settingsTab !== "connection")
+    params.set("tab", location.settingsTab);
+  return `#${location.page}${params.size ? `?${params}` : ""}`;
 }

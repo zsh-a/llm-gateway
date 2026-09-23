@@ -469,15 +469,13 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
 pub async fn management_request(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
-    method: String,
-    path: String,
-    body: Option<serde_json::Value>,
+    request: crate::gateway::management::ManagementRequest,
 ) -> Result<crate::gateway::management::ManagementResponse, String> {
     let url = window.url().map_err(|error| error.to_string())?;
     if !is_management_window(window.label(), &url) {
         return Err("管理操作仅允许本机控制台访问".into());
     }
-    crate::gateway::management::request(state.inner().clone(), method, path, body).await
+    Ok(crate::gateway::management::request(state.inner(), request).await)
 }
 
 fn is_management_window(label: &str, url: &tauri::Url) -> bool {

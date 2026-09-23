@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { GatewayApi } from "../src/api";
 import { emptySummary } from "../src/lib/constants";
-import { useGatewayDashboard, useMetrics } from "../src/lib/gateway-queries";
+import { useGatewayHealth, useMetrics } from "../src/lib/gateway-queries";
 import { gatewayQueryKeys } from "../src/lib/query";
 
 function clientWrapper() {
@@ -64,11 +64,11 @@ describe("resource queries", () => {
     const metrics = vi.spyOn(api, "metricsSummary");
     const channels = vi.spyOn(api, "channels");
     const { client, wrapper } = clientWrapper();
-    const { result, unmount } = renderHook(() => useGatewayDashboard(api, true, "settings"), {
+    const { result, unmount } = renderHook(() => useGatewayHealth(api, true), {
       wrapper,
     });
-    await waitFor(() => expect(result.current.healthError).toBe("Offline"));
-    expect(result.current.data.health.status).toBe("offline");
+    await waitFor(() => expect(result.current.error).toBe("Offline"));
+    expect(result.current.data.status).toBe("offline");
     expect(models).not.toHaveBeenCalled();
     expect(metrics).not.toHaveBeenCalled();
     expect(channels).not.toHaveBeenCalled();

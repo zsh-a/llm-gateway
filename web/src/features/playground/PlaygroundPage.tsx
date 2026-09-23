@@ -1,4 +1,5 @@
 import { ArrowDown, ArrowUp, Bot, ChevronDown, RefreshCw, Square, Trash2 } from "lucide-react";
+import type { ComponentProps } from "react";
 import { type FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 import type { GatewayApi } from "../../api";
@@ -6,6 +7,7 @@ import { CopyButton, ResourceContent } from "../../components/common";
 import { ModelPicker } from "../../components/ModelPicker";
 import { Badge, Button, Card, Select, Spinner, Textarea } from "../../components/ui";
 import { formatNumber, usageTotal } from "../../lib/format";
+import { useModels } from "../../lib/gateway-queries";
 import { modelEfforts, modelSupportsReasoning } from "../../lib/models";
 import type { DashboardData, GatewayModel, Navigate, Usage } from "../../types";
 
@@ -33,7 +35,7 @@ export function PlaygroundPage({
   onRefresh,
   serviceAvailable = true,
 }: {
-  data: DashboardData;
+  data: Pick<DashboardData, "models"> & { resources: Pick<DashboardData["resources"], "models"> };
   api: GatewayApi;
   initialModelId?: string;
   onNavigate: Navigate;
@@ -435,5 +437,15 @@ function ResponsePreview({
         </div>
       )}
     </Card>
+  );
+}
+
+export function PlaygroundScreen(props: Omit<ComponentProps<typeof PlaygroundPage>, "data">) {
+  const models = useModels(props.api, props.serviceAvailable);
+  return (
+    <PlaygroundPage
+      {...props}
+      data={{ models: models.data, resources: { models: models.resource } }}
+    />
   );
 }

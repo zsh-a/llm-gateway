@@ -3,6 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { describe, expect, it, vi } from "vitest";
 import { GatewayApi } from "../src/api";
+import { nativeManagement } from "../src/management";
 import type { ChatStreamUpdate } from "../src/types";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -25,12 +26,18 @@ describe("gateway data and streaming", () => {
   it("uses native management for desktop statistics without reusing the inference key", async () => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
     vi.mocked(invoke).mockResolvedValue({ status: 200, body: { requests: 4 } });
-    const desktop = new GatewayApi({ apiKey: "business-secret", adminKey: "" });
+    const desktop = new GatewayApi(
+      { apiKey: "business-secret", adminKey: "" },
+      undefined,
+      nativeManagement,
+    );
     await desktop.metricsSummary({ window: "7d", apiKeyId: "key-a" });
     expect(invoke).toHaveBeenLastCalledWith("management_request", {
-      method: "GET",
-      path: "/admin/metrics/summary?window=7d&apiKeyId=key-a",
-      body: null,
+      request: {
+        operation: "metrics",
+        view: "summary",
+        query: { window: "7d", apiKeyId: "key-a" },
+      },
     });
     expect(fetch).not.toHaveBeenCalled();
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response('{"choices":[]}')));
@@ -56,6 +63,11 @@ describe("gateway data and streaming", () => {
     expect(path).toContain("/metrics/summary");
     expect(path).not.toContain("/admin/");
     expect(new Headers(options?.headers).get("Authorization")).toBe("Bearer business");
+  });
+  it("preserves native management failure details as an Error", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce("服务尚未启动");
+    const desktop = new GatewayApi({ apiKey: "", adminKey: "" }, undefined, nativeManagement);
+    await expect(desktop.metricsSummary({ window: "24h" })).rejects.toThrow("服务尚未启动");
   });
   it("propagates API errors instead of presenting empty results", async () => {
     vi.stubGlobal(

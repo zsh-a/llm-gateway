@@ -13,7 +13,7 @@ const bridge = vi.hoisted(() => ({
   force: vi.fn(),
   notices: vi.fn(),
 }));
-vi.mock("../src/remote-sync", () => ({ isTauriRuntime: bridge.native }));
+vi.mock("../src/platform", () => ({ isTauriRuntime: bridge.native }));
 vi.mock("../src/service-settings", () => ({
   listenServiceStatus: bridge.listen,
   getServiceStatus: bridge.status,

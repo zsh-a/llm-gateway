@@ -1,8 +1,10 @@
 use super::*;
 use axum::body::{Body, Bytes};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 #[derive(Clone)]
@@ -236,7 +238,13 @@ async fn discovery_disabled_or_missing_credentials_never_contacts_workbuddy() {
     let server = ConfigServer::start().await;
     let mut state = AppState::test_state(directory.path());
     state.config.model_discovery = true;
-    assert!(state.fetch_workbuddy_models(&server.url).await.is_none());
+    assert!(
+        state
+            .catalog
+            .fetch_workbuddy_models(&state.config, &server.url)
+            .await
+            .is_none()
+    );
     assert!(state.models_from(&server.url, &server.url).await.is_empty());
     let mut state = authenticated_state(&directory).await;
     state.config.model_discovery = false;
@@ -256,7 +264,7 @@ async fn discovery_disabled_or_missing_credentials_never_contacts_workbuddy() {
     )
     .unwrap();
     state.reload_auth_cache().await.unwrap();
-    assert!(!state.has_auth("workbuddy"));
+    assert!(!state.auth.contains("workbuddy"));
 }
 
 #[tokio::test]
@@ -286,13 +294,7 @@ async fn expired_catalog_is_replaced_with_current_upstream_models() {
     let cached = state.models_from(&server.url, &server.url).await;
     assert_eq!(cached[0].id, "test-workbuddy-model");
     assert_eq!(server.requests.load(Ordering::SeqCst), 1);
-    state
-        .model_cache
-        .write()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .fetched_at = Instant::now() - Duration::from_secs(301);
+    state.catalog.expire();
 
     let refreshed = state.models_from(&server.url, &server.url).await;
     assert_eq!(refreshed.len(), 1);
@@ -311,11 +313,7 @@ async fn mimo_catalog_contains_only_upstream_models_and_metadata() {
     let mut state = AppState::test_state(directory.path());
     state.config.model_discovery = true;
     state.config.model_discovery_timeout_ms = 500;
-    state
-        .auth
-        .write()
-        .unwrap()
-        .insert("mimo".into(), HeaderMap::new());
+    state.auth.set_headers("mimo", HeaderMap::new());
     let server = ConfigServer::start().await;
     server.reply.lock().unwrap().body = json!({
         "data": [

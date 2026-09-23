@@ -1,16 +1,84 @@
-use super::{AppState, Identity};
-use axum::Json;
+use super::{
+    AppState,
+    error::{ErrorKind, GatewayError},
+    policy::{self, Identity},
+};
+use crate::config::Config;
+use axum::http::HeaderMap;
 use axum::http::header::{self, HeaderName, HeaderValue};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, RwLock},
+};
 use subtle::ConstantTimeEq;
-use tracing::error;
 
-pub(super) type GatewayError = Box<Response>;
+#[derive(Clone, Default)]
+pub(super) struct AuthCache(Arc<RwLock<HashMap<String, HeaderMap>>>);
+
+impl AuthCache {
+    pub fn load(config: &Config) -> Self {
+        Self(Arc::new(RwLock::new(load_auth_cache(config))))
+    }
+    pub fn reload(&self, config: &Config) -> anyhow::Result<()> {
+        *self
+            .0
+            .write()
+            .map_err(|_| anyhow::anyhow!("认证缓存锁已失效"))? = load_auth_cache(config);
+        Ok(())
+    }
+    pub fn headers(&self, auth_ref: &str) -> Option<HeaderMap> {
+        self.0
+            .read()
+            .ok()
+            .and_then(|auth| auth.get(auth_ref).cloned())
+    }
+    pub fn contains(&self, auth_ref: &str) -> bool {
+        self.0
+            .read()
+            .ok()
+            .is_some_and(|auth| auth.contains_key(auth_ref))
+    }
+    pub fn status(&self, config: &Config) -> Value {
+        let providers = ["mimo", "workbuddy"].into_iter().map(|provider| {
+            (provider.to_string(), json!({"ready": self.contains(provider), "capturedAt": read_auth_captured_at(&config.auth_path(provider)), "source": "cache"}))
+        }).collect::<serde_json::Map<_, _>>();
+        json!({"ready": providers.values().any(|value| value["ready"] == true), "providers": providers})
+    }
+    #[cfg(test)]
+    pub fn set_headers(&self, auth_ref: &str, headers: HeaderMap) {
+        self.0.write().unwrap().insert(auth_ref.into(), headers);
+    }
+}
+
+fn load_auth_cache(config: &Config) -> HashMap<String, HeaderMap> {
+    let mut auth = HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(&config.auth_cache_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if let Some(headers) = read_auth_headers(&path) {
+                auth.insert(name.to_string(), headers);
+            }
+        }
+    }
+    for provider in ["mimo", "workbuddy"] {
+        let path = config.auth_path(provider);
+        if !auth.contains_key(provider) {
+            if let Some(headers) = read_auth_headers(&path) {
+                auth.insert(provider.to_string(), headers);
+            }
+        }
+    }
+    auth
+}
 
 pub(super) fn read_auth_headers(path: &PathBuf) -> Option<HeaderMap> {
     let raw = std::fs::read_to_string(path).ok()?;
@@ -78,82 +146,30 @@ pub(super) fn request_credential(headers: &HeaderMap) -> String {
         .into()
 }
 
-pub(super) fn require_public_auth(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<(), GatewayError> {
-    let _ = require_public_auth_identity(state, headers)?;
-    Ok(())
-}
-
-pub(super) fn require_public_auth_identity(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<Identity, GatewayError> {
-    let identity = require_public_identity(state, headers)?;
-    state.authorize_limits(&identity)?;
-    Ok(identity)
-}
-
-// Reading one's own usage must remain possible when the inference quota is exhausted.
 pub(super) fn require_public_identity(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<Identity, GatewayError> {
-    let identity = state.authenticate(headers);
-    if identity.is_none()
-        || (!state.config.is_loopback()
-            && !identity
-                .as_ref()
-                .is_some_and(|identity| identity.managed || identity.key_id == "environment"))
-    {
-        return Err(Box::new(error_response(
-            StatusCode::UNAUTHORIZED,
-            "缺少或无效的代理 API Key",
-            "authentication_error",
-        )));
-    }
-    let identity = identity.expect("checked above");
-    Ok(identity)
+    let identity = policy::authenticate(&state.config, &state.db, headers)?.filter(|identity| {
+        state.config.is_loopback() || identity.managed || identity.key_id == "environment"
+    });
+    identity.ok_or_else(|| GatewayError::new(ErrorKind::Unauthorized, "缺少或无效的代理 API Key"))
 }
 
 pub(super) fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), GatewayError> {
     if state.config.proxy_admin_key.is_empty() {
-        return Err(Box::new(error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
+        return Err(GatewayError::new(
+            ErrorKind::Configuration,
             "HTTP 管理接口需要配置 PROXY_ADMIN_KEY；本机桌面可直接管理",
-            "configuration_error",
-        )));
+        ));
     }
-    if !state.admin_authorized(headers) {
-        return Err(Box::new(error_response(
-            StatusCode::UNAUTHORIZED,
+    if !secret_equal(&request_credential(headers), &state.config.proxy_admin_key) {
+        return Err(GatewayError::new(
+            ErrorKind::Unauthorized,
             "缺少或无效的管理员 API Key",
-            "authentication_error",
-        )));
+        ));
     }
     Ok(())
-}
-
-pub(super) fn error_response(
-    status: StatusCode,
-    message: impl Into<String>,
-    error_type: &str,
-) -> Response {
-    (
-        status,
-        Json(json!({ "error": { "message": message.into(), "type": error_type } })),
-    )
-        .into_response()
-}
-
-pub(super) fn database_error(error: impl std::fmt::Display) -> Response {
-    error!(%error, "SQLite 操作失败");
-    error_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "数据库操作失败",
-        "internal_error",
-    )
 }
 
 pub(super) fn hash_secret(secret: &str) -> String {
@@ -164,42 +180,4 @@ pub(super) fn hash_secret(secret: &str) -> String {
 
 pub(super) fn secret_equal(left: &str, right: &str) -> bool {
     left.as_bytes().ct_eq(right.as_bytes()).into()
-}
-
-pub(super) fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
-
-pub(super) fn string_array(value: Option<&Value>) -> Vec<String> {
-    value
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-pub(super) fn parse_window(value: Option<&str>) -> Duration {
-    let value = value.unwrap_or("24h");
-    let (number, multiplier) = if let Some(value) = value.strip_suffix('m') {
-        (value, 60_000)
-    } else if let Some(value) = value.strip_suffix('h') {
-        (value, 3_600_000)
-    } else if let Some(value) = value.strip_suffix('d') {
-        (value, 86_400_000)
-    } else {
-        (value, 3_600_000)
-    };
-    number
-        .parse::<u64>()
-        .ok()
-        .map(|value| Duration::from_millis(value.saturating_mul(multiplier)))
-        .unwrap_or(Duration::from_secs(24 * 60 * 60))
 }

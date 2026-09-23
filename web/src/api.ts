@@ -1,6 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
 import { EventSourceParserStream } from "eventsource-parser/stream";
-import { isTauriRuntime } from "./remote-sync";
+import type { ManagementRequest, ManagementTransport } from "./management";
 import type {
   ApiKeyInput,
   ApiKeyRecord,
@@ -58,6 +57,7 @@ export class GatewayApi {
   constructor(
     private readonly credentials: Credentials,
     baseUrl = gatewayBaseUrl,
+    private readonly management?: ManagementTransport,
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
   }
@@ -67,36 +67,33 @@ export class GatewayApi {
   }
 
   get isAdministrator(): boolean {
-    return isTauriRuntime() || Boolean(this.credentials.adminKey);
+    return Boolean(this.management || this.credentials.adminKey);
   }
 
   private metricsPrefix(): "/metrics" | "/admin/metrics" {
     return this.isAdministrator ? "/admin/metrics" : "/metrics";
   }
 
-  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    if (isTauriRuntime() && path.startsWith("/admin/")) {
-      init.signal?.throwIfAborted();
-      let result: { status: number; body: Record<string, unknown> };
-      try {
-        result = await invoke("management_request", {
-          method: init.method ?? "GET",
-          path,
-          body: typeof init.body === "string" ? JSON.parse(init.body) : null,
-        });
-      } catch (error) {
-        throw new Error(error instanceof Error ? error.message : String(error));
-      }
-      init.signal?.throwIfAborted();
-      if (result.status >= 400) {
-        const error = result.body.error as { message?: string } | undefined;
-        throw new ApiError(error?.message ?? "管理请求失败", result.status);
-      }
-      return result.body as T;
+  private async adminRequest<T>(
+    request: ManagementRequest,
+    path: string,
+    init: RequestInit = {},
+  ): Promise<T> {
+    if (!this.management) return this.request(path, init, true);
+    init.signal?.throwIfAborted();
+    const result = await this.management(request);
+    init.signal?.throwIfAborted();
+    if (result.status >= 400) {
+      const error = result.body.error as { message?: string } | undefined;
+      throw new ApiError(error?.message ?? "管理请求失败", result.status);
     }
+    return result.body as T;
+  }
+
+  private async request<T>(path: string, init: RequestInit = {}, admin = false): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
-    if (path.startsWith("/admin/")) {
+    if (admin) {
       const adminCredential = this.credentials.adminKey;
       if (adminCredential) headers.set("Authorization", `Bearer ${adminCredential}`);
     } else if (this.credentials.apiKey) {
@@ -131,20 +128,32 @@ export class GatewayApi {
   }
 
   async models(signal?: AbortSignal): Promise<GatewayModel[]> {
+    const result = this.isAdministrator
+      ? await this.adminRequest<{ data: GatewayModel[] }>(
+          { operation: "models" },
+          "/admin/models",
+          { signal },
+        )
+      : await this.request<{ data: GatewayModel[] }>("/v1/models", { signal });
+    return result.data;
+  }
+
+  async channels(signal?: AbortSignal): Promise<ChannelConfig[]> {
     return (
-      await this.request<{ data: GatewayModel[] }>(
-        this.isAdministrator ? "/admin/models" : "/v1/models",
+      await this.adminRequest<{ data: ChannelConfig[] }>(
+        { operation: "list_channels" },
+        "/admin/channels",
         { signal },
       )
     ).data;
   }
 
-  async channels(signal?: AbortSignal): Promise<ChannelConfig[]> {
-    return (await this.request<{ data: ChannelConfig[] }>("/admin/channels", { signal })).data;
-  }
-
   async keys(signal?: AbortSignal): Promise<ApiKeyRecord[]> {
-    return (await this.request<{ data: ApiKeyRecord[] }>("/admin/keys", { signal })).data;
+    return (
+      await this.adminRequest<{ data: ApiKeyRecord[] }>({ operation: "list_keys" }, "/admin/keys", {
+        signal,
+      })
+    ).data;
   }
 
   private metricParams(query: MetricsQuery): URLSearchParams {
@@ -156,28 +165,39 @@ export class GatewayApi {
     return params;
   }
 
+  private metricRequest<T>(
+    view: "summary" | "timeseries" | "requests",
+    query: MetricsQuery,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const params = this.metricParams(query);
+    if (view === "requests") {
+      params.set("limit", String(query.limit ?? 50));
+      params.set("offset", String(query.offset ?? 0));
+    }
+    const path = `${this.metricsPrefix()}/${view}?${params}`;
+    return this.isAdministrator
+      ? this.adminRequest({ operation: "metrics", view, query }, path, { signal })
+      : this.request(path, { signal });
+  }
+
   metricsSummary(query: MetricsQuery, signal?: AbortSignal): Promise<MetricsSummary> {
-    return this.request(`${this.metricsPrefix()}/summary?${this.metricParams(query)}`, { signal });
+    return this.metricRequest("summary", query, signal);
   }
 
   async metricsTimeseries(query: MetricsQuery, signal?: AbortSignal): Promise<TimeseriesPoint[]> {
-    const result = await this.request<{ data: TimeseriesPoint[] }>(
-      `${this.metricsPrefix()}/timeseries?${this.metricParams(query)}`,
-      { signal },
-    );
-    return result.data;
+    return (await this.metricRequest<{ data: TimeseriesPoint[] }>("timeseries", query, signal))
+      .data;
   }
 
   async metricsRequests(
     query: MetricsQuery,
     signal?: AbortSignal,
   ): Promise<Pick<MetricsSnapshot, "recent" | "total">> {
-    const params = this.metricParams(query);
-    params.set("limit", String(query.limit ?? 50));
-    params.set("offset", String(query.offset ?? 0));
-    const result = await this.request<{ data: RecentRequest[]; total?: number }>(
-      `${this.metricsPrefix()}/requests?${params}`,
-      { signal },
+    const result = await this.metricRequest<{ data: RecentRequest[]; total?: number }>(
+      "requests",
+      query,
+      signal,
     );
     return { recent: result.data, total: result.total ?? result.data.length };
   }
@@ -291,28 +311,43 @@ export class GatewayApi {
   }
 
   saveChannel(channel: ChannelInput): Promise<unknown> {
-    return this.request("/admin/channels", { method: "POST", body: JSON.stringify(channel) });
+    return this.adminRequest({ operation: "save_channel", body: channel }, "/admin/channels", {
+      method: "POST",
+      body: JSON.stringify(channel),
+    });
   }
 
   deleteChannel(id: string): Promise<unknown> {
-    return this.request(`/admin/channels/${encodeURIComponent(id)}`, { method: "DELETE" });
+    return this.adminRequest(
+      { operation: "delete_channel", id },
+      `/admin/channels/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    );
   }
 
   createKey(body: ApiKeyInput): Promise<{ secret: string }> {
-    return this.request<{ secret: string }>("/admin/keys", {
+    return this.adminRequest<{ secret: string }>({ operation: "create_key", body }, "/admin/keys", {
       method: "POST",
       body: JSON.stringify(body),
     });
   }
 
   updateKey(id: string, body: ApiKeyUpdate): Promise<unknown> {
-    return this.request(`/admin/keys/${encodeURIComponent(id)}`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    });
+    return this.adminRequest(
+      { operation: "update_key", id, body },
+      `/admin/keys/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      },
+    );
   }
 
   revokeKey(id: string): Promise<unknown> {
-    return this.request(`/admin/keys/${encodeURIComponent(id)}`, { method: "DELETE" });
+    return this.adminRequest(
+      { operation: "revoke_key", id },
+      `/admin/keys/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    );
   }
 }

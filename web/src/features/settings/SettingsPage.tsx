@@ -1,5 +1,5 @@
 import { Tabs } from "@base-ui/react/tabs";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useState } from "react";
 import { type Credentials, saveCredentials } from "../../api";
 import { Field, InfoRow } from "../../components/common";
 import {
@@ -12,20 +12,15 @@ import {
   Select,
 } from "../../components/ui";
 import type { DesktopUpdates } from "../../lib/desktop-updates";
-import { isTauriRuntime } from "../../remote-sync";
-import type { NoticeTone, ThemePreference } from "../../types";
+import { isTauriRuntime } from "../../platform";
+import type { NoticeTone, SettingsTab, ThemePreference } from "../../types";
 import { ApplicationUpdateCard } from "./ApplicationUpdateCard";
 import { RemoteAuthSyncCard } from "./RemoteAuthSyncCard";
 import { ServiceSettingsCard } from "./ServiceSettingsCard";
 
-function readTab() {
-  const tab = new URLSearchParams(window.location.hash.split("?")[1]).get("tab");
-  return tab && ["connection", "service", "sync", "appearance", "updates"].includes(tab)
-    ? tab
-    : "connection";
-}
-
 export function SettingsPage({
+  tab,
+  onTabChange,
   credentials,
   onCredentials,
   themePreference,
@@ -36,6 +31,8 @@ export function SettingsPage({
   updates,
   activeRequests,
 }: {
+  tab: SettingsTab;
+  onTabChange: (tab: SettingsTab) => void;
   credentials: Credentials;
   onCredentials: (next: Credentials) => void;
   themePreference: ThemePreference;
@@ -46,12 +43,6 @@ export function SettingsPage({
   updates?: DesktopUpdates;
   activeRequests?: number;
 }) {
-  const [tab, setTab] = useState(readTab);
-  useEffect(() => {
-    const changed = () => setTab(readTab());
-    window.addEventListener("hashchange", changed);
-    return () => window.removeEventListener("hashchange", changed);
-  }, []);
   const [apiKey, setApiKey] = useState(credentials.apiKey);
   const [adminKey, setAdminKey] = useState(credentials.adminKey);
   const native = isTauriRuntime();
@@ -79,8 +70,7 @@ export function SettingsPage({
     <Tabs.Root
       value={tab}
       onValueChange={(value) => {
-        setTab(value);
-        window.location.hash = `#settings?tab=${value}`;
+        onTabChange(value as SettingsTab);
       }}
       className="grid items-start gap-6 lg:grid-cols-[10rem_minmax(0,1fr)]"
     >

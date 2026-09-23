@@ -7,25 +7,26 @@ import { DashboardLayout } from "./components/layout";
 import { ServiceBanner } from "./components/ServiceBanner";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { Button, Spinner } from "./components/ui";
-import { OverviewPage } from "./features/overview/OverviewPage";
-import { resolveLocation } from "./lib/constants";
+import { OverviewScreen } from "./features/overview/OverviewPage";
+import { resolveLocation, serializeLocation } from "./lib/constants";
 import { useDesktopService } from "./lib/desktop-service";
 import { useDesktopUpdates } from "./lib/desktop-updates";
-import { useGatewayDashboard } from "./lib/gateway-queries";
+import { useGatewayHealth } from "./lib/gateway-queries";
 import { gatewayQueryKeys, queryClient } from "./lib/query";
+import { nativeManagement } from "./management";
 import type { Navigate, NoticeTone, ThemePreference } from "./types";
 
 const ManagementPage = lazy(() =>
   import("./features/management/ManagementPage").then((module) => ({
-    default: module.ManagementPage,
+    default: module.ManagementScreen,
   })),
 );
 const MetricsPage = lazy(() =>
-  import("./features/metrics/MetricsPage").then((module) => ({ default: module.MetricsPage })),
+  import("./features/metrics/MetricsPage").then((module) => ({ default: module.MetricsScreen })),
 );
 const PlaygroundPage = lazy(() =>
   import("./features/playground/PlaygroundPage").then((module) => ({
-    default: module.PlaygroundPage,
+    default: module.PlaygroundScreen,
   })),
 );
 const SettingsPage = lazy(() =>
@@ -59,8 +60,11 @@ export function App() {
   const updating = ["draining", "stopping", "installing"].includes(updates.status?.phase ?? "");
   const gatewayUrl = desktop.status?.baseUrl ?? gatewayBaseUrl;
   const serviceReady = !desktop.native || (desktop.status?.phase === "running" && !desktop.error);
-  const api = useMemo(() => new GatewayApi(credentials, gatewayUrl), [credentials, gatewayUrl]);
-  const { data, healthError } = useGatewayDashboard(api, serviceReady, location.page);
+  const api = useMemo(
+    () => new GatewayApi(credentials, gatewayUrl, desktop.native ? nativeManagement : undefined),
+    [credentials, gatewayUrl, desktop.native],
+  );
+  const { data: health, error: healthError } = useGatewayHealth(api, serviceReady);
 
   const updateCredentials = useCallback((next: Credentials): void => {
     void queryClient.cancelQueries({ queryKey: gatewayQueryKeys.all });
@@ -74,14 +78,10 @@ export function App() {
   }, [desktop.native, serviceReady]);
 
   const navigate = useCallback<Navigate>((next, options = {}) => {
-    const params = new URLSearchParams();
-    if (["metrics", "management"].includes(next) && options.apiKeyId)
-      params.set("key", options.apiKeyId);
-    if (next === "playground" && options.modelId) params.set("model", options.modelId);
-    const hash = `#${next}${params.toString() ? `?${params}` : ""}`;
+    const hash = serializeLocation({ page: next, ...options });
     if (window.location.hash !== hash)
       window.history[options.replace ? "replaceState" : "pushState"](null, "", hash);
-    setLocation({ page: next, modelId: options.modelId, apiKeyId: options.apiKeyId });
+    setLocation(resolveLocation(hash));
     setMobileNav(false);
   }, []);
 
@@ -126,7 +126,7 @@ export function App() {
             ? "error"
             : desktop.native && desktop.status?.phase !== "running"
               ? (desktop.status?.phase ?? "starting")
-              : data.health.status
+              : health.status
         }
         theme={theme}
         onNavigate={navigate}
@@ -136,7 +136,11 @@ export function App() {
       >
         {(!updating || desktop.status?.canForceExit) && <ServiceBanner service={desktop} />}
         {(location.page !== "settings" || location.settingsTab !== "updates") && (
-          <UpdateBanner updates={updates} activeRequests={desktop.status?.activeRequests ?? 0} />
+          <UpdateBanner
+            onNavigate={navigate}
+            updates={updates}
+            activeRequests={desktop.status?.activeRequests ?? 0}
+          />
         )}
         {healthError && serviceReady && (
           <div
@@ -164,11 +168,15 @@ export function App() {
           }
         >
           {location.page === "overview" && (
-            <OverviewPage data={data} gatewayUrl={gatewayUrl} onNavigate={navigate} />
+            <OverviewScreen
+              api={api}
+              enabled={serviceReady}
+              gatewayUrl={gatewayUrl}
+              onNavigate={navigate}
+            />
           )}
           {location.page === "playground" && (
             <PlaygroundPage
-              data={data}
               api={api}
               initialModelId={location.modelId}
               onNavigate={navigate}
@@ -178,7 +186,7 @@ export function App() {
           )}
           {location.page === "metrics" && (
             <MetricsPage
-              data={data}
+              health={health}
               api={api}
               enabled={serviceReady}
               initialKeyId={location.apiKeyId}
@@ -188,7 +196,7 @@ export function App() {
           {location.page === "management" && (
             <ManagementPage
               initialKeyId={location.apiKeyId}
-              data={data}
+              health={health}
               api={api}
               onNotice={showNotice}
               onNavigate={navigate}
@@ -197,6 +205,8 @@ export function App() {
           )}
           {location.page === "settings" && (
             <SettingsPage
+              tab={location.settingsTab ?? "connection"}
+              onTabChange={(settingsTab) => navigate("settings", { settingsTab })}
               credentials={credentials}
               onCredentials={updateCredentials}
               themePreference={themePreference}

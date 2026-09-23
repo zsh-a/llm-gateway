@@ -15,8 +15,8 @@ import {
 } from "../../components/ui";
 import { formatTime } from "../../lib/format";
 import { queryErrorMessage } from "../../lib/query";
+import { isTauriRuntime } from "../../platform";
 import {
-  isTauriRuntime,
   loadRemoteSyncDraft,
   type RemoteSyncSettings,
   type RemoteSyncStatus,

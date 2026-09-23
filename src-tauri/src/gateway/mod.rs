@@ -1,70 +1,40 @@
-use crate::config::Config;
-use crate::db::{ChannelRecord, Db, MetricRecord};
-use axum::http::{HeaderMap, StatusCode};
+use crate::{config::Config, db::Db};
+use activity::Activity;
+use auth::AuthCache;
+use model_catalog::{ModelCatalog, ModelInfo};
 use reqwest::Client;
-use serde_json::{Map, Value, json};
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
-use tracing::warn;
+use routing::Route;
+use std::time::Duration;
+use tracking::MetricContext;
+#[cfg(test)]
+use {
+    crate::db::ChannelRecord,
+    axum::http::HeaderMap,
+    model_catalog::parse_models,
+    serde_json::{Value, json},
+};
 
 mod activity;
 mod auth;
+mod error;
 mod http;
 pub(crate) mod management;
 mod metrics;
 mod model_catalog;
 #[cfg(test)]
 mod model_catalog_tests;
+mod policy;
+#[cfg(test)]
+mod protocol_tests;
 mod protocols;
+mod routing;
 mod sync;
+mod tracking;
 mod upstream;
+mod util;
 
-use activity::{Activity, RequestGuard};
-pub(crate) use http::serve;
-pub(crate) use http::serve_listener;
+pub(crate) use http::{serve, serve_listener};
 pub(crate) use sync::{RemoteSyncPullResult, RemoteSyncSettings, RemoteSyncStatus};
-
-use auth::{
-    GatewayError, error_response, hash_secret, now_ms, read_auth_captured_at, read_auth_headers,
-    request_credential, secret_equal,
-};
-use model_catalog::{ModelCache, ModelInfo, parse_models};
-
-const MIMO_URL: &str = "https://mimo-server-cn.xiaomimimo.com/api/route/chat/completions";
-const MIMO_MODELS_URL: &str = "https://mimo-server-cn.xiaomimimo.com/api/model/list";
-const WORKBUDDY_URL: &str = "https://copilot.tencent.com/v2/chat/completions";
-const WORKBUDDY_MODELS_URL: &str = "https://copilot.tencent.com/v3/config";
-// /v3/config selects its catalog by platform as well as client version.
-// Older auth vaults omitted User-Agent; WorkBuddy alone returns a legacy catalog.
-const WORKBUDDY_USER_AGENT: &str = "CLI/5.5.6 WorkBuddy/5.5.6";
-
-fn load_auth_cache(config: &Config) -> HashMap<String, HeaderMap> {
-    let mut auth = HashMap::new();
-    if let Ok(entries) = std::fs::read_dir(&config.auth_cache_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                continue;
-            }
-            let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            if let Some(headers) = read_auth_headers(&path) {
-                auth.insert(name.to_string(), headers);
-            }
-        }
-    }
-    for provider in ["mimo", "workbuddy"] {
-        let path = config.auth_path(provider);
-        if !auth.contains_key(provider) {
-            if let Some(headers) = read_auth_headers(&path) {
-                auth.insert(provider.to_string(), headers);
-            }
-        }
-    }
-    auth
-}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -72,54 +42,8 @@ pub struct AppState {
     pub db: Db,
     pub client: Client,
     pub(crate) activity: Activity,
-    auth: Arc<RwLock<HashMap<String, HeaderMap>>>,
-    model_cache: Arc<RwLock<Option<ModelCache>>>,
-    model_refresh: Arc<tokio::sync::Mutex<()>>,
-}
-
-#[derive(Clone, Debug)]
-struct Identity {
-    key_id: String,
-    name: String,
-    managed: bool,
-    allowed_models: Vec<String>,
-    rpm_limit: Option<i64>,
-    tpm_limit: Option<i64>,
-    quota_tokens: Option<i64>,
-    used_tokens: i64,
-}
-
-#[derive(Clone, Debug)]
-struct Route {
-    provider: String,
-    channel_id: String,
-    upstream_url: String,
-    upstream_model: String,
-    auth_ref: String,
-}
-
-#[derive(Clone)]
-struct MetricContext {
-    state: AppState,
-    draft: Arc<Mutex<MetricDraft>>,
-}
-
-#[derive(Default)]
-struct MetricDraft {
-    active: Option<RequestGuard>,
-    id: String,
-    started_at: i64,
-    protocol: String,
-    provider: Option<String>,
-    channel_id: Option<String>,
-    model: Option<String>,
-    status: Option<String>,
-    status_code: Option<i64>,
-    finish_reason: Option<String>,
-    api_key_id: Option<String>,
-    usage_json: Option<String>,
-    finished: bool,
-    diagnostics: upstream::RequestDiagnostics,
+    auth: AuthCache,
+    catalog: ModelCatalog,
 }
 
 impl AppState {
@@ -146,23 +70,17 @@ impl AppState {
             default_model: String::new(),
             metrics_max_records: 100,
         };
-        Self {
+        Self::assemble(
             config,
-            db: Db::open(std::path::Path::new(":memory:")).unwrap(),
-            client: Client::builder().no_proxy().build().unwrap(),
-            activity: Activity::default(),
-            auth: Arc::new(RwLock::new(HashMap::new())),
-            model_cache: Arc::new(RwLock::new(None)),
-            model_refresh: Arc::new(tokio::sync::Mutex::new(())),
-        }
+            Db::open(std::path::Path::new(":memory:")).unwrap(),
+            Client::builder().no_proxy().build().unwrap(),
+            AuthCache::default(),
+        )
     }
 
     #[cfg(test)]
     pub(crate) fn test_upstream(&self, url: &str) {
-        self.auth
-            .write()
-            .unwrap()
-            .insert("mimo".into(), HeaderMap::new());
+        self.auth.set_headers("mimo", HeaderMap::new());
         self.db
             .upsert_channel(&ChannelRecord {
                 id: "test".into(),
@@ -181,57 +99,34 @@ impl AppState {
     pub fn new(config: Config) -> anyhow::Result<Self> {
         config.ensure_runtime_dir()?;
         let db = Db::open(&config.database_path())?;
-        db.seed_channels(&config.channels_file)?;
+        db.initialize_channels(&config.channels_file, &routing::default_channels())?;
         db.seed_api_keys(&config.api_keys_file)?;
-        if db.list_channels()?.is_empty() {
-            db.upsert_channel(&ChannelRecord {
-                id: "mimo-default".into(),
-                name: "MiMo 默认渠道".into(),
-                provider_id: "mimo".into(),
-                auth_ref: "mimo".into(),
-                upstream_url: Some(MIMO_URL.into()),
-                enabled: true,
-                priority: 0,
-                weight: 1,
-                model_mappings: json!({}),
-            })?;
-            db.upsert_channel(&ChannelRecord {
-                id: "workbuddy-default".into(),
-                name: "WorkBuddy 默认渠道".into(),
-                provider_id: "workbuddy".into(),
-                auth_ref: "workbuddy".into(),
-                upstream_url: Some(WORKBUDDY_URL.into()),
-                enabled: true,
-                priority: 0,
-                weight: 1,
-                model_mappings: json!({}),
-            })?;
-        }
-
-        let auth = load_auth_cache(&config);
+        let auth = AuthCache::load(&config);
         let client = Client::builder()
             .user_agent("llm-gateway-rust/1.0")
             .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
             .pool_max_idle_per_host(8)
             .build()?;
-        Ok(Self {
+        Ok(Self::assemble(config, db, client, auth))
+    }
+
+    fn assemble(config: Config, db: Db, client: Client, auth: AuthCache) -> Self {
+        let catalog = ModelCatalog::new(client.clone(), auth.clone());
+        Self {
             config,
             db,
             client,
             activity: Activity::default(),
-            auth: Arc::new(RwLock::new(auth)),
-            model_cache: Arc::new(RwLock::new(None)),
-            model_refresh: Arc::new(tokio::sync::Mutex::new(())),
-        })
+            auth,
+            catalog,
+        }
     }
-
     pub(crate) async fn remote_sync_status(
         &self,
         settings: RemoteSyncSettings,
     ) -> anyhow::Result<RemoteSyncStatus> {
         sync::status(self, settings).await
     }
-
     pub(crate) async fn remote_sync_pull(
         &self,
         settings: RemoteSyncSettings,
@@ -240,537 +135,17 @@ impl AppState {
     ) -> anyhow::Result<RemoteSyncPullResult> {
         sync::pull(self, settings, passphrase, force).await
     }
-
     pub(crate) async fn reload_auth_cache(&self) -> anyhow::Result<()> {
-        // A request with the previous credentials must finish before invalidating its catalog.
-        let _refresh = self.model_refresh.lock().await;
-        let auth = load_auth_cache(&self.config);
-        let mut current = self
-            .auth
-            .write()
-            .map_err(|_| anyhow::anyhow!("认证缓存锁已失效"))?;
-        *current = auth;
-        if let Ok(mut cache) = self.model_cache.write() {
-            *cache = None;
-        }
-        Ok(())
+        self.catalog.reload_auth(&self.config).await
     }
-
-    pub(crate) fn auth_headers(&self, auth_ref: &str) -> Option<HeaderMap> {
-        self.auth
-            .read()
-            .ok()
-            .and_then(|auth| auth.get(auth_ref).cloned())
-    }
-
-    fn has_auth(&self, auth_ref: &str) -> bool {
-        self.auth
-            .read()
-            .ok()
-            .is_some_and(|auth| auth.contains_key(auth_ref))
-    }
-
-    fn metric(&self, protocol: &str, identity: &Identity) -> Option<MetricContext> {
-        let now = now_ms();
-        let id = Db::new_id();
-        let active = self
-            .activity
-            .begin(id.clone(), identity.key_id.clone(), now)?;
-        Some(MetricContext {
-            state: self.clone(),
-            draft: Arc::new(Mutex::new(MetricDraft {
-                id,
-                active: Some(active),
-                started_at: now,
-                protocol: protocol.to_string(),
-                api_key_id: Some(identity.key_id.clone()),
-                ..MetricDraft::default()
-            })),
-        })
-    }
-
-    fn auth_status(&self) -> Value {
-        let providers = ["mimo", "workbuddy"]
-            .into_iter()
-            .map(|provider| {
-                let path = self.config.auth_path(provider);
-                let captured_at = read_auth_captured_at(&path);
-                (
-                    provider.to_string(),
-                    json!({
-                    "ready": self.has_auth(provider),
-                        "capturedAt": captured_at,
-                        "source": "cache"
-                    }),
-                )
-            })
-            .collect::<Map<_, _>>();
-        json!({ "ready": providers.values().any(|value| value.get("ready") == Some(&Value::Bool(true))), "providers": providers })
-    }
-
-    fn requires_authentication(&self) -> bool {
-        !self.config.proxy_api_key.is_empty() || self.db.count_api_keys().unwrap_or(0) > 0
-    }
-
-    fn authenticate(&self, headers: &HeaderMap) -> Option<Identity> {
-        let credential = request_credential(headers);
-        if self.config.proxy_api_key.is_empty() && self.db.count_api_keys().unwrap_or(0) == 0 {
-            return Some(Identity {
-                key_id: "anonymous".into(),
-                name: "匿名访问".into(),
-                managed: false,
-                allowed_models: Vec::new(),
-                rpm_limit: None,
-                tpm_limit: None,
-                quota_tokens: None,
-                used_tokens: 0,
-            });
-        }
-        if !credential.is_empty() && secret_equal(&credential, &self.config.proxy_api_key) {
-            return Some(Identity {
-                key_id: "environment".into(),
-                name: "环境变量 API Key".into(),
-                managed: false,
-                allowed_models: Vec::new(),
-                rpm_limit: None,
-                tpm_limit: None,
-                quota_tokens: None,
-                used_tokens: 0,
-            });
-        }
-        if credential.is_empty() {
-            return None;
-        }
-        let hash = hash_secret(&credential);
-        let key = self.db.find_api_key_by_hash(&hash).ok().flatten()?;
-        if !key.enabled
-            || key.revoked_at.is_some()
-            || key.expires_at.is_some_and(|expires| expires <= now_ms())
-        {
-            return None;
-        }
-        Some(Identity {
-            key_id: key.id,
-            name: key.name,
-            managed: true,
-            allowed_models: key.allowed_models,
-            rpm_limit: key.rpm_limit,
-            tpm_limit: key.tpm_limit,
-            quota_tokens: key.quota_tokens,
-            used_tokens: key.used_tokens,
-        })
-    }
-
-    fn admin_authorized(&self, headers: &HeaderMap) -> bool {
-        !self.config.proxy_admin_key.is_empty()
-            && secret_equal(&request_credential(headers), &self.config.proxy_admin_key)
-    }
-
-    fn authorize_model(&self, identity: &Identity, model: &str) -> Result<(), GatewayError> {
-        if identity.allowed_models.is_empty()
-            || identity
-                .allowed_models
-                .iter()
-                .any(|item| item == "*" || item == model)
-        {
-            return Ok(());
-        }
-        Err(Box::new(error_response(
-            StatusCode::FORBIDDEN,
-            format!("API Key {} 无权访问模型 {}", identity.name, model),
-            "permission_error",
-        )))
-    }
-
-    fn authorize_limits(&self, identity: &Identity) -> Result<(), GatewayError> {
-        if !identity.managed {
-            return Ok(());
-        }
-        if identity
-            .quota_tokens
-            .is_some_and(|quota| identity.used_tokens >= quota)
-        {
-            return Err(Box::new(error_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                "API Key Token 配额已用尽",
-                "rate_limit_error",
-            )));
-        }
-        let rows = self.db.metric_rows(now_ms() - 60_000).unwrap_or_default();
-        let own = rows
-            .iter()
-            .filter(|row| row.api_key_id.as_deref() == Some(identity.key_id.as_str()))
-            .collect::<Vec<_>>();
-        if identity
-            .rpm_limit
-            .is_some_and(|limit| own.len() as i64 >= limit)
-        {
-            return Err(Box::new(error_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                "API Key 已达到每分钟请求上限",
-                "rate_limit_error",
-            )));
-        }
-        if let Some(limit) = identity.tpm_limit {
-            let used = own
-                .iter()
-                .filter_map(|row| row.usage_json.as_deref())
-                .filter_map(|raw| serde_json::from_str::<Value>(raw).ok())
-                .filter_map(|usage| {
-                    usage
-                        .get("totalTokens")
-                        .or_else(|| usage.get("total_tokens"))
-                        .and_then(Value::as_i64)
-                })
-                .sum::<i64>();
-            if used >= limit {
-                return Err(Box::new(error_response(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "API Key 已达到每分钟 Token 上限",
-                    "rate_limit_error",
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    fn select_routes(&self, model: &str) -> Result<Vec<Route>, GatewayError> {
-        let (provider, upstream_model) = if let Some((provider, model)) = model.split_once('/') {
-            (provider.to_ascii_lowercase(), model.to_string())
-        } else if model.eq_ignore_ascii_case("default") {
-            ("workbuddy".into(), model.to_string())
-        } else if model.to_ascii_lowercase().starts_with("mimo") {
-            ("mimo".into(), model.to_string())
-        } else {
-            let known_mimo = ["mimo-x-pro-preview", "mimo-pro", "mimo-flash"];
-            if known_mimo.contains(&model) {
-                ("mimo".into(), model.to_string())
-            } else {
-                ("workbuddy".into(), model.to_string())
-            }
-        };
-        let channels = self.db.list_channels().unwrap_or_default();
-        let mut candidates: Vec<ChannelRecord> = channels
-            .into_iter()
-            .filter(|channel| channel.enabled && channel.provider_id == provider)
-            .collect();
-        candidates.sort_by(|left, right| {
-            right
-                .priority
-                .cmp(&left.priority)
-                .then_with(|| right.weight.cmp(&left.weight))
-        });
-        if candidates.is_empty() {
-            candidates.push(ChannelRecord {
-                id: format!("{provider}-default"),
-                name: provider.clone(),
-                provider_id: provider.clone(),
-                auth_ref: provider.clone(),
-                upstream_url: None,
-                enabled: true,
-                priority: 0,
-                weight: 1,
-                model_mappings: json!({}),
-            });
-        }
-        let routes = candidates
-            .into_iter()
-            .filter_map(|channel| {
-                if !self.has_auth(&channel.auth_ref) {
-                    return None;
-                }
-                let mapped_model = channel
-                    .model_mappings
-                    .get(model)
-                    .or_else(|| channel.model_mappings.get(&upstream_model))
-                    .or_else(|| channel.model_mappings.get("*"))
-                    .and_then(Value::as_str)
-                    .unwrap_or(&upstream_model)
-                    .to_string();
-                let upstream_url = channel
-                    .upstream_url
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| {
-                        if provider == "mimo" {
-                            MIMO_URL.into()
-                        } else {
-                            WORKBUDDY_URL.into()
-                        }
-                    });
-                Some(Route {
-                    provider: provider.clone(),
-                    channel_id: channel.id,
-                    upstream_url,
-                    upstream_model: mapped_model,
-                    auth_ref: channel.auth_ref,
-                })
-            })
-            .collect::<Vec<_>>();
-        if routes.is_empty() {
-            return Err(Box::new(error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("provider {} 尚未配置登录凭据", provider),
-                "configuration_error",
-            )));
-        }
-        Ok(routes)
-    }
-
     async fn models(&self) -> Vec<ModelInfo> {
-        self.models_from(MIMO_MODELS_URL, WORKBUDDY_MODELS_URL)
-            .await
+        self.catalog.models(&self.config).await
     }
-
+    #[cfg(test)]
     async fn models_from(&self, mimo_url: &str, workbuddy_url: &str) -> Vec<ModelInfo> {
-        // Startup, health checks and the console can all request models concurrently.
-        let _refresh = self.model_refresh.lock().await;
-        if let Some(cache) = self.model_cache.read().ok().and_then(|guard| guard.clone()) {
-            if cache.fetched_at.elapsed() < Duration::from_secs(300) {
-                return cache.models;
-            }
-        }
-        let mut models = Vec::new();
-        if self.config.model_discovery {
-            let (mimo, workbuddy) = tokio::join!(
-                self.fetch_mimo_models(mimo_url),
-                self.fetch_workbuddy_models(workbuddy_url),
-            );
-            if let Some(remote) = mimo {
-                models.extend(remote);
-            }
-            if let Some(remote) = workbuddy {
-                if let Err(error) =
-                    model_catalog::save_workbuddy_catalog(&self.config.runtime_dir, &remote)
-                {
-                    warn!(%error, "无法保存 WorkBuddy 模型缓存，当前会话仍使用远端目录");
-                }
-                models.extend(remote);
-            } else {
-                models.extend(self.local_workbuddy_models());
-            }
-        }
-        let mut seen = HashSet::new();
-        models.retain(|model| seen.insert(model.id.clone()));
-        if let Ok(mut cache) = self.model_cache.write() {
-            *cache = Some(ModelCache {
-                fetched_at: Instant::now(),
-                models: models.clone(),
-            });
-        }
-        models
-    }
-
-    fn local_workbuddy_models(&self) -> Vec<ModelInfo> {
-        let mut workbuddy_files = Vec::new();
-        if let Some(path) = &self.config.model_file {
-            workbuddy_files.push(path.clone());
-        }
-        workbuddy_files.push(model_catalog::workbuddy_catalog_path(
-            &self.config.runtime_dir,
-        ));
-        // Client product files can contain bundled defaults merged into their cache.
-        // Only use an explicit catalog or models previously fetched by this gateway.
-        for path in workbuddy_files {
-            if let Ok(raw) = std::fs::read_to_string(path) {
-                let discovered = parse_models(&raw, "workbuddy");
-                if !discovered.is_empty() {
-                    return discovered;
-                }
-            }
-        }
-        Vec::new()
-    }
-
-    async fn fetch_workbuddy_models(&self, endpoint: &str) -> Option<Vec<ModelInfo>> {
-        let mut headers = self.auth_headers("workbuddy")?;
-        headers
-            .entry(axum::http::header::USER_AGENT)
-            .or_insert(axum::http::HeaderValue::from_static(WORKBUDDY_USER_AGENT));
-        let response = match self
-            .client
-            .get(endpoint)
-            .headers(headers)
-            .header("accept", "application/json")
-            .timeout(Duration::from_millis(
-                self.config.model_discovery_timeout_ms,
-            ))
-            .send()
+        self.catalog
+            .models_from(&self.config, mimo_url, workbuddy_url)
             .await
-        {
-            Ok(response) if response.status().is_success() => response,
-            Ok(response) => {
-                warn!(status = %response.status(), "WorkBuddy 模型目录请求失败，使用本地缓存");
-                return None;
-            }
-            Err(error) => {
-                warn!(%error, "WorkBuddy 模型目录请求失败，使用本地缓存");
-                return None;
-            }
-        };
-        let body = match response.text().await {
-            Ok(body) => body,
-            Err(error) => {
-                warn!(%error, "读取 WorkBuddy 模型目录失败，使用本地缓存");
-                return None;
-            }
-        };
-        let Ok(value) = serde_json::from_str::<Map<String, Value>>(&body) else {
-            warn!("WorkBuddy 配置不是有效 JSON，保留本地缓存");
-            return None;
-        };
-        if let Some(code) = value.get("code") {
-            if code != &json!(0) && code != &json!("0") {
-                warn!("WorkBuddy 配置返回业务错误，保留本地缓存");
-                return None;
-            }
-        }
-        let models = parse_models(&body, "workbuddy");
-        if models.is_empty() {
-            warn!("WorkBuddy 配置未返回有效模型，保留本地缓存");
-            return None;
-        }
-        Some(models)
-    }
-
-    async fn fetch_mimo_models(&self, endpoint: &str) -> Option<Vec<ModelInfo>> {
-        let headers = self.auth_headers("mimo")?;
-        let response = self
-            .client
-            .get(endpoint)
-            .headers(headers)
-            .timeout(Duration::from_millis(
-                self.config.model_discovery_timeout_ms,
-            ))
-            .send()
-            .await
-            .ok()?
-            .error_for_status()
-            .ok()?;
-        let body = response.text().await.ok()?;
-        let models = parse_models(&body, "mimo");
-        (!models.is_empty()).then_some(models)
-    }
-}
-
-impl MetricContext {
-    fn id(&self) -> String {
-        self.draft
-            .lock()
-            .map(|draft| draft.id.clone())
-            .unwrap_or_default()
-    }
-
-    fn headers_received(&self) {
-        if let Ok(mut draft) = self.draft.lock() {
-            draft.diagnostics.response_headers_ms = Some((now_ms() - draft.started_at).max(0));
-        }
-    }
-
-    fn observe_chunk(&self, bytes: usize, accumulator: &protocols::StreamAccumulator) {
-        if let Ok(mut draft) = self.draft.lock() {
-            let elapsed = (now_ms() - draft.started_at).max(0);
-            draft.diagnostics.first_byte_ms.get_or_insert(elapsed);
-            draft.diagnostics.last_byte_ms = Some(elapsed);
-            draft.diagnostics.received_bytes += bytes as u64;
-            draft.diagnostics.received_chunks += 1;
-            if let Some(usage) = &accumulator.usage {
-                draft.usage_json = Some(usage.to_string());
-            }
-            if let Some(reason) = &accumulator.finish_reason {
-                draft.finish_reason = Some(reason.clone());
-            }
-        }
-    }
-
-    fn fail(&self, failure: &upstream::UpstreamFailure) {
-        if let Ok(mut draft) = self.draft.lock() {
-            if draft.finished {
-                return;
-            }
-            draft.diagnostics.error = Some(failure.clone());
-            warn!(request_id = %draft.id, provider = ?draft.provider, channel = ?draft.channel_id,
-                error_code = failure.code, stage = failure.stage, timeout_ms = ?failure.timeout_ms,
-                received_bytes = draft.diagnostics.received_bytes, first_byte_ms = ?draft.diagnostics.first_byte_ms,
-                last_byte_ms = ?draft.diagnostics.last_byte_ms, "上游请求失败");
-        }
-        self.finish("error", Some(failure.status_code()), None, None);
-    }
-
-    fn set_route(&self, route: &Route, model: &str) {
-        if let Ok(mut draft) = self.draft.lock() {
-            if let Some(active) = &draft.active {
-                active.set_route(&route.provider, model);
-            }
-            draft.provider = Some(route.provider.clone());
-            draft.channel_id = Some(route.channel_id.clone());
-            draft.model = Some(model.to_string());
-            draft.diagnostics = upstream::RequestDiagnostics {
-                attempts: draft.diagnostics.attempts + 1,
-                ..Default::default()
-            };
-        }
-    }
-
-    fn finish(
-        &self,
-        status: &str,
-        code: Option<StatusCode>,
-        finish_reason: Option<&str>,
-        usage: Option<&Value>,
-    ) {
-        let mut guard = match self.draft.lock() {
-            Ok(guard) => guard,
-            Err(_) => return,
-        };
-        if guard.finished {
-            return;
-        }
-        guard.finished = true;
-        let active = guard.active.take();
-        guard.status = Some(status.to_string());
-        guard.status_code = code.map(|value| value.as_u16() as i64);
-        if let Some(reason) = finish_reason {
-            guard.finish_reason = Some(reason.to_string());
-        }
-        if let Some(usage) = usage {
-            guard.usage_json = Some(usage.to_string());
-        }
-        let completed_at = now_ms();
-        let record = MetricRecord {
-            id: guard.id.clone(),
-            started_at: guard.started_at,
-            completed_at,
-            protocol: guard.protocol.clone(),
-            provider: guard.provider.clone(),
-            channel_id: guard.channel_id.clone(),
-            model: guard.model.clone(),
-            status: guard.status.clone().unwrap_or_else(|| "error".into()),
-            status_code: guard.status_code,
-            finish_reason: guard.finish_reason.clone(),
-            api_key_id: guard.api_key_id.clone(),
-            usage_json: guard.usage_json.clone(),
-            diagnostics_json: serde_json::to_string(&guard.diagnostics).ok(),
-        };
-        drop(guard);
-        if let Err(error) = self.state.db.insert_metric(&record) {
-            warn!(%error, "写入 SQLite 指标失败");
-        }
-        let _ = self
-            .state
-            .db
-            .prune_metrics(self.state.config.metrics_max_records);
-        drop(active);
-    }
-}
-
-impl Drop for MetricContext {
-    fn drop(&mut self) {
-        // A client disconnect drops the stream before the upstream reaches EOF.
-        // The last metric handle records that request as canceled so an
-        // abandoned stream cannot remain invisible in SQLite forever.
-        if Arc::strong_count(&self.draft) == 1 {
-            self.finish("canceled", Some(StatusCode::REQUEST_TIMEOUT), None, None);
-        }
     }
 }
 

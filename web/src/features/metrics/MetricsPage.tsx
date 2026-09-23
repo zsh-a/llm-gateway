@@ -1,4 +1,5 @@
 import { Activity, Database, Gauge, ShieldCheck } from "lucide-react";
+import type { ComponentProps } from "react";
 import { useEffect, useState } from "react";
 import type { GatewayApi } from "../../api";
 import {
@@ -23,7 +24,7 @@ import {
 import { RequestTable } from "../../components/usage";
 import { emptySummary } from "../../lib/constants";
 import { formatCompact, formatDuration, formatNumber, formatTime } from "../../lib/format";
-import { useMetrics } from "../../lib/gateway-queries";
+import { useKeys, useMetrics, useModels } from "../../lib/gateway-queries";
 import type { DashboardData, MetricsQuery, MetricsWindow, Navigate } from "../../types";
 import { KeyUsageTable } from "./KeyUsageTable";
 
@@ -34,7 +35,7 @@ export function MetricsPage({
   initialKeyId,
   onNavigate,
 }: {
-  data: DashboardData;
+  data: Pick<DashboardData, "health" | "models" | "keys">;
   api: GatewayApi;
   enabled?: boolean;
   initialKeyId?: string;
@@ -369,4 +370,13 @@ export function MetricsPage({
       </ResourceContent>
     </div>
   );
+}
+
+export function MetricsScreen({
+  health,
+  ...props
+}: Omit<ComponentProps<typeof MetricsPage>, "data"> & { health: DashboardData["health"] }) {
+  const models = useModels(props.api, props.enabled);
+  const keys = useKeys(props.api, (props.enabled ?? true) && props.api.isAdministrator);
+  return <MetricsPage {...props} data={{ health, models: models.data, keys: keys.data }} />;
 }
