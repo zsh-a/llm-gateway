@@ -12,7 +12,8 @@ export function statusVariant(
 ): "success" | "warning" | "danger" | "muted" {
   if (status === "success" || status === "ok" || status === "ready") return "success";
   if (status === "error" || status === "offline" || status === "failed") return "danger";
-  if (["pending", "starting", "stopping", "not_ready"].includes(status ?? "")) return "warning";
+  if (["pending", "starting", "stopping", "not_ready", "incomplete"].includes(status ?? ""))
+    return "warning";
   return "muted";
 }
 

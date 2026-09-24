@@ -5,6 +5,49 @@ import { RequestTable } from "../src/components/usage";
 import type { RecentRequest } from "../src/types";
 
 describe("request failure diagnostics", () => {
+  it("shows token truncation, forwarded budgets and failed attempts", async () => {
+    const user = userEvent.setup();
+    render(
+      <RequestTable
+        rows={[
+          {
+            id: "limited",
+            startedAt: 1,
+            status: "success",
+            finishReason: "length",
+            diagnostics: {
+              attempts: 2,
+              responseHeadersMs: 1,
+              firstByteMs: 2,
+              lastByteMs: 3,
+              receivedBytes: 42,
+              receivedChunks: 2,
+              error: null,
+              outputBudget: {
+                requested: { max_output_tokens: 128 },
+                upstream: { max_completion_tokens: 128 },
+              },
+              attemptDetails: [
+                {
+                  channelId: "primary",
+                  provider: "mimo",
+                  model: "test",
+                  error: { message: "上游请求限流" },
+                },
+                { channelId: "backup", provider: "mimo", model: "test", error: null },
+              ],
+            },
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText("达到输出上限")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "展开请求详情" }));
+    expect(screen.getByText("max_output_tokens: 128")).toBeTruthy();
+    expect(screen.getByText("max_completion_tokens: 128")).toBeTruthy();
+    expect(screen.getByText(/primary.*上游请求限流/)).toBeTruthy();
+    expect(screen.getByText(/backup.*已接收上游响应/)).toBeTruthy();
+  });
   it("distinguishes connection, first-data and idle timeouts and keeps legacy uncertainty", async () => {
     const user = userEvent.setup();
     const rows: RecentRequest[] = [

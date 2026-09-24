@@ -36,6 +36,16 @@ impl Fixture {
         cors_origin: &str,
         reply: String,
     ) -> Self {
+        Self::with_status(limit, api_key, cors_origin, reply, StatusCode::OK).await
+    }
+
+    async fn with_status(
+        limit: Option<usize>,
+        api_key: &str,
+        cors_origin: &str,
+        reply: String,
+        status: StatusCode,
+    ) -> Self {
         let runtime = tempfile::tempdir().unwrap();
         let mut state = AppState::test_state(runtime.path());
         state.config.proxy_api_key = api_key.into();
@@ -66,7 +76,18 @@ impl Fixture {
                             .map(str::len)
                             .sum();
                         observed.lock().unwrap().push((reasoning, tools));
-                        ([("content-type", "text/event-stream")], reply)
+                        (
+                            status,
+                            [(
+                                "content-type",
+                                if status.is_success() {
+                                    "text/event-stream"
+                                } else {
+                                    "application/json"
+                                },
+                            )],
+                            reply,
+                        )
                     }
                 }),
             )
@@ -145,6 +166,154 @@ impl Drop for Fixture {
 }
 
 #[tokio::test]
+async fn output_budget_and_length_termination_are_visible_in_both_protocols() {
+    let raw = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6,\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\ndata: [DONE]\n\n";
+    let fixture = Fixture::with_reply(None, "", "", raw.into()).await;
+    for stream in [false, true] {
+        let response = fixture
+            .send(
+                RESPONSES,
+                json!({"model":"mimo/test","input":"test","stream":stream,"max_output_tokens":2})
+                    .to_string(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let id = response.headers()["x-request-id"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let bytes = response.bytes().await.unwrap();
+        let value: Value = if stream {
+            super::super::protocol_tests::response_events(&bytes)
+                .last()
+                .unwrap()["response"]
+                .clone()
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        assert_eq!(value["status"], "incomplete");
+        assert_eq!(value["incomplete_details"]["reason"], "max_output_tokens");
+        assert_eq!(
+            value["usage"]["output_tokens_details"]["reasoning_tokens"],
+            1
+        );
+        let records = fixture.state.db.metric_rows(0).unwrap();
+        let record = records.iter().find(|r| r.id == id).unwrap();
+        let diagnostics: Value =
+            serde_json::from_str(record.diagnostics_json.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            diagnostics["outputBudget"]["requested"]["max_output_tokens"],
+            2
+        );
+        assert_eq!(
+            diagnostics["outputBudget"]["upstream"]["max_completion_tokens"],
+            2
+        );
+        assert_eq!(record.finish_reason.as_deref(), Some("length"));
+    }
+    let chat = fixture
+        .send(
+            CHAT,
+            json!({"model":"mimo/test","messages":[],"stream":false}).to_string(),
+        )
+        .await
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(chat["usage"]["total_tokens"], 6);
+    assert!(chat["usage"].get("totalTokens").is_none());
+    assert_eq!(
+        fixture.metrics("/metrics/summary", None).await["tokens"]["reasoningTokens"],
+        3
+    );
+}
+
+#[tokio::test]
+async fn upstream_errors_retain_safe_causes_without_echoing_prompts_or_credentials() {
+    let body = json!({"error":{"code":"context_length_exceeded","message":"secret-input sk-secret-session"}}).to_string();
+    let fixture = Fixture::with_status(None, "", "", body, StatusCode::BAD_REQUEST).await;
+    let response = fixture
+        .send(CHAT, json!({"model":"mimo/test","messages":[]}).to_string())
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.json::<Value>().await.unwrap();
+    assert_eq!(body["error"]["upstreamCode"], "context_length_exceeded");
+    assert!(body["error"]["message"].as_str().unwrap().contains("Token"));
+    assert!(!body.to_string().contains("secret"));
+    let records = fixture.state.db.metric_rows(0).unwrap();
+    let diagnostics = records[0].diagnostics_json.as_ref().unwrap();
+    assert!(diagnostics.contains("context_length_exceeded"));
+    assert!(!diagnostics.contains("secret"));
+}
+
+#[tokio::test]
+async fn invalid_budgets_and_stateful_responses_fail_before_contacting_upstream() {
+    let fixture = Fixture::new(None).await;
+    for body in [
+        json!({"input":"test","max_output_tokens":-1}),
+        json!({"input":"test","max_output_tokens":1.5}),
+        json!({"input":"test","previous_response_id":"resp_old"}),
+    ] {
+        let response = fixture.send(RESPONSES, body.to_string()).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    assert!(fixture.seen.lock().unwrap().is_empty());
+    assert!(fixture.state.db.metric_rows(0).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn models_list_and_alias_requests_use_the_same_channel_and_key_scope() {
+    let fixture = Fixture::new(None).await;
+    let mut channel = fixture.state.db.list_channels().unwrap().remove(0);
+    channel.model_mappings = json!({"fast":"test","private":"other"});
+    fixture.state.db.upsert_channel(&channel).unwrap();
+    let created = super::super::management::execute(
+        &fixture.state,
+        ManagementRequest::CreateKey {
+            body: json!({"name":"scoped","allowedModels":["fast"]}),
+        },
+    )
+    .await
+    .unwrap();
+    let secret = created["secret"].as_str().unwrap();
+    let models: Value = fixture
+        .client
+        .get(format!("{}/v1/models", fixture.base_url))
+        .bearer_auth(secret)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(models["data"].as_array().unwrap().len(), 1);
+    assert_eq!(models["data"][0]["id"], "fast");
+    let response = fixture
+        .client
+        .post(format!("{}{CHAT}", fixture.base_url))
+        .bearer_auth(secret)
+        .json(&json!({"model":"fast","messages":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.bytes().await.unwrap();
+    channel.enabled = false;
+    fixture.state.db.upsert_channel(&channel).unwrap();
+    let models: Value = fixture
+        .client
+        .get(format!("{}/v1/models", fixture.base_url))
+        .bearer_auth(secret)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(models["data"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn tool_calls_survive_streaming_chat_aggregation_and_responses_conversion() {
     let raw = super::super::protocol_tests::tool_stream("\r\n");
     let fixture = Fixture::with_reply(None, "", "", raw.clone()).await;
@@ -179,8 +348,13 @@ async fn tool_calls_survive_streaming_chat_aggregation_and_responses_conversion(
     assert!(response.headers().contains_key("x-request-id"));
     let response = response.json::<Value>().await.unwrap();
     assert_eq!(response["object"], "response");
-    assert_eq!(response["output"][1]["type"], "function_call");
-    assert_eq!(response["output"][1]["call_id"], "call-weather");
+    let call = response["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .unwrap();
+    assert_eq!(call["call_id"], "call-weather");
     assert_eq!(response["usage"]["total_tokens"], 7);
     assert_eq!(
         fixture.metrics("/metrics/summary", None).await["tokens"]["totalTokens"],
@@ -393,7 +567,17 @@ async fn cors_actual_requests_keep_authentication_and_support_models_and_streami
                 );
                 if authorized && [CHAT, RESPONSES].contains(&path) {
                     assert_eq!(response.headers()["content-type"], "text/event-stream");
-                    assert!(response.text().await.unwrap().contains("[DONE]"));
+                    assert!(
+                        response
+                            .text()
+                            .await
+                            .unwrap()
+                            .contains(if path == RESPONSES {
+                                "response.completed"
+                            } else {
+                                "[DONE]"
+                            })
+                    );
                 } else if authorized {
                     assert!(response.json::<Value>().await.unwrap()["data"].is_array());
                 }

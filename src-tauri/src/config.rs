@@ -224,6 +224,7 @@ pub struct Config {
     pub first_byte_timeout_ms: u64,
     pub idle_timeout_ms: u64,
     pub max_body_bytes: usize,
+    pub max_response_bytes: usize,
     pub proxy_api_key: String,
     pub proxy_admin_key: String,
     pub cors_origin: String,
@@ -349,6 +350,8 @@ impl Config {
             first_byte_timeout_ms,
             idle_timeout_ms,
             max_body_bytes: env_u64("MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES as u64) as usize,
+            max_response_bytes: env_u64("MAX_RESPONSE_BYTES", DEFAULT_MAX_BODY_BYTES as u64).max(1)
+                as usize,
             proxy_api_key: env::var("PROXY_API_KEY").unwrap_or_default(),
             proxy_admin_key: env::var("PROXY_ADMIN_KEY").unwrap_or_default(),
             cors_origin,

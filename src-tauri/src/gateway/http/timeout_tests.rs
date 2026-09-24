@@ -151,7 +151,11 @@ async fn idle_timeout_reports_sse_error_and_preserves_partial_usage() {
             assert!(!body.contains("[DONE]"));
             if streaming {
                 assert!(body.contains("hello"));
-                assert!(body.contains("event: error"));
+                assert!(body.contains(if path == "/v1/responses" {
+                    "event: response.failed"
+                } else {
+                    "event: error"
+                }));
             }
             let (row, diagnostics) = fixture.record(&id);
             assert_eq!(row.status, "error");

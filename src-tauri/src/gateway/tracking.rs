@@ -105,6 +105,7 @@ impl MetricContext {
     }
 
     pub fn fail(&self, failure: &upstream::UpstreamFailure) {
+        self.attempt_failed(failure);
         if let Ok(mut draft) = self.draft.lock() {
             if draft.finished {
                 return;
@@ -126,10 +127,41 @@ impl MetricContext {
             draft.provider = Some(route.provider.clone());
             draft.channel_id = Some(route.channel_id.clone());
             draft.model = Some(model.to_string());
+            let mut details = std::mem::take(&mut draft.diagnostics.attempt_details);
+            details.push(upstream::AttemptDetails {
+                channel_id: route.channel_id.clone(),
+                provider: route.provider.clone(),
+                model: route.upstream_model.clone(),
+                error: None,
+            });
             draft.diagnostics = upstream::RequestDiagnostics {
                 attempts: draft.diagnostics.attempts + 1,
+                attempt_details: details,
                 ..Default::default()
             };
+        }
+    }
+
+    pub fn attempt_failed(&self, failure: &upstream::UpstreamFailure) {
+        if let Ok(mut draft) = self.draft.lock() {
+            if let Some(attempt) = draft.diagnostics.attempt_details.last_mut() {
+                attempt.error = Some(failure.clone());
+            }
+        }
+    }
+
+    pub fn parameters(&self, requested: &Value, upstream: &Value) {
+        let budget = |body: &Value| {
+            ["max_output_tokens", "max_completion_tokens", "max_tokens"]
+                .into_iter()
+                .filter_map(|field| body[field].as_u64().map(|value| (field.to_string(), value)))
+                .collect()
+        };
+        if let Ok(mut draft) = self.draft.lock() {
+            draft.diagnostics.output_budget = Some(upstream::OutputBudget {
+                requested: budget(requested),
+                upstream: budget(upstream),
+            });
         }
     }
 

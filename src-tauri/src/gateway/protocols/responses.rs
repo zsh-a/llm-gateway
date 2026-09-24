@@ -1,8 +1,44 @@
-use super::normalize_usage;
+use super::response_usage;
+use crate::gateway::error::{ErrorKind, GatewayError};
 use crate::{db::Db, gateway::util::now_ms};
 use serde_json::{Map, Value, json};
 
-pub(crate) fn responses_to_chat(body: &Value) -> Value {
+pub(crate) fn responses_to_chat(body: &Value) -> Result<Value, GatewayError> {
+    if !body.is_object()
+        || body
+            .get("input")
+            .is_some_and(|v| !v.is_array() && !v.is_string())
+    {
+        return Err(GatewayError::new(
+            ErrorKind::InvalidRequest,
+            "input 必须是文本或数组",
+        ));
+    }
+    if body
+        .get("instructions")
+        .is_some_and(|v| !v.is_null() && !v.is_string())
+    {
+        return Err(GatewayError::new(
+            ErrorKind::InvalidRequest,
+            "当前 instructions 仅支持文本",
+        ));
+    }
+    for key in ["previous_response_id", "conversation"] {
+        if body.get(key).is_some_and(|v| !v.is_null()) {
+            return Err(GatewayError::new(
+                ErrorKind::InvalidRequest,
+                format!("暂不支持 {key}，请通过 input 传入完整会话"),
+            ));
+        }
+    }
+    for key in ["store", "background"] {
+        if body[key] == true {
+            return Err(GatewayError::new(
+                ErrorKind::InvalidRequest,
+                format!("暂不支持 {key}: true"),
+            ));
+        }
+    }
     let mut chat = Map::new();
     if let Some(model) = body.get("model") {
         chat.insert("model".into(), model.clone());
@@ -30,7 +66,8 @@ pub(crate) fn responses_to_chat(body: &Value) -> Value {
                     _ if item.get("role").is_some() => messages.push(json!({
                         "role":item["role"], "content":chat_content(item.get("content").unwrap_or(&Value::Null))
                     })),
-                    _ => {},
+                    Some("reasoning") => {}, // Reasoning items are not user messages.
+                    _ => return Err(GatewayError::new(ErrorKind::InvalidRequest, "不支持的 Responses input 类型")),
                 }
             }
         }
@@ -51,6 +88,12 @@ pub(crate) fn responses_to_chat(body: &Value) -> Value {
     }
     if let Some(tools) = chat.get_mut("tools").and_then(Value::as_array_mut) {
         for tool in tools {
+            if tool["type"] != "function" {
+                return Err(GatewayError::new(
+                    ErrorKind::InvalidRequest,
+                    "当前仅支持 function 工具",
+                ));
+            }
             if tool["type"] == "function" && tool.get("function").is_none() {
                 let mut function = tool.as_object().cloned().unwrap_or_default();
                 function.remove("type");
@@ -63,7 +106,19 @@ pub(crate) fn responses_to_chat(body: &Value) -> Value {
             *choice = json!({"type":"function", "function":{"name":choice["name"]}});
         }
     }
-    Value::Object(chat)
+    if let Some(effort) = body.get("reasoning").and_then(|v| v.get("effort")) {
+        chat.insert("reasoning_effort".into(), effort.clone());
+    }
+    if let Some(format) = body.get("text").and_then(|v| v.get("format")) {
+        let mut format = format.clone();
+        if format["type"] == "json_schema" {
+            let mut schema = format.as_object().cloned().unwrap_or_default();
+            schema.remove("type");
+            format = json!({"type":"json_schema", "json_schema":schema});
+        }
+        chat.insert("response_format".into(), format);
+    }
+    Ok(Value::Object(chat))
 }
 
 fn chat_content(value: &Value) -> Value {
@@ -84,6 +139,12 @@ pub(crate) fn chat_to_response(body: &Value, model: &str) -> Value {
     let message = &body["choices"][0]["message"];
     let mut output = Vec::new();
     let mut content = Vec::new();
+    if let Some(reasoning) = message["reasoning_content"]
+        .as_str()
+        .filter(|v| !v.is_empty())
+    {
+        output.push(json!({"type":"reasoning", "id":format!("rs_{}", Db::new_id()), "summary":[{"type":"summary_text", "text":reasoning}]}));
+    }
     if let Some(text) = message["content"].as_str().filter(|text| !text.is_empty()) {
         content.push(json!({"type":"output_text", "text":text, "annotations":[]}));
     }
@@ -98,22 +159,42 @@ pub(crate) fn chat_to_response(body: &Value, model: &str) -> Value {
             output.push(json!({"type":"function_call", "id":format!("fc_{}", Db::new_id()), "call_id":call["id"], "name":call["function"]["name"], "arguments":call["function"]["arguments"], "status":"completed"}));
         }
     }
-    let usage = body
-        .get("usage")
-        .map(normalize_usage)
-        .unwrap_or_else(|| json!({}));
-    let mut response_usage = Map::new();
-    for (source, target) in [
-        ("inputTokens", "input_tokens"),
-        ("outputTokens", "output_tokens"),
-        ("totalTokens", "total_tokens"),
-    ] {
-        if let Some(tokens) = usage.get(source) {
-            response_usage.insert(target.into(), tokens.clone());
+    let reason = body["choices"][0]["finish_reason"].as_str();
+    response_object(
+        &format!("resp_{}", Db::new_id()),
+        now_ms() / 1000,
+        model,
+        output,
+        reason,
+        body.get("usage"),
+    )
+}
+
+pub(super) fn response_object(
+    id: &str,
+    created: i64,
+    model: &str,
+    output: Vec<Value>,
+    reason: Option<&str>,
+    usage: Option<&Value>,
+) -> Value {
+    let incomplete = match reason {
+        Some("length") => Some("max_output_tokens"),
+        Some("content_filter") => Some("content_filter"),
+        _ => None,
+    };
+    let mut output = output;
+    if incomplete.is_some() {
+        for item in &mut output {
+            if item.get("status").is_some() {
+                item["status"] = json!("incomplete");
+            }
         }
     }
     json!({
-        "id":format!("resp_{}", Db::new_id()), "object":"response", "created_at":now_ms()/1000,
-        "model":model, "output":output, "status":"completed", "usage":response_usage
+        "id":id, "object":"response", "created_at":created, "model":model, "output":output,
+        "status":if incomplete.is_some() { "incomplete" } else { "completed" },
+        "error":null, "incomplete_details":incomplete.map(|reason| json!({"reason":reason})),
+        "usage":usage.map(response_usage), "parallel_tool_calls":true, "store":false
     })
 }

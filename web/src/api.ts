@@ -1,4 +1,5 @@
 import { EventSourceParserStream } from "eventsource-parser/stream";
+import { normalizeUsage } from "./lib/usage";
 import type { ManagementRequest, ManagementTransport } from "./management";
 import type {
   ApiKeyInput,
@@ -225,11 +226,12 @@ export class GatewayApi {
     });
   }
 
-  chat(model: GatewayModel, prompt: string, effort?: string): Promise<ChatResult> {
-    return this.request<ChatResult>("/v1/chat/completions", {
+  async chat(model: GatewayModel, prompt: string, effort?: string): Promise<ChatResult> {
+    const result = await this.request<ChatResult>("/v1/chat/completions", {
       method: "POST",
       body: this.chatBody(model, prompt, effort),
     });
+    return { ...result, usage: normalizeUsage(result.usage) };
   }
 
   async streamChat(
@@ -299,7 +301,7 @@ export class GatewayApi {
         onUpdate({
           content: content || undefined,
           reasoning: delta?.reasoning_content,
-          usage: payload.usage,
+          usage: normalizeUsage(payload.usage),
           finishReason: choice?.finish_reason,
         });
       }

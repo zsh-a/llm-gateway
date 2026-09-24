@@ -44,6 +44,7 @@ export interface GatewayModel {
   defaultReasoningEffort?: string;
   maxTokens?: number;
   max_output_tokens?: number;
+  contextWindow?: number;
 }
 
 export interface AuthProviderStatus {
@@ -159,12 +160,21 @@ export interface RecentRequest {
     lastByteMs: number | null;
     receivedBytes: number;
     receivedChunks: number;
+    outputBudget?: { requested: Record<string, number>; upstream: Record<string, number> } | null;
+    attemptDetails?: Array<{
+      channelId: string;
+      provider: string;
+      model: string;
+      error?: { message: string } | null;
+    }>;
     error: {
       code: string;
       stage: string;
       message: string;
       status: number;
       timeoutMs: number | null;
+      upstreamCode?: string;
+      retryAfterMs?: number;
     } | null;
   } | null;
   finishReason?: string;

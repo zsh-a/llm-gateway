@@ -3,7 +3,7 @@ use super::management::ManagementRequest;
 use super::auth::{require_admin, require_public_identity};
 use super::error::GatewayError;
 use super::metrics::{MetricQuery, MetricScope, MetricView};
-use super::protocols::{Protocol, build_upstream_body, responses_to_chat};
+use super::protocols::{Protocol, ResponsesStream, build_upstream_body, responses_to_chat};
 use super::upstream::{UpstreamBody, UpstreamFailure};
 #[cfg(test)]
 use super::util::now_ms;
@@ -26,8 +26,6 @@ use tokio::net::TcpListener;
 use tokio::time::{Instant, timeout_at};
 use tower_http::cors::{AllowHeaders, AllowOrigin, AllowPrivateNetwork, Any, CorsLayer};
 use tracing::{debug, info, warn};
-
-const MAX_UPSTREAM_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests;
@@ -208,10 +206,10 @@ async fn capabilities(State(state): State<AppState>) -> impl IntoResponse {
         "version": 1,
         "service": "llm-gateway",
         "authRequired": !state.config.proxy_api_key.is_empty() || state.db.count_api_keys().map(|count| count > 0).unwrap_or(true),
-        "limits": { "maxBodyBytes": state.config.max_body_bytes },
+        "limits": { "maxBodyBytes": state.config.max_body_bytes, "maxResponseBytes": state.config.max_response_bytes },
         "protocols": {
             "chatCompletions": { "path": "/v1/chat/completions", "stream": true, "tools": true, "reasoningContent": true, "usageChunk": true },
-            "responses": { "path": "/v1/responses", "stream": true, "reasoningText": true, "functionCalls": true }
+            "responses": { "path": "/v1/responses", "stream": true, "reasoningText": true, "functionCalls": true, "conversationState": false }
         },
         "providers": [
             { "id": "mimo", "name": "MiMo", "authenticated": state.auth.contains("mimo") },
@@ -222,10 +220,16 @@ async fn capabilities(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_public_identity(&state, &headers) {
-        return response.into_response();
-    }
-    let data = state.models().await;
+    let identity = match require_public_identity(&state, &headers) {
+        Ok(identity) => identity,
+        Err(error) => return error.into_response(),
+    };
+    let catalog = state.models().await;
+    let channels = match state.db.list_channels() {
+        Ok(channels) => channels,
+        Err(error) => return GatewayError::database(error).into_response(),
+    };
+    let data = routing::visible_models(&catalog, &channels, &state.auth, &identity);
     Json(json!({ "object": "list", "data": data })).into_response()
 }
 
@@ -250,7 +254,10 @@ async fn responses(
         Ok(body) => body,
         Err(response) => return *response,
     };
-    let mut chat = responses_to_chat(&body);
+    let mut chat = match responses_to_chat(&body) {
+        Ok(chat) => chat,
+        Err(error) => return error.into_response(),
+    };
     proxy_chat(state, headers, &mut chat, Protocol::Responses).await
 }
 
@@ -286,6 +293,9 @@ async fn proxy_chat(
         Ok(identity) => identity,
         Err(response) => return response.into_response(),
     };
+    if let Err(error) = super::protocols::validate_request(body) {
+        return error.into_response();
+    }
     let model = body
         .get("model")
         .and_then(Value::as_str)
@@ -305,8 +315,9 @@ async fn proxy_chat(
         .db
         .list_channels()
         .map_err(GatewayError::database)
-        .and_then(|channels| routing::select_routes(channels, &state.auth, &model))
-    {
+        .and_then(|channels| {
+            routing::select_routes(channels, &state.auth, &model, &state.catalog.snapshot())
+        }) {
         Ok(routes) => routes,
         Err(response) => return response.into_response(),
     };
@@ -330,7 +341,13 @@ async fn proxy_chat(
 
 fn upstream_error(failure: &UpstreamFailure, metric: &MetricContext) -> Response {
     metric.fail(failure);
-    (failure.status_code(), Json(failure.payload(&metric.id()))).into_response()
+    let mut response = (failure.status_code(), Json(failure.payload(&metric.id()))).into_response();
+    if let Some(ms) = failure.retry_after_ms {
+        if let Ok(value) = (ms / 1000).to_string().parse() {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
 }
 
 async fn proxy_upstream(
@@ -351,6 +368,7 @@ async fn proxy_upstream(
     for (index, route) in routes.iter().enumerate() {
         metric.set_route(route, model);
         let upstream_body = build_upstream_body(body, route, protocol);
+        metric.parameters(body, &upstream_body);
         let auth_headers = state.auth.headers(&route.auth_ref).unwrap_or_default();
         // The first-byte deadline spans headers and the first nonempty body chunk.
         // There is deliberately no reqwest total timeout on a streaming request.
@@ -370,19 +388,14 @@ async fn proxy_upstream(
             }
             Ok(Ok(upstream)) => {
                 metric.headers_received();
-                let status = upstream.status();
-                UpstreamFailure::new(
-                    "upstream_http_error",
-                    "response_headers",
-                    format!("上游接口返回 HTTP {}", status.as_u16()),
-                    status,
-                )
+                UpstreamFailure::http(upstream, first_deadline).await
             }
             Ok(Err(error)) => UpstreamFailure::request(&error, &state.config),
             Err(_) => {
                 UpstreamFailure::timeout("response_headers", state.config.first_byte_timeout_ms)
             }
         };
+        metric.attempt_failed(&last_failure);
         let retryable = last_failure.code != "upstream_http_error"
             || matches!(last_failure.status, 401 | 403 | 408 | 409 | 429)
             || last_failure.status >= 500;
@@ -400,7 +413,7 @@ async fn proxy_upstream(
     if !stream
         && response
             .content_length()
-            .is_some_and(|length| length > MAX_UPSTREAM_BODY_BYTES as u64)
+            .is_some_and(|length| length > state.config.max_response_bytes as u64)
     {
         return upstream_error(&body_too_large(), &metric);
     }
@@ -410,6 +423,23 @@ async fn proxy_upstream(
         .get(header::CONTENT_TYPE)
         .cloned()
         .unwrap_or_else(|| HeaderValue::from_static("text/event-stream"));
+    if stream
+        && protocol == Protocol::Responses
+        && !content_type
+            .to_str()
+            .unwrap_or_default()
+            .starts_with("text/event-stream")
+    {
+        return upstream_error(
+            &UpstreamFailure::new(
+                "upstream_invalid_response",
+                "response_body",
+                "上游未返回请求的 SSE 响应",
+                StatusCode::BAD_GATEWAY,
+            ),
+            &metric,
+        );
+    }
     let mut upstream = UpstreamBody::new(
         response,
         first_deadline,
@@ -425,38 +455,68 @@ async fn proxy_upstream(
         Err(failure) => return upstream_error(&failure, &metric),
     };
     if stream {
+        let adapter = (protocol == Protocol::Responses)
+            .then(|| ResponsesStream::new(model, &metric.id(), state.config.max_response_bytes));
         let stream = futures_util::stream::unfold(
-            (Some(first), Some(upstream)),
-            move |(mut first, upstream)| async move {
+            (Some(first), Some(upstream), adapter),
+            move |(mut first, upstream, mut adapter)| async move {
                 let mut upstream = upstream?;
-                let next = if let Some(first) = first.take() {
-                    Ok(Some(first))
-                } else {
-                    upstream.next_chunk().await
-                };
-                match next {
-                    Ok(Some(bytes)) => {
-                        if upstream.accumulator.done {
-                            upstream.metric.finish("success", Some(status), None, None);
+                loop {
+                    let next = if let Some(first) = first.take() {
+                        Ok(Some(first))
+                    } else {
+                        upstream.next_chunk().await
+                    };
+                    match next {
+                        Ok(Some(raw)) => {
+                            let bytes = if let Some(adapter) = &mut adapter {
+                                match adapter.push(std::mem::take(&mut upstream.events)) {
+                                    Ok(bytes) => bytes,
+                                    Err(failure) => {
+                                        upstream.metric.fail(&failure);
+                                        return Some((
+                                            Ok::<Bytes, Infallible>(adapter.finish(Some(&failure))),
+                                            (None, None, None),
+                                        ));
+                                    }
+                                }
+                            } else {
+                                raw
+                            };
+                            if upstream.accumulator.done {
+                                upstream.metric.finish("success", Some(status), None, None);
+                            }
+                            if bytes.is_empty() {
+                                continue;
+                            }
+                            return Some((Ok(bytes), (None, Some(upstream), adapter)));
                         }
-                        Some((Ok::<Bytes, Infallible>(bytes), (None, Some(upstream))))
-                    }
-                    Ok(None) => {
-                        upstream.metric.finish("success", Some(status), None, None);
-                        None
-                    }
-                    Err(failure) => {
-                        upstream.metric.fail(&failure);
-                        let event = failure.stream_event(&upstream.metric.id());
-                        Some((Ok(event), (None, None)))
+                        Ok(None) => {
+                            upstream.metric.finish("success", Some(status), None, None);
+                            return adapter
+                                .map(|mut adapter| (Ok(adapter.finish(None)), (None, None, None)));
+                        }
+                        Err(failure) => {
+                            upstream.metric.fail(&failure);
+                            let event = adapter.as_mut().map_or_else(
+                                || failure.stream_event(&upstream.metric.id()),
+                                |adapter| adapter.finish(Some(&failure)),
+                            );
+                            return Some((Ok(event), (None, None, None)));
+                        }
                     }
                 }
             },
         );
         let mut output = Response::new(Body::from_stream(stream));
-        output
-            .headers_mut()
-            .insert(header::CONTENT_TYPE, content_type);
+        output.headers_mut().insert(
+            header::CONTENT_TYPE,
+            if protocol == Protocol::Responses {
+                HeaderValue::from_static("text/event-stream")
+            } else {
+                content_type
+            },
+        );
         output
             .headers_mut()
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));

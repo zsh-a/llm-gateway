@@ -240,6 +240,7 @@ UPSTREAM_CONNECT_TIMEOUT_MS=15000
 UPSTREAM_FIRST_BYTE_TIMEOUT_MS=180000
 UPSTREAM_IDLE_TIMEOUT_MS=180000
 MAX_BODY_BYTES=8388608
+MAX_RESPONSE_BYTES=8388608
 MODEL_DISCOVERY=true
 MODEL_DISCOVERY_TIMEOUT_MS=30000
 METRICS_MAX_RECORDS=2000
@@ -262,6 +263,7 @@ macOS 路径为 `~/Library/Application Support/LLM Gateway`。设置 `RUNTIME_DI
 | `UPSTREAM_CONNECT_TIMEOUT_MS` | 15000 | DNS、TCP、TLS 等建立连接阶段的上限 |
 | `UPSTREAM_FIRST_BYTE_TIMEOUT_MS` | 180000 | 从每次渠道请求开始，到首个非空响应体数据的等待上限；包含连接与等待响应头，收到响应头不会重新计时 |
 | `UPSTREAM_IDLE_TIMEOUT_MS` | 180000 | 首个数据之后，每次读取新数据的空闲等待上限，收到数据后重置；SSE 心跳也算数据 |
+| `MAX_RESPONSE_BYTES` | 8388608 | 非流式上游响应及 Responses 流式聚合的字节上限；不是输出 Token 上限 |
 
 模型调用没有总时长上限，持续输出的流式请求可超过三分钟。非流式调用也使用同样的分阶段限制，
 因为网关从上游读取流后再汇总返回。新的环境变量优先于旧 `REQUEST_TIMEOUT_MS`；旧变量仅作为
@@ -312,6 +314,10 @@ Chat Completions / Responses 请求超限时返回 HTTP 413 和 `request_body_to
 不会生效；已设置的环境变量会覆盖默认值。旧版默认 1 MiB 的网关也可通过设置
 `MAX_BODY_BYTES=8388608` 提高上限，无需改动模型配置。
 
+`MAX_RESPONSE_BYTES` 控制非流式响应的上游字节总量，以及 Responses 流式转换为最终完整对象时累计处理的 JSON 数据量，默认 8 MiB。Chat SSE 透传不受总量限制；单条 SSE 事件仍保留 8 MiB 解析保护。超过聚合上限会返回 `upstream_body_too_large`，已开始的 Responses 流会以 `response.failed` 结束。
+
+网关不设置默认输出 Token 预算，也不压低客户端预算。Responses 的 `max_output_tokens` 会转换成 `max_tokens`，MiMo 再转换成 `max_completion_tokens`；请求明细显示原参数和实际发送参数。模型目录只保留上游明确提供的 `max_output_tokens` / `contextWindow`，未知值不补默认数字。
+
 SQLite 默认路径为 `RUNTIME_DIR/gateway.sqlite3`。首次初始化渠道时从旧的 `channels.json` 导入；没有旧文件时才创建默认渠道，并持久化初始化标记。删除全部渠道后重启不会重新生成默认渠道，禁用或删除某个 Provider 的全部渠道后，模型请求返回无可用渠道错误。升级保留已有数据库的渠道配置，包括空配置。旧 `api-keys.json` 仍在数据库没有 Key 时导入；后续管理数据以 SQLite 为准。
 
 ## HTTP 接口
@@ -343,11 +349,19 @@ GET    /admin/metrics/requests
 Chat Completions 支持流式和非流式调用。网关以流式方式请求上游，`stream: false` 时在 Rust 内聚合响应。模型可直接使用原始 ID，也可以使用 `mimo/model-id` 或 `workbuddy/model-id` 指定 Provider。
 
 非流式 Chat 与流式诊断共用增量 SSE 解析器，聚合保留多个 choice、工具调用参数和 reasoning；支持跨网络分片的 UTF-8 以及 LF/CRLF/CR 换行。
-Responses 的非流式请求会转换为 `response` 对象，保留函数调用的 `call_id`、名称和参数，并支持将函数结果作为后续输入；流式 Responses 当前仍透传上游 Chat SSE，尚未转换成 Responses 事件序列。Chat 的流式指标、usage、超时、客户端断开和渠道重试由 Rust 网关处理。
+非流式 Chat 对外使用 `prompt_tokens` / `completion_tokens` / `total_tokens` 和嵌套明细；网关统计与控制台在入口统一归一化，保留缓存与推理 Token 用量。
+
+Responses 支持非流式对象和标准 SSE 事件转换，包括文本、拒绝、推理文本、函数参数增量及最终用量。函数调用保留 `call_id`，函数结果可作为后续 `input`。正常结束发出 `response.completed`，输出长度或内容过滤导致的中止发出 `response.incomplete`，上游错误发出 `response.failed`；非流式状态保持相同语义。支持 `reasoning.effort` 和 `text.format` 转换；目前仅支持 function 工具、文本 instructions 和无状态会话，不支持的 `previous_response_id`、`conversation`、`store: true`、`background: true` 会明确返回 400。
+
+上游错误体有读取大小与时间上限，只保留可识别的错误类别及中文摘要，不保存可能回显凭据或消息内容的原文。请求明细保存各次渠道尝试；数字形式的 `Retry-After` 会传给调用端。结束原因为 `length` / `content_filter` 的请求分别标注“达到输出上限” / “内容过滤”。
+
+`/v1/models` 仅列出当前 Key 有权使用、渠道已启用且有凭据的模型，包含显式配置的别名。路由优先识别 `provider/model`，随后使用精确别名与已发现的模型归属；同名模型或别名跨 Provider 时需加前缀消歧。尚未发现的原始模型 ID 保留既有 Provider 名称推断，建议自定义模型显式加前缀。
 
 ## 管理渠道和 Key
 
 HTTP 管理 API 无论本地或远程监听都需要独立的 `PROXY_ADMIN_KEY`。桌面控制台通过本机窗口权限直接管理。
+
+渠道优先级决定主备顺序；同优先级按正整数权重随机选择首选渠道。只有尚未输出内容的请求才会尝试后备渠道。
 
 ```bash
 curl -X POST http://127.0.0.1:3000/admin/channels \

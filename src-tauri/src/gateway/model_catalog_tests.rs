@@ -357,3 +357,21 @@ fn model_ids_do_not_require_punctuation() {
         .collect::<Vec<_>>();
     assert_eq!(ids, ["auto", "hy3"]);
 }
+#[test]
+fn output_limits_are_preserved_without_inventing_defaults() {
+    let directory = tempfile::tempdir().unwrap();
+    let models = parse_models(
+        r#"{"models":[{"id":"limited","max_output_tokens":1024,"context_window":32768},{"id":"unknown","maxTokens":99999}]}"#,
+        "workbuddy",
+    );
+    assert_eq!(models[0].max_output_tokens, Some(1024));
+    assert_eq!(models[0].context_window, Some(32768));
+    assert_eq!(models[1].max_output_tokens, None);
+    model_catalog::save_workbuddy_catalog(directory.path(), &models).unwrap();
+    let restored = parse_models(
+        &std::fs::read_to_string(model_catalog::workbuddy_catalog_path(directory.path())).unwrap(),
+        "workbuddy",
+    );
+    assert_eq!(restored[0].max_output_tokens, Some(1024));
+    assert_eq!(restored[0].context_window, Some(32768));
+}

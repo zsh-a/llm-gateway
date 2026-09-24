@@ -1,4 +1,4 @@
-use super::{append_content, normalize_usage};
+use super::{append_content, chat_usage, normalize_usage};
 use crate::{db::Db, gateway::util::now_ms};
 use serde_json::{Value, json};
 
@@ -20,7 +20,8 @@ impl StreamAccumulator {
             ..Default::default()
         }
     }
-    pub(crate) fn observe(&mut self, bytes: &[u8]) {
+    pub(crate) fn observe(&mut self, bytes: &[u8]) -> Vec<Value> {
+        let mut values = Vec::new();
         for event in self.decoder.feed(bytes) {
             match event {
                 Ok(None) => self.done = true,
@@ -40,9 +41,11 @@ impl StreamAccumulator {
                     if let Some(completion) = &mut self.completion {
                         completion.observe(&value);
                     }
+                    values.push(value);
                 }
             }
         }
+        values
     }
     pub fn completion(&self, model: &str) -> Option<Value> {
         self.completion
@@ -124,9 +127,11 @@ struct ChoiceAccumulator {
 
 fn append_string(target: &mut Value, source: Option<&Value>) {
     if let Some(fragment) = source.and_then(Value::as_str) {
-        let mut text = target.as_str().unwrap_or_default().to_string();
-        text.push_str(fragment);
-        *target = Value::String(text);
+        if let Value::String(text) = target {
+            text.push_str(fragment);
+        } else {
+            *target = Value::String(fragment.to_string());
+        }
     }
 }
 
@@ -205,6 +210,6 @@ impl ChatAccumulator {
             if !choice.legacy_function.is_null() { message["function_call"] = choice.legacy_function.clone(); }
             json!({"index":index, "message":message, "finish_reason":choice.finish_reason.clone().unwrap_or_else(|| json!("stop"))})
         }).collect();
-        json!({"id":self.id.clone().unwrap_or_else(|| json!(format!("chatcmpl-{}", Db::new_id()))), "object":"chat.completion", "created":self.created.clone().unwrap_or_else(|| json!(now_ms()/1000)), "model":model, "choices":choices, "usage":usage.cloned().unwrap_or_else(|| json!({}))})
+        json!({"id":self.id.clone().unwrap_or_else(|| json!(format!("chatcmpl-{}", Db::new_id()))), "object":"chat.completion", "created":self.created.clone().unwrap_or_else(|| json!(now_ms()/1000)), "model":model, "choices":choices, "usage":usage.map(chat_usage).unwrap_or_else(|| json!({}))})
     }
 }

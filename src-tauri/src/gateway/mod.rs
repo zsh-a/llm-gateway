@@ -57,6 +57,7 @@ impl AppState {
             first_byte_timeout_ms: 5000,
             idle_timeout_ms: 5000,
             max_body_bytes: crate::config::DEFAULT_MAX_BODY_BYTES,
+            max_response_bytes: crate::config::DEFAULT_MAX_BODY_BYTES,
             proxy_api_key: String::new(),
             proxy_admin_key: String::new(),
             cors_origin: String::new(),

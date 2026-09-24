@@ -18,6 +18,10 @@ pub(super) struct UpstreamFailure {
     pub message: String,
     pub status: u16,
     pub timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
 }
 
 impl UpstreamFailure {
@@ -33,6 +37,8 @@ impl UpstreamFailure {
             message: message.into(),
             status: status.as_u16(),
             timeout_ms: None,
+            upstream_code: None,
+            retry_after_ms: None,
         }
     }
 
@@ -61,6 +67,8 @@ impl UpstreamFailure {
             message: format!("{message}（阈值 {limit} ms）"),
             status: 504,
             timeout_ms: Some(limit),
+            upstream_code: None,
+            retry_after_ms: None,
         }
     }
 
@@ -91,11 +99,77 @@ impl UpstreamFailure {
         StatusCode::from_u16(self.status).unwrap_or(StatusCode::BAD_GATEWAY)
     }
 
+    pub async fn http(mut response: reqwest::Response, deadline: Instant) -> Self {
+        let status = response.status();
+        let mut failure = Self::new(
+            "upstream_http_error",
+            "response_headers",
+            format!("上游接口返回 HTTP {}", status.as_u16()),
+            status,
+        );
+        failure.retry_after_ms = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|seconds| seconds.saturating_mul(1000));
+        // Error bodies are untrusted and may echo prompts or credentials. Read a
+        // bounded JSON body, then expose only recognized error categories.
+        let deadline = deadline.min(Instant::now() + Duration::from_secs(2));
+        let mut bytes = Vec::new();
+        while let Ok(Ok(Some(chunk))) = timeout_at(deadline, response.chunk()).await {
+            if bytes.len() + chunk.len() > 64 * 1024 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+            failure.classify(&value);
+        }
+        failure
+    }
+
+    fn classify(&mut self, value: &Value) {
+        let error = value.get("error").unwrap_or(value);
+        let code = error["code"].as_str().unwrap_or_default();
+        let message = error["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let category = match code {
+            "context_length_exceeded" | "max_tokens_exceeded" => {
+                Some(("context_length_exceeded", "上下文或输出 Token 预算超限"))
+            }
+            "insufficient_quota" => Some(("insufficient_quota", "上游账号额度不足")),
+            "rate_limit_exceeded" => Some(("rate_limit_exceeded", "上游请求限流")),
+            "model_not_found" => Some(("model_not_found", "上游模型不存在或无访问权限")),
+            "invalid_api_key" => Some(("invalid_api_key", "上游凭据无效")),
+            "unsupported_parameter" | "unsupported_value" => {
+                Some(("unsupported_parameter", "上游不支持请求中的参数或参数值"))
+            }
+            _ if message.contains("context length") || message.contains("context window") => {
+                Some(("context_length_exceeded", "上下文或输出 Token 预算超限"))
+            }
+            _ if message.contains("max_tokens")
+                || message.contains("max_completion_tokens")
+                || message.contains("max_output_tokens") =>
+            {
+                Some(("output_token_budget", "上游拒绝了输出 Token 预算参数"))
+            }
+            _ => None,
+        };
+        if let Some((code, summary)) = category {
+            self.upstream_code = Some(code.into());
+            self.message = format!("{summary}（HTTP {}）", self.status);
+        }
+    }
+
     pub fn payload(&self, request_id: &str) -> Value {
         json!({"error": {
             "message": self.message, "code": self.code, "stage": self.stage,
             "type": if self.timeout_ms.is_some() { "timeout_error" } else { "upstream_error" },
-            "timeoutMs": self.timeout_ms, "requestId": request_id, "status": self.status
+            "timeoutMs": self.timeout_ms, "requestId": request_id, "status": self.status,
+            "upstreamCode":self.upstream_code, "retryAfterMs":self.retry_after_ms
         }})
     }
 
@@ -118,6 +192,24 @@ pub(super) struct RequestDiagnostics {
     pub received_bytes: u64,
     pub received_chunks: u64,
     pub error: Option<UpstreamFailure>,
+    pub output_budget: Option<OutputBudget>,
+    pub attempt_details: Vec<AttemptDetails>,
+}
+
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct OutputBudget {
+    pub requested: std::collections::BTreeMap<String, u64>,
+    pub upstream: std::collections::BTreeMap<String, u64>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AttemptDetails {
+    pub channel_id: String,
+    pub provider: String,
+    pub model: String,
+    pub error: Option<UpstreamFailure>,
 }
 
 type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
@@ -131,7 +223,9 @@ pub(super) struct UpstreamBody {
     event_stream: bool,
     json_body: Vec<u8>,
     collect: bool,
+    pub events: Vec<Value>,
     collected_bytes: usize,
+    max_response_bytes: usize,
     pub accumulator: StreamAccumulator,
     pub metric: MetricContext,
 }
@@ -164,6 +258,8 @@ impl UpstreamBody {
             json_body: Vec::new(),
             collect,
             collected_bytes: 0,
+            max_response_bytes: config.max_response_bytes,
+            events: Vec::new(),
             metric,
         }
     }
@@ -245,7 +341,7 @@ impl UpstreamBody {
                     self.received = true;
                     if self.collect {
                         self.collected_bytes = self.collected_bytes.saturating_add(bytes.len());
-                        if self.collected_bytes > 8 * 1024 * 1024 {
+                        if self.collected_bytes > self.max_response_bytes {
                             return Err(UpstreamFailure::new(
                                 "upstream_body_too_large",
                                 "response_body",
@@ -255,18 +351,26 @@ impl UpstreamBody {
                         }
                     }
                     if self.event_stream {
-                        self.accumulator.observe(&bytes);
+                        self.events = self.accumulator.observe(&bytes);
                     } else if self.collect {
                         self.json_body.extend_from_slice(&bytes);
                     }
                     self.metric.observe_chunk(bytes.len(), &self.accumulator);
                     if self.accumulator.has_error {
-                        return Err(UpstreamFailure::new(
+                        let mut failure = UpstreamFailure::new(
                             "upstream_stream_error",
                             "response_body",
                             "上游返回了流式错误",
                             StatusCode::BAD_GATEWAY,
-                        ));
+                        );
+                        if let Some(value) = self
+                            .events
+                            .iter()
+                            .find(|value| value.get("error").is_some())
+                        {
+                            failure.classify(value);
+                        }
+                        return Err(failure);
                     }
                     return Ok(Some(bytes));
                 }

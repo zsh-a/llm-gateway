@@ -21,6 +21,13 @@ pub(super) struct ModelCatalog {
 }
 
 impl ModelCatalog {
+    pub fn snapshot(&self) -> Vec<ModelInfo> {
+        self.cache
+            .read()
+            .ok()
+            .and_then(|cache| cache.as_ref().map(|cache| cache.models.clone()))
+            .unwrap_or_default()
+    }
     pub fn new(client: Client, auth: AuthCache) -> Self {
         Self {
             client,
@@ -81,7 +88,7 @@ impl ModelCatalog {
             }
         }
         let mut seen = HashSet::new();
-        models.retain(|model| seen.insert(model.id.clone()));
+        models.retain(|model| seen.insert((model.provider.clone(), model.id.clone())));
         if let Ok(mut cache) = self.cache.write() {
             *cache = Some(ModelCache {
                 fetched_at: Instant::now(),
@@ -200,6 +207,8 @@ pub(super) fn save_workbuddy_catalog(
             "id": model.id,
             "name": model.name,
             "supportsReasoning": model.capabilities.get("reasoning").copied().unwrap_or(false),
+            "maxOutputTokens": model.max_output_tokens,
+            "contextWindow": model.context_window,
         })).collect::<Vec<_>>()
     });
     let path = workbuddy_catalog_path(runtime_dir);
@@ -229,6 +238,10 @@ pub(super) struct ModelInfo {
     pub provider: String,
     pub owned_by: String,
     pub capabilities: HashMap<String, bool>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "max_output_tokens")]
+    pub max_output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "contextWindow")]
+    pub context_window: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "reasoningEfforts")]
     pub reasoning_efforts: Option<HashMap<String, Option<String>>>,
     #[serde(
@@ -300,6 +313,24 @@ pub(super) fn parse_models(raw: &str, provider: &str) -> Vec<ModelInfo> {
                 provider: provider.into(),
                 owned_by: provider.into(),
                 capabilities,
+                max_output_tokens: [
+                    "max_output_tokens",
+                    "maxOutputTokens",
+                    "max_completion_tokens",
+                    "maxCompletionTokens",
+                ]
+                .iter()
+                .find_map(|key| value.get(*key).and_then(Value::as_u64))
+                .filter(|v| *v > 0),
+                context_window: [
+                    "contextWindow",
+                    "context_window",
+                    "maxContextTokens",
+                    "max_context_tokens",
+                ]
+                .iter()
+                .find_map(|key| value.get(*key).and_then(Value::as_u64))
+                .filter(|v| *v > 0),
                 reasoning_efforts: None,
                 default_reasoning_effort: None,
             })

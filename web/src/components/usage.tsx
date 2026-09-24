@@ -106,6 +106,10 @@ export function UsageDetails({ usage }: { usage?: Usage | null }) {
 function RequestDetails({ row }: { row: RecentRequest }) {
   const diagnostics = row.diagnostics;
   const failure = diagnostics?.error;
+  const budget = (values: Record<string, number>) =>
+    Object.entries(values)
+      .map(([name, value]) => `${name}: ${formatNumber(value)}`)
+      .join(" · ") || "未指定，采用上游默认值";
   const stageNames: Record<string, string> = {
     connect: "建立连接",
     response_headers: "等待响应头",
@@ -188,6 +192,22 @@ function RequestDetails({ row }: { row: RecentRequest }) {
           )}
         </div>
       )}
+      {diagnostics?.outputBudget && (
+        <div className="grid gap-2">
+          <InfoRow label="请求输出预算" value={budget(diagnostics.outputBudget.requested)} />
+          <InfoRow label="发送给上游的预算" value={budget(diagnostics.outputBudget.upstream)} />
+        </div>
+      )}
+      {diagnostics?.attemptDetails?.some((attempt) => attempt.error) && (
+        <div className="space-y-2 text-xs text-muted-foreground">
+          {diagnostics.attemptDetails.map((attempt, index) => (
+            <p key={attempt.channelId}>
+              {index + 1}. {attempt.channelId} · {attempt.model}：
+              {attempt.error?.message ?? "已接收上游响应"}
+            </p>
+          ))}
+        </div>
+      )}
       <div>
         <div className="mb-2 text-xs font-medium text-foreground">
           {row.status !== "success" && row.usage ? "中断前 Token 用量（可能不完整）" : "Token 用量"}
@@ -199,6 +219,8 @@ function RequestDetails({ row }: { row: RecentRequest }) {
 }
 
 function requestStatusLabel(row: RecentRequest): string {
+  if (row.status === "success" && row.finishReason === "length") return "达到输出上限";
+  if (row.status === "success" && row.finishReason === "content_filter") return "内容过滤";
   if (row.status === "success") return "成功";
   if (row.status !== "error") return "取消";
   const labels: Record<string, string> = {
@@ -311,7 +333,15 @@ export function RequestTable({ rows }: { rows: RecentRequest[] }) {
                       : formatCompact(usageTotal(row.usage ?? undefined))}
                   </td>
                   <td className="px-3 py-3">
-                    <StatusBadge status={row.status} label={requestStatusLabel(row)} />
+                    <StatusBadge
+                      status={
+                        row.status === "success" &&
+                        ["length", "content_filter"].includes(row.finishReason ?? "")
+                          ? "incomplete"
+                          : row.status
+                      }
+                      label={requestStatusLabel(row)}
+                    />
                   </td>
                 </tr>
                 {isExpanded && (

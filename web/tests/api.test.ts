@@ -98,6 +98,31 @@ describe("gateway data and streaming", () => {
       "响应连接提前结束",
     );
   });
+  it("normalizes standard token usage consistently for chat and streaming", async () => {
+    const usage = {
+      prompt_tokens: 5,
+      completion_tokens: 3,
+      total_tokens: 8,
+      prompt_tokens_details: { cached_tokens: 2 },
+      completion_tokens_details: { reasoning_tokens: 1 },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ choices: [], usage }))),
+    );
+    const result = await api.chat({ id: "test" }, "hello");
+    expect(result.usage).toMatchObject({
+      inputTokens: 5,
+      outputTokens: 3,
+      totalTokens: 8,
+      cachedTokens: 2,
+      reasoningTokens: 1,
+    });
+    mockStream(`data: ${JSON.stringify({ choices: [], usage })}\n\ndata: [DONE]\n\n`);
+    const updates: ChatStreamUpdate[] = [];
+    await api.streamChat({ id: "test" }, "hello", "auto", (update) => updates.push(update));
+    expect(updates.find((update) => update.usage)?.usage).toEqual(result.usage);
+  });
   it("surfaces errors sent inside a successful HTTP stream", async () => {
     mockStream('data: {"error":{"message":"upstream unavailable"}}\n\n');
     await expect(api.streamChat({ id: "test" }, "hello", "auto", () => {})).rejects.toThrow(

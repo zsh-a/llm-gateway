@@ -1,10 +1,41 @@
 mod responses;
+mod responses_stream;
 mod stream;
+mod usage;
 pub(super) use responses::{chat_to_response, responses_to_chat};
+pub(super) use responses_stream::ResponsesStream;
 pub(super) use stream::StreamAccumulator;
+pub(super) use usage::{chat_usage, normalize_usage, response_usage};
 
+use super::error::{ErrorKind, GatewayError};
 use super::routing::Route;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
+
+pub(super) fn validate_request(body: &Value) -> Result<(), GatewayError> {
+    if !body.is_object() || !body.get("messages").is_some_and(Value::is_array) {
+        return Err(GatewayError::new(
+            ErrorKind::InvalidRequest,
+            "请求必须包含 messages 数组",
+        ));
+    }
+    for field in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
+        if let Some(value) = body.get(field).filter(|v| !v.is_null()) {
+            if value.as_u64().is_none_or(|v| v == 0) {
+                return Err(GatewayError::new(
+                    ErrorKind::InvalidRequest,
+                    format!("{field} 必须为正整数"),
+                ));
+            }
+        }
+    }
+    if body.get("stream").is_some_and(|v| !v.is_boolean()) {
+        return Err(GatewayError::new(
+            ErrorKind::InvalidRequest,
+            "stream 必须为布尔值",
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Protocol {
@@ -31,6 +62,9 @@ pub(super) fn build_upstream_body(body: &Value, route: &Route, protocol: Protoco
     if let Some(object) = output.as_object_mut() {
         object.insert("model".into(), Value::String(route.upstream_model.clone()));
         object.insert("stream".into(), Value::Bool(true));
+        if object.get("stream_options").is_none_or(Value::is_null) {
+            object.insert("stream_options".into(), json!({"include_usage":true}));
+        }
         if protocol == Protocol::Responses {
             object.remove("input");
             object.remove("instructions");
@@ -84,55 +118,10 @@ fn normalize_chat_response(mut value: Value, model: &str) -> Value {
             .entry("model")
             .or_insert_with(|| Value::String(model.to_string()));
         if let Some(usage) = object.get("usage").cloned() {
-            object.insert("usage".into(), normalize_usage(&usage));
+            object.insert("usage".into(), chat_usage(&usage));
         }
     }
     value
-}
-
-fn normalize_usage(value: &Value) -> Value {
-    let object = value.as_object().cloned().unwrap_or_default();
-    let mut output = Map::new();
-    for (target, keys) in [
-        (
-            "inputTokens",
-            vec!["inputTokens", "input_tokens", "prompt_tokens"],
-        ),
-        (
-            "outputTokens",
-            vec!["outputTokens", "output_tokens", "completion_tokens"],
-        ),
-        (
-            "totalTokens",
-            vec!["totalTokens", "total_tokens", "total_tokens"],
-        ),
-        (
-            "reasoningTokens",
-            vec!["reasoningTokens", "reasoning_tokens"],
-        ),
-        ("cachedTokens", vec!["cachedTokens", "cached_tokens"]),
-    ] {
-        if let Some(found) = keys
-            .iter()
-            .find_map(|key| object.get(*key).and_then(Value::as_i64))
-        {
-            output.insert(target.into(), Value::Number(found.into()));
-        }
-    }
-    if output.get("totalTokens").is_none() {
-        let total = output
-            .get("inputTokens")
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-            + output
-                .get("outputTokens")
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-        if total > 0 {
-            output.insert("totalTokens".into(), Value::Number(total.into()));
-        }
-    }
-    Value::Object(output)
 }
 
 fn append_content(target: &mut String, value: Option<&Value>) {
