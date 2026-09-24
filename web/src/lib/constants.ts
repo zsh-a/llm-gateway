@@ -94,6 +94,12 @@ export function resolveLocation(hash: string): AppLocation {
   const modelId = new URLSearchParams(query).get("model") || undefined;
   return {
     page,
+    requestId:
+      page === "metrics" ? new URLSearchParams(query).get("request") || undefined : undefined,
+    managementTab:
+      page === "management" && new URLSearchParams(query).get("tab") === "keys"
+        ? "keys"
+        : undefined,
     apiKeyId: ["metrics", "management"].includes(page)
       ? new URLSearchParams(query).get("key") || undefined
       : undefined,
@@ -118,6 +124,9 @@ export function serializeLocation(location: AppLocation): string {
   if (["metrics", "management"].includes(location.page) && location.apiKeyId)
     params.set("key", location.apiKeyId);
   if (location.page === "playground" && location.modelId) params.set("model", location.modelId);
+  if (location.page === "metrics" && location.requestId) params.set("request", location.requestId);
+  if (location.page === "management" && location.managementTab === "keys")
+    params.set("tab", "keys");
   if (location.page === "settings" && location.settingsTab && location.settingsTab !== "connection")
     params.set("tab", location.settingsTab);
   return `#${location.page}${params.size ? `?${params}` : ""}`;

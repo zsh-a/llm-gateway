@@ -1,6 +1,7 @@
 import { Tabs } from "@base-ui/react/tabs";
 import { type FormEvent, useState } from "react";
 import { type Credentials, saveCredentials } from "../../api";
+import { ApiExample } from "../../components/ApiExample";
 import { Field, InfoRow } from "../../components/common";
 import {
   Button,
@@ -135,6 +136,9 @@ export function SettingsPage({
                     清除
                   </Button>
                 </div>
+                <p className="text-xs leading-5 text-muted-foreground">
+                  更新或清除凭证会清空工作台会话，并停止进行中的工作台请求。
+                </p>
               </form>
             </CardContent>
           </Card>
@@ -164,6 +168,7 @@ export function SettingsPage({
                   />
                 </div>
               </details>
+              <ApiExample baseUrl={gatewayUrl || location.origin} />
             </CardContent>
           </Card>
         </Tabs.Panel>

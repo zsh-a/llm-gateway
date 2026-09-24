@@ -17,8 +17,8 @@ export function formatCompact(value: number | null | undefined): string {
 }
 
 export function formatDuration(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—";
   const amount = toFiniteNumber(value);
-  if (!amount) return "—";
   if (amount < 1000) return `${Math.round(amount)} ms`;
   return `${(amount / 1000).toFixed(2)} s`;
 }
@@ -34,11 +34,10 @@ export function formatTime(value: number | undefined, withDate = false): string 
   }).format(new Date(value));
 }
 
-export function usageTotal(usage: Usage | undefined): number {
-  return (
-    toFiniteNumber(usage?.totalTokens) ||
-    toFiniteNumber(usage?.inputTokens) +
-      toFiniteNumber(usage?.outputTokens) +
-      toFiniteNumber(usage?.reasoningTokens)
-  );
+export function usageTotal(usage: Usage | undefined): number | undefined {
+  if (usage?.totalTokens !== undefined) return usage.totalTokens;
+  // Reasoning tokens are a subset of output tokens, not an additional charge.
+  if (usage?.inputTokens !== undefined && usage.outputTokens !== undefined)
+    return usage.inputTokens + usage.outputTokens;
+  return undefined;
 }

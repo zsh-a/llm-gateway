@@ -1,5 +1,5 @@
 import { Activity, ChevronDown, ChevronUp } from "lucide-react";
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { formatCompact, formatDuration, formatNumber, formatTime, usageTotal } from "../lib/format";
 import { cn } from "../lib/utils";
 import type { RecentRequest, Usage } from "../types";
@@ -30,7 +30,7 @@ function BreakdownCard({ title, breakdown }: { title: string; breakdown?: Usage[
   const visibleRows = rows.filter(([, value]) => value !== undefined);
   return (
     <div className="rounded-xl border border-border/70 bg-background/35 p-3">
-      <div className="mb-2 text-[11px] font-medium text-muted-foreground">{title}</div>
+      <div className="mb-2 text-xs font-medium text-muted-foreground">{title}</div>
       {visibleRows.length > 0 ? (
         <div className="grid grid-cols-2 gap-x-4 gap-y-2">
           {visibleRows.map(([label, value]) => (
@@ -90,7 +90,7 @@ export function UsageDetails({ usage }: { usage?: Usage | null }) {
             key={label}
             className="rounded-xl border border-border/70 bg-background/35 px-3 py-2.5"
           >
-            <div className="text-[10px] text-muted-foreground">{label}</div>
+            <div className="text-xs text-muted-foreground">{label}</div>
             <div className={cn("mt-1 font-mono text-sm font-medium", color)}>{value}</div>
           </div>
         ))}
@@ -142,11 +142,12 @@ function RequestDetails({ row }: { row: RecentRequest }) {
           此历史记录未保存错误阶段，无法区分连接、首包或数据中断。
         </p>
       )}
-      <div className="grid gap-2 md:grid-cols-2">
+      <h3 className="text-sm font-medium">请求结果</h3>
+      <div className="grid gap-2 md:grid-cols-2 text-sm">
         <InfoRow label="模型" value={row.model || "—"} />
         <InfoRow label="协议" value={row.protocol || "chat"} />
         <InfoRow label="API Key" value={row.apiKeyName || row.apiKeyId || "—"} />
-        <InfoRow label="Request ID" value={row.id || "—"} />
+        <InfoRow label="Request ID" value={row.id || "—"} copyable />
         <InfoRow label="开始时间" value={formatTime(row.startedAt, true)} />
         <InfoRow label="完成时间" value={formatTime(row.completedAt, true)} />
         <InfoRow label="耗时" value={formatDuration(row.durationMs)} />
@@ -154,52 +155,61 @@ function RequestDetails({ row }: { row: RecentRequest }) {
         <InfoRow label="Provider" value={row.provider || "—"} />
         <InfoRow label="渠道" value={row.channelId || "—"} />
         <InfoRow label="思考强度" value={row.reasoningEffort || "—"} />
-        <InfoRow label="Finish reason" value={row.finishReason || "—"} />
+        <InfoRow label="结束原因" value={row.finishReason || "—"} />
         <InfoRow
           label="工具调用"
           value={row.toolCalls === undefined ? "—" : formatNumber(row.toolCalls)}
         />
       </div>
       {diagnostics && (
-        <div className="grid gap-2 md:grid-cols-2">
-          <InfoRow label="渠道尝试次数" value={String(diagnostics.attempts)} />
-          <InfoRow
-            label="收到响应头"
-            value={
-              diagnostics.responseHeadersMs === null
-                ? "未收到"
-                : formatDuration(diagnostics.responseHeadersMs)
-            }
-          />
-          <InfoRow
-            label="首个数据到达"
-            value={
-              diagnostics.firstByteMs === null ? "未收到" : formatDuration(diagnostics.firstByteMs)
-            }
-          />
-          <InfoRow
-            label="最后数据到达"
-            value={
-              diagnostics.lastByteMs === null ? "未收到" : formatDuration(diagnostics.lastByteMs)
-            }
-          />
-          <InfoRow
-            label="已收数据"
-            value={`${formatNumber(diagnostics.receivedBytes)} 字节 / ${formatNumber(diagnostics.receivedChunks)} 块`}
-          />
-          {failure?.timeoutMs != null && (
-            <InfoRow label="超时阈值" value={formatDuration(failure.timeoutMs)} />
-          )}
-        </div>
+        <section className="space-y-2 text-sm">
+          <h3 className="font-medium">耗时与传输</h3>
+          <div className="grid gap-2 md:grid-cols-2">
+            <InfoRow label="渠道尝试次数" value={String(diagnostics.attempts)} />
+            <InfoRow
+              label="收到响应头"
+              value={
+                diagnostics.responseHeadersMs === null
+                  ? "未收到"
+                  : formatDuration(diagnostics.responseHeadersMs)
+              }
+            />
+            <InfoRow
+              label="首个数据到达"
+              value={
+                diagnostics.firstByteMs === null
+                  ? "未收到"
+                  : formatDuration(diagnostics.firstByteMs)
+              }
+            />
+            <InfoRow
+              label="最后数据到达"
+              value={
+                diagnostics.lastByteMs === null ? "未收到" : formatDuration(diagnostics.lastByteMs)
+              }
+            />
+            <InfoRow
+              label="已收数据"
+              value={`${formatNumber(diagnostics.receivedBytes)} 字节 / ${formatNumber(diagnostics.receivedChunks)} 块`}
+            />
+            {failure?.timeoutMs != null && (
+              <InfoRow label="超时阈值" value={formatDuration(failure.timeoutMs)} />
+            )}
+          </div>
+        </section>
       )}
       {diagnostics?.outputBudget && (
-        <div className="grid gap-2">
-          <InfoRow label="请求输出预算" value={budget(diagnostics.outputBudget.requested)} />
-          <InfoRow label="发送给上游的预算" value={budget(diagnostics.outputBudget.upstream)} />
-        </div>
+        <section className="space-y-2 text-sm">
+          <h3 className="font-medium">输出预算</h3>
+          <div className="grid gap-2">
+            <InfoRow label="请求输出预算" value={budget(diagnostics.outputBudget.requested)} />
+            <InfoRow label="发送给上游的预算" value={budget(diagnostics.outputBudget.upstream)} />
+          </div>
+        </section>
       )}
       {diagnostics?.attemptDetails?.some((attempt) => attempt.error) && (
         <div className="space-y-2 text-xs text-muted-foreground">
+          <h3 className="text-sm font-medium text-foreground">渠道尝试</h3>
           {diagnostics.attemptDetails.map((attempt, index) => (
             <p key={attempt.channelId}>
               {index + 1}. {attempt.channelId} · {attempt.model}：
@@ -231,8 +241,17 @@ function requestStatusLabel(row: RecentRequest): string {
   return labels[row.diagnostics?.error?.code ?? ""] ?? "失败";
 }
 
-export function RequestTable({ rows }: { rows: RecentRequest[] }) {
+export function RequestTable({ rows, focusedId }: { rows: RecentRequest[]; focusedId?: string }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const focusedRow = useRef<HTMLTableRowElement>(null);
+  const focusedPresent = rows.some((row) => row.id === focusedId);
+  useEffect(() => {
+    if (focusedId && focusedPresent)
+      focusedRow.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  }, [focusedId, focusedPresent]);
+  useEffect(() => {
+    setExpanded(focusedId ? new Set([focusedId]) : new Set());
+  }, [focusedId]);
 
   if (!rows.length)
     return (
@@ -273,7 +292,7 @@ export function RequestTable({ rows }: { rows: RecentRequest[] }) {
             <th scope="col" className="hidden px-3 py-2.5 font-medium md:table-cell">
               耗时
             </th>
-            <th scope="col" className="px-3 py-2.5 font-medium">
+            <th scope="col" className="hidden px-3 py-2.5 font-medium sm:table-cell">
               Token
             </th>
             <th scope="col" className="px-3 py-2.5 font-medium">
@@ -286,7 +305,10 @@ export function RequestTable({ rows }: { rows: RecentRequest[] }) {
             const isExpanded = expanded.has(row.id);
             return (
               <Fragment key={row.id}>
-                <tr className="transition hover:bg-muted/20">
+                <tr
+                  ref={row.id === focusedId ? focusedRow : undefined}
+                  className="scroll-mt-20 transition hover:bg-muted/20"
+                >
                   <td className="px-2 py-2.5">
                     <Button
                       variant="ghost"
@@ -307,10 +329,15 @@ export function RequestTable({ rows }: { rows: RecentRequest[] }) {
                     {formatTime(row.startedAt, true)}
                   </td>
                   <td
-                    className="max-w-24 truncate px-3 py-3 font-medium text-foreground sm:max-w-48"
+                    className="max-w-32 break-all px-2 py-3 font-medium text-foreground sm:max-w-48 sm:truncate sm:px-3"
                     title={row.model}
                   >
                     {row.model || "—"}
+                    <span className="mt-1 block text-xs font-normal text-muted-foreground sm:hidden">
+                      {usageTotal(row.usage ?? undefined) === undefined
+                        ? "用量未知"
+                        : `${formatCompact(usageTotal(row.usage ?? undefined))} tokens`}
+                    </span>
                   </td>
                   <td
                     className="hidden max-w-36 truncate px-3 py-3 text-muted-foreground md:table-cell"
@@ -327,8 +354,8 @@ export function RequestTable({ rows }: { rows: RecentRequest[] }) {
                   <td className="hidden px-3 py-3 text-muted-foreground md:table-cell">
                     {formatDuration(row.durationMs)}
                   </td>
-                  <td className="px-3 py-3 font-mono text-muted-foreground">
-                    {row.usage?.totalTokens === undefined && row.usage?.inputTokens === undefined
+                  <td className="hidden px-3 py-3 font-mono text-muted-foreground sm:table-cell">
+                    {usageTotal(row.usage ?? undefined) === undefined
                       ? "用量未知"
                       : formatCompact(usageTotal(row.usage ?? undefined))}
                   </td>

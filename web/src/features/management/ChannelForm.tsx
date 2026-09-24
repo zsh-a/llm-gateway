@@ -144,8 +144,12 @@ export function ChannelForm({
               id="channel-auth-ref"
               {...register("authRef")}
               placeholder={draft.providerId || "默认使用 Provider 认证"}
+              aria-describedby="channel-auth-help"
               disabled={busy}
             />
+            <p id="channel-auth-help" className="text-xs leading-5 text-muted-foreground">
+              引用已保存的认证名称；留空使用当前 Provider 的认证。
+            </p>
           </Field>
           <Field
             label="上游地址"
@@ -172,6 +176,7 @@ export function ChannelForm({
                 aria-invalid={Boolean(errors.priority)}
                 aria-describedby={errors.priority ? "channel-priority-error" : undefined}
               />
+              <p className="text-xs text-muted-foreground">数值越大越优先。</p>
             </Field>
             <Field label="权重" htmlFor="channel-weight" error={errors.weight?.message}>
               <Input
@@ -183,6 +188,7 @@ export function ChannelForm({
                 aria-invalid={Boolean(errors.weight)}
                 aria-describedby={errors.weight ? "channel-weight-error" : undefined}
               />
+              <p className="text-xs text-muted-foreground">同优先级按权重分配请求，如 2:1。</p>
             </Field>
           </div>
           <ModelMappingEditor form={form} models={models} disabled={busy} />

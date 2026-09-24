@@ -23,6 +23,65 @@ function mockStream(text: string) {
 }
 
 describe("gateway data and streaming", () => {
+  it("uses business authorization for available models and qualifies duplicate catalog IDs", async () => {
+    const catalog = [
+      { id: "shared", provider: "mimo" },
+      { id: "shared", provider: "workbuddy" },
+    ];
+    const management = vi.fn().mockResolvedValue({ status: 200, body: { data: catalog } });
+    const desktop = new GatewayApi(
+      { apiKey: "business-test", adminKey: "" },
+      "http://test.invalid",
+      management,
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ data: [{ id: "mimo/shared", provider: "mimo" }] })),
+        ),
+    );
+    expect((await desktop.models()).map((model) => model.id)).toEqual([
+      "mimo/shared",
+      "workbuddy/shared",
+    ]);
+    expect(management).toHaveBeenCalledOnce();
+    expect((await desktop.models(undefined, "available")).map((model) => model.id)).toEqual([
+      "mimo/shared",
+    ]);
+    expect(management).toHaveBeenCalledOnce();
+    const [path, options] = vi.mocked(fetch).mock.calls[0];
+    expect(path).toBe("http://test.invalid/v1/models");
+    expect(new Headers(options?.headers).get("Authorization")).toBe("Bearer business-test");
+  });
+  it("forwards an explicit output budget and exposes the gateway request ID", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        async () =>
+          new Response('data: {"choices":[{"finish_reason":"length"}]}\n\ndata: [DONE]\n\n', {
+            headers: { "x-request-id": "gateway-request" },
+          }),
+      ),
+    );
+    const updates: ChatStreamUpdate[] = [];
+    await api.streamChat(
+      { id: "test" },
+      "hello",
+      "auto",
+      (update) => updates.push(update),
+      undefined,
+      123,
+    );
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body)).max_tokens).toBe(123);
+    expect(updates[0]).toEqual({ requestId: "gateway-request" });
+    expect(updates.some((update) => update.finishReason === "length")).toBe(true);
+    await api.streamChat({ id: "test" }, "hello", "auto", () => {});
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]?.body))).not.toHaveProperty(
+      "max_tokens",
+    );
+  });
   it("uses native management for desktop statistics without reusing the inference key", async () => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
     vi.mocked(invoke).mockResolvedValue({ status: 200, body: { requests: 4 } });

@@ -27,29 +27,43 @@ import { formatCompact, formatDuration, formatNumber, formatTime } from "../../l
 import { useKeys, useMetrics, useModels } from "../../lib/gateway-queries";
 import type { DashboardData, MetricsQuery, MetricsWindow, Navigate } from "../../types";
 import { KeyUsageTable } from "./KeyUsageTable";
+import { RequestFilters } from "./RequestFilters";
 
 export function MetricsPage({
   data,
   api,
   enabled = true,
   initialKeyId,
+  initialRequestId,
   onNavigate,
 }: {
   data: Pick<DashboardData, "health" | "models" | "keys">;
   api: GatewayApi;
   enabled?: boolean;
   initialKeyId?: string;
+  initialRequestId?: string;
   onNavigate?: Navigate;
 }) {
   const [filters, setFilters] = useState<MetricsQuery>({
     window: "24h",
     apiKeyId: initialKeyId,
+    requestId: initialRequestId,
     limit: 50,
     offset: 0,
   });
   useEffect(
     () => setFilters((current) => ({ ...current, apiKeyId: initialKeyId, offset: 0 })),
     [initialKeyId],
+  );
+  useEffect(
+    () =>
+      setFilters((current) => ({
+        ...current,
+        requestId: initialRequestId,
+        finishReason: undefined,
+        offset: 0,
+      })),
+    [initialRequestId],
   );
   const query = useMetrics(api, filters, enabled);
   const metrics = query.data ?? { summary: emptySummary, timeseries: [], recent: [], total: 0 };
@@ -63,7 +77,14 @@ export function MetricsPage({
   const models = [{ id: "", name: "全部模型" }, ...knownModels.values()];
   const hasFilters =
     filters.window !== "24h" ||
-    Boolean(filters.apiKeyId || filters.provider || filters.model || filters.status);
+    Boolean(
+      filters.apiKeyId ||
+        filters.provider ||
+        filters.model ||
+        filters.status ||
+        filters.requestId ||
+        filters.finishReason,
+    );
   const reset = () => setFilters({ window: "24h", limit: 50, offset: 0 });
   const keyNames = new Map(data.keys.map((key) => [key.id, key.name]));
   for (const entry of summary.keyUsage ?? []) keyNames.set(entry.key.id, entry.key.name);
@@ -102,23 +123,7 @@ export function MetricsPage({
           </a>
         </div>
       )}
-      <div className="grid items-end gap-3 rounded-xl border bg-card p-4 sm:grid-cols-2 xl:grid-cols-3">
-        {api.isAdministrator && (
-          <Field label="API Key" htmlFor="metrics-key">
-            <Select
-              id="metrics-key"
-              value={filters.apiKeyId ?? ""}
-              onChange={(event) => update({ apiKeyId: event.target.value || undefined })}
-            >
-              <option value="">全部 Key</option>
-              {[...keyNames].map(([id, name]) => (
-                <option key={id} value={id}>
-                  {name}
-                </option>
-              ))}
-            </Select>
-          </Field>
-        )}
+      <div className="grid grid-cols-2 items-end gap-3 rounded-xl border bg-card p-4">
         <Field label="时间范围" htmlFor="metrics-window">
           <Select
             id="metrics-window"
@@ -130,28 +135,6 @@ export function MetricsPage({
             <option value="7d">最近 7 天</option>
             <option value="30d">最近 30 天</option>
           </Select>
-        </Field>
-        <Field label="Provider" htmlFor="metrics-provider">
-          <Select
-            id="metrics-provider"
-            value={filters.provider ?? ""}
-            onChange={(event) => update({ provider: event.target.value || undefined })}
-          >
-            <option value="">全部 Provider</option>
-            {providers.map((provider) => (
-              <option key={provider} value={provider}>
-                {provider}
-              </option>
-            ))}
-          </Select>
-        </Field>
-        <Field label="模型" htmlFor="metrics-model">
-          <ModelPicker
-            id="metrics-model"
-            models={models}
-            value={filters.model ?? ""}
-            onChange={(model) => update({ model: model || undefined })}
-          />
         </Field>
         <Field label="状态" htmlFor="metrics-status">
           <Select
@@ -167,9 +150,93 @@ export function MetricsPage({
             <option value="canceled">已取消</option>
           </Select>
         </Field>
-        <Button variant="ghost" disabled={!hasFilters} onClick={reset}>
-          重置
-        </Button>
+
+        <div className="flex flex-wrap items-center gap-2 col-span-2">
+          <span className="text-xs text-muted-foreground">快捷查看</span>
+          <Button
+            variant={filters.status === "error" ? "secondary" : "outline"}
+            size="sm"
+            onClick={() =>
+              update({
+                status: filters.status === "error" ? undefined : "error",
+                finishReason: undefined,
+                requestId: undefined,
+              })
+            }
+          >
+            失败请求
+          </Button>
+          <Button
+            variant={filters.finishReason === "length" ? "secondary" : "outline"}
+            size="sm"
+            onClick={() =>
+              update({
+                status: undefined,
+                requestId: undefined,
+                finishReason: filters.finishReason === "length" ? undefined : "length",
+              })
+            }
+          >
+            输出截断明细
+          </Button>
+          <Button
+            variant="ghost"
+            className="ml-auto"
+            size="sm"
+            disabled={!hasFilters}
+            onClick={reset}
+          >
+            重置
+          </Button>
+        </div>
+        <details
+          className="col-span-2"
+          open={filters.apiKeyId || filters.provider || filters.model ? true : undefined}
+        >
+          <summary className="cursor-pointer text-sm text-muted-foreground">
+            更多筛选 · Key、Provider、模型
+          </summary>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {api.isAdministrator && (
+              <Field label="API Key" htmlFor="metrics-key">
+                <Select
+                  id="metrics-key"
+                  value={filters.apiKeyId ?? ""}
+                  onChange={(event) => update({ apiKeyId: event.target.value || undefined })}
+                >
+                  <option value="">全部 Key</option>
+                  {[...keyNames].map(([id, name]) => (
+                    <option key={id} value={id}>
+                      {name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            )}
+            <Field label="Provider" htmlFor="metrics-provider">
+              <Select
+                id="metrics-provider"
+                value={filters.provider ?? ""}
+                onChange={(event) => update({ provider: event.target.value || undefined })}
+              >
+                <option value="">全部 Provider</option>
+                {providers.map((provider) => (
+                  <option key={provider} value={provider}>
+                    {provider}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="模型" htmlFor="metrics-model">
+              <ModelPicker
+                id="metrics-model"
+                models={models}
+                value={filters.model ?? ""}
+                onChange={(model) => update({ model: model || undefined })}
+              />
+            </Field>
+          </div>
+        </details>
       </div>
       <div
         role="status"
@@ -181,7 +248,7 @@ export function MetricsPage({
               ? "筛选更新失败，当前显示上次结果。"
               : "正在应用筛选，暂时显示上次结果…"
             : query.data
-              ? `保留 ${formatNumber(metrics.total)} 条请求明细`
+              ? `${filters.requestId || filters.finishReason ? "筛选到" : "保留"} ${formatNumber(metrics.total)} 条请求明细`
               : "请求统计"}
         </span>
         {query.isFetching ? (
@@ -217,7 +284,7 @@ export function MetricsPage({
               数为已知用量。
             </p>
           )}
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
             <StatCard
               icon={Activity}
               label="总请求"
@@ -252,7 +319,63 @@ export function MetricsPage({
               tone="green"
             />
           </div>
-          {api.isAdministrator && (
+          {(summary.requests > 0 || filters.requestId || filters.finishReason) && (
+            <Card>
+              <CardHeader className="flex-row items-center justify-between">
+                <CardTitle>最近请求明细</CardTitle>
+                <Badge variant="muted">{limit} 条 / 页</Badge>
+              </CardHeader>
+              <CardContent>
+                <p className="mb-3 text-xs text-muted-foreground">
+                  明细按保留上限清理；累计用量和趋势来自独立汇总，不随明细清理减少。时间范围按分钟对齐。
+                </p>
+                <RequestFilters filters={filters} onChange={update} />
+                {!metrics.recent.length && (filters.requestId || filters.finishReason) ? (
+                  <EmptyState
+                    title="没有符合条件的请求明细"
+                    description="检查 Request ID 和时间范围，或清除明细筛选。较早的请求明细可能已清理。"
+                  />
+                ) : (
+                  <RequestTable rows={metrics.recent} focusedId={filters.requestId} />
+                )}
+                <div className="mt-4 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                  <span>
+                    {query.isPlaceholderData
+                      ? "等待筛选结果…"
+                      : metrics.total
+                        ? `${Math.min(offset + 1, metrics.total)}–${Math.min(offset + metrics.recent.length, metrics.total)} / ${metrics.total}`
+                        : "暂无记录"}
+                  </span>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={offset === 0 || query.isFetching}
+                      onClick={() =>
+                        setFilters((current) => ({
+                          ...current,
+                          offset: Math.max(0, offset - limit),
+                        }))
+                      }
+                    >
+                      上一页
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={offset + limit >= metrics.total || query.isFetching}
+                      onClick={() =>
+                        setFilters((current) => ({ ...current, offset: offset + limit }))
+                      }
+                    >
+                      下一页
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+          {api.isAdministrator && Boolean(summary.keyUsage?.length) && (
             <Card>
               <CardHeader>
                 <CardTitle>Key 用量</CardTitle>
@@ -318,52 +441,6 @@ export function MetricsPage({
                   </Card>
                 ))}
               </div>
-              <Card>
-                <CardHeader className="flex-row items-center justify-between">
-                  <CardTitle>最近请求明细</CardTitle>
-                  <Badge variant="muted">{limit} 条 / 页</Badge>
-                </CardHeader>
-                <CardContent>
-                  <p className="mb-3 text-xs text-muted-foreground">
-                    明细按保留上限清理；累计用量和趋势来自独立汇总，不随明细清理减少。时间范围按分钟对齐。
-                  </p>
-                  <RequestTable rows={metrics.recent} />
-                  <div className="mt-4 flex items-center justify-between gap-3 text-xs text-muted-foreground">
-                    <span>
-                      {query.isPlaceholderData
-                        ? "等待筛选结果…"
-                        : metrics.total
-                          ? `${Math.min(offset + 1, metrics.total)}–${Math.min(offset + metrics.recent.length, metrics.total)} / ${metrics.total}`
-                          : "暂无记录"}
-                    </span>
-                    <div className="flex gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={offset === 0 || query.isFetching}
-                        onClick={() =>
-                          setFilters((current) => ({
-                            ...current,
-                            offset: Math.max(0, offset - limit),
-                          }))
-                        }
-                      >
-                        上一页
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={offset + limit >= metrics.total || query.isFetching}
-                        onClick={() =>
-                          setFilters((current) => ({ ...current, offset: offset + limit }))
-                        }
-                      >
-                        下一页
-                      </Button>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
             </>
           )}
         </div>

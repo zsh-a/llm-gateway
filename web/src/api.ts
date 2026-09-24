@@ -1,4 +1,5 @@
 import { EventSourceParserStream } from "eventsource-parser/stream";
+import { qualifyModelIds } from "./lib/models";
 import { normalizeUsage } from "./lib/usage";
 import type { ManagementRequest, ManagementTransport } from "./management";
 import type {
@@ -128,15 +129,19 @@ export class GatewayApi {
     return this.request("/health/auth", { signal });
   }
 
-  async models(signal?: AbortSignal): Promise<GatewayModel[]> {
-    const result = this.isAdministrator
-      ? await this.adminRequest<{ data: GatewayModel[] }>(
-          { operation: "models" },
-          "/admin/models",
-          { signal },
-        )
-      : await this.request<{ data: GatewayModel[] }>("/v1/models", { signal });
-    return result.data;
+  async models(
+    signal?: AbortSignal,
+    scope: "catalog" | "available" = "catalog",
+  ): Promise<GatewayModel[]> {
+    const result =
+      this.isAdministrator && scope === "catalog"
+        ? await this.adminRequest<{ data: GatewayModel[] }>(
+            { operation: "models" },
+            "/admin/models",
+            { signal },
+          )
+        : await this.request<{ data: GatewayModel[] }>("/v1/models", { signal });
+    return qualifyModelIds(result.data);
   }
 
   async channels(signal?: AbortSignal): Promise<ChannelConfig[]> {
@@ -175,6 +180,8 @@ export class GatewayApi {
     if (view === "requests") {
       params.set("limit", String(query.limit ?? 50));
       params.set("offset", String(query.offset ?? 0));
+      if (query.requestId) params.set("requestId", query.requestId);
+      if (query.finishReason) params.set("finishReason", query.finishReason);
     }
     const path = `${this.metricsPrefix()}/${view}?${params}`;
     return this.isAdministrator
@@ -216,13 +223,20 @@ export class GatewayApi {
     };
   }
 
-  private chatBody(model: GatewayModel, prompt: string, effort?: string, stream = false): string {
+  private chatBody(
+    model: GatewayModel,
+    prompt: string,
+    effort?: string,
+    stream = false,
+    maxOutputTokens?: number,
+  ): string {
     return JSON.stringify({
       model: model.id,
       messages: [{ role: "user", content: prompt }],
       stream,
       ...(stream ? { stream_options: { include_usage: true } } : {}),
       ...this.reasoningOptions(model, effort),
+      ...(maxOutputTokens === undefined ? {} : { max_tokens: maxOutputTokens }),
     });
   }
 
@@ -240,6 +254,7 @@ export class GatewayApi {
     effort: string | undefined,
     onUpdate: (update: ChatStreamUpdate) => void,
     signal?: AbortSignal,
+    maxOutputTokens?: number,
   ): Promise<void> {
     const headers = new Headers({
       Accept: "text/event-stream",
@@ -249,9 +264,11 @@ export class GatewayApi {
     const response = await fetch(this.gatewayUrl("/v1/chat/completions"), {
       method: "POST",
       headers,
-      body: this.chatBody(model, prompt, effort, true),
+      body: this.chatBody(model, prompt, effort, true, maxOutputTokens),
       signal,
     });
+    const requestId = response.headers.get("x-request-id");
+    if (requestId) onUpdate({ requestId });
     if (!response.ok) {
       const raw = await response.text();
       let message = `请求失败（HTTP ${response.status}）`;

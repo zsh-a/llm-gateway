@@ -1,25 +1,17 @@
-import { ArrowDown, ArrowUp, Bot, ChevronDown, RefreshCw, Square, Trash2 } from "lucide-react";
+import { ArrowUp, Square } from "lucide-react";
 import type { ComponentProps } from "react";
-import { type FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Streamdown } from "streamdown";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import type { GatewayApi } from "../../api";
-import { CopyButton, ResourceContent } from "../../components/common";
+import { Field, ResourceContent } from "../../components/common";
 import { ModelPicker } from "../../components/ModelPicker";
-import { Badge, Button, Card, Select, Spinner, Textarea } from "../../components/ui";
-import { formatNumber, usageTotal } from "../../lib/format";
+import { Button, Card, Input, Select, Textarea } from "../../components/ui";
+import { formatNumber } from "../../lib/format";
 import { useModels } from "../../lib/gateway-queries";
 import { modelEfforts, modelSupportsReasoning } from "../../lib/models";
-import type { DashboardData, GatewayModel, Navigate, Usage } from "../../types";
+import type { DashboardData, Navigate } from "../../types";
+import { ResponsePreview } from "./ResponsePreview";
+import type { PlaygroundRequest as Request, PlaygroundResponse as Response } from "./types";
 
-type Request = { model: GatewayModel; prompt: string; effort: string };
-type Response = {
-  state: "idle" | "streaming" | "success" | "error" | "canceled";
-  content: string;
-  reasoning: string;
-  usage?: Usage;
-  error: string;
-  request?: Request;
-};
 const emptyResponse: Response = { state: "idle", content: "", reasoning: "", error: "" };
 const examples = [
   { label: "测试文本", prompt: "用三句话解释流式响应。" },
@@ -34,6 +26,7 @@ export function PlaygroundPage({
   onNavigate,
   onRefresh,
   serviceAvailable = true,
+  onStreamingChange,
 }: {
   data: Pick<DashboardData, "models"> & { resources: Pick<DashboardData["resources"], "models"> };
   api: GatewayApi;
@@ -41,14 +34,25 @@ export function PlaygroundPage({
   onNavigate: Navigate;
   onRefresh: () => void;
   serviceAvailable?: boolean;
+  active?: boolean;
+  onStreamingChange?: (streaming: boolean) => void;
 }) {
   const [modelId, setModelId] = useState(initialModelId ?? data.models[0]?.id ?? "");
   const [effort, setEffort] = useState("auto");
   const [prompt, setPrompt] = useState("");
+  const [maxOutputTokens, setMaxOutputTokens] = useState("");
   const [response, setResponse] = useState<Response>(emptyResponse);
   const abortRef = useRef<AbortController | null>(null);
   const model = data.models.find((item) => item.id === modelId);
   const streaming = response.state === "streaming";
+  const budget = maxOutputTokens.trim() ? Number(maxOutputTokens) : undefined;
+  const budgetError =
+    budget !== undefined && (!Number.isSafeInteger(budget) || budget <= 0)
+      ? "请输入大于 0 的整数，或留空使用上游默认值"
+      : "";
+  useEffect(() => {
+    onStreamingChange?.(streaming);
+  }, [streaming, onStreamingChange]);
   useEffect(
     () => () => {
       abortRef.current?.abort();
@@ -72,7 +76,8 @@ export function PlaygroundPage({
     if (abortRef.current || !serviceAvailable) return;
     const controller = new AbortController();
     abortRef.current = controller;
-    setResponse({ ...emptyResponse, state: "streaming", request });
+    const startedAt = Date.now();
+    setResponse({ ...emptyResponse, state: "streaming", request, startedAt });
     try {
       await api.streamChat(
         request.model,
@@ -85,18 +90,31 @@ export function PlaygroundPage({
             content: current.content + (update.content ?? ""),
             reasoning: current.reasoning + (update.reasoning ?? ""),
             usage: update.usage ?? current.usage,
+            requestId: update.requestId ?? current.requestId,
+            finishReason: update.finishReason ?? current.finishReason,
+            firstTokenMs:
+              current.firstTokenMs ??
+              (update.content || update.reasoning ? Date.now() - startedAt : undefined),
           }));
         },
         controller.signal,
+        request.maxOutputTokens,
       );
       if (!controller.signal.aborted && abortRef.current === controller)
-        setResponse((current) => ({ ...current, state: "success" }));
+        setResponse((current) => ({
+          ...current,
+          state: ["length", "content_filter"].includes(current.finishReason ?? "")
+            ? "incomplete"
+            : "success",
+          durationMs: Date.now() - startedAt,
+        }));
     } catch (error) {
       if (!controller.signal.aborted && abortRef.current === controller)
         setResponse((current) => ({
           ...current,
           state: "error",
           error: error instanceof Error ? error.message : "请求失败，请重试",
+          durationMs: Date.now() - startedAt,
         }));
     } finally {
       if (abortRef.current === controller) {
@@ -108,7 +126,11 @@ export function PlaygroundPage({
   const stop = () => {
     abortRef.current?.abort();
     abortRef.current = null;
-    setResponse((current) => ({ ...current, state: "canceled" }));
+    setResponse((current) => ({
+      ...current,
+      state: "canceled",
+      durationMs: current.startedAt ? Date.now() - current.startedAt : undefined,
+    }));
     onRefresh();
   };
   const clear = () => {
@@ -118,8 +140,8 @@ export function PlaygroundPage({
   };
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (model && prompt.trim() && !streaming)
-      void send({ model: { ...model }, prompt: prompt.trim(), effort });
+    if (model && prompt.trim() && !streaming && !budgetError)
+      void send({ model: { ...model }, prompt: prompt.trim(), effort, maxOutputTokens: budget });
   };
 
   return (
@@ -145,6 +167,34 @@ export function PlaygroundPage({
                 />
               </div>
             </ResourceContent>
+            {(data.resources.models.error ||
+              (data.resources.models.hasData && !data.models.length)) && (
+              <div className="rounded-lg bg-muted/60 p-3 text-sm">
+                <p className="mb-2 text-muted-foreground">请检查调用凭证、模型权限和渠道认证。</p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => onNavigate("settings", { settingsTab: "connection" })}
+                >
+                  配置调用凭证
+                </Button>
+              </div>
+            )}
+            {model && (
+              <p className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                <span>{model.provider || model.owned_by || "当前模型"}</span>
+                <span>
+                  上下文{" "}
+                  {model.contextWindow ? `${formatNumber(model.contextWindow)} tokens` : "未提供"}
+                </span>
+                <span>
+                  输出上限{" "}
+                  {model.max_output_tokens
+                    ? `${formatNumber(model.max_output_tokens)} tokens`
+                    : "未提供"}
+                </span>
+              </p>
+            )}
             {modelSupportsReasoning(model) && (
               <div className="flex items-center justify-between gap-3">
                 <label
@@ -172,6 +222,33 @@ export function PlaygroundPage({
                 </Select>
               </div>
             )}
+            <details className="rounded-lg border p-3" open={budgetError ? true : undefined}>
+              <summary className="cursor-pointer text-sm font-medium">
+                高级参数
+                {budget !== undefined && !budgetError ? ` · 输出预算 ${formatNumber(budget)}` : ""}
+              </summary>
+              <div className="mt-3">
+                <Field label="最大输出 Token" htmlFor="playground-max-output" error={budgetError}>
+                  <Input
+                    id="playground-max-output"
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={maxOutputTokens}
+                    onChange={(event) => setMaxOutputTokens(event.target.value)}
+                    disabled={streaming}
+                    placeholder="留空使用上游默认值"
+                    aria-invalid={Boolean(budgetError)}
+                    aria-describedby={
+                      budgetError ? "playground-max-output-error" : "playground-budget-help"
+                    }
+                  />
+                  <p id="playground-budget-help" className="text-xs text-muted-foreground">
+                    仅对本次请求设置预算；留空不添加限制。实际可用上限由模型决定。
+                  </p>
+                </Field>
+              </div>
+            </details>
             <div className="flex min-h-52 flex-1 flex-col gap-2">
               <div className="flex items-center justify-between">
                 <label htmlFor="playground-prompt" className="text-sm font-medium">
@@ -230,7 +307,11 @@ export function PlaygroundPage({
               <Button
                 type="submit"
                 disabled={
-                  !serviceAvailable || !model || !prompt.trim() || !data.resources.models.hasData
+                  !serviceAvailable ||
+                  !model ||
+                  !prompt.trim() ||
+                  !data.resources.models.hasData ||
+                  Boolean(budgetError)
                 }
               >
                 <ArrowUp className="size-4" />
@@ -243,6 +324,7 @@ export function PlaygroundPage({
       <ResponsePreview
         response={response}
         canRetry={serviceAvailable}
+        onNavigate={onNavigate}
         onClear={clear}
         onRetry={() => {
           if (response.request) void send(response.request);
@@ -252,196 +334,12 @@ export function PlaygroundPage({
   );
 }
 
-function ResponsePreview({
-  response,
-  canRetry,
-  onClear,
-  onRetry,
-}: {
-  response: Response;
-  canRetry: boolean;
-  onClear: () => void;
-  onRetry: () => void;
-}) {
-  const { state, content, reasoning, error, usage, request } = response;
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const following = useRef(true);
-  const [atBottom, setAtBottom] = useState(true);
-  const streaming = state === "streaming";
-  useLayoutEffect(() => {
-    if (request) {
-      following.current = true;
-      setAtBottom(true);
-    }
-  }, [request]);
-  useLayoutEffect(() => {
-    if (content || reasoning || state === "idle") {
-      if (following.current && scrollRef.current)
-        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [content, reasoning, state]);
-  const scrollToBottom = () => {
-    following.current = true;
-    setAtBottom(true);
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  };
-  const labels = {
-    idle: "待发送",
-    streaming: "生成中",
-    success: "已完成",
-    error: "失败",
-    canceled: "已停止",
-  };
-  return (
-    <Card className="relative flex min-h-[26rem] min-w-0 flex-col overflow-hidden lg:min-h-0">
-      <div className="flex shrink-0 items-start justify-between gap-3 border-b px-5 py-4">
-        <div className="min-w-0">
-          <h2 className="text-sm font-semibold">响应</h2>
-          {request && (
-            <p className="mt-1 truncate text-xs text-muted-foreground" title={request.model.id}>
-              {request.model.name || request.model.id} ·{" "}
-              {request.effort === "auto"
-                ? "自动"
-                : request.effort === "off"
-                  ? "关闭思考"
-                  : request.effort}
-            </p>
-          )}
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-          {(content || reasoning) && (
-            <CopyButton
-              value={[reasoning ? `思考过程\n${reasoning}` : "", content]
-                .filter(Boolean)
-                .join("\n\n")}
-              label="复制"
-            />
-          )}
-          {request && !streaming && (
-            <>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={onRetry}
-                disabled={!canRetry}
-                title="重试原请求"
-                aria-label="重试原请求"
-              >
-                <RefreshCw className="size-4" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={onClear}
-                title="清空响应"
-                aria-label="清空响应"
-              >
-                <Trash2 className="size-4" />
-              </Button>
-            </>
-          )}
-          <span role="status" aria-live="polite">
-            <Badge
-              variant={state === "error" ? "danger" : state === "success" ? "success" : "muted"}
-            >
-              {streaming && <Spinner className="size-3" />}
-              {labels[state]}
-            </Badge>
-          </span>
-        </div>
-      </div>
-      <div
-        ref={scrollRef}
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-5 scrollbar-thin"
-        onScroll={(event) => {
-          const target = event.currentTarget;
-          const bottom = target.scrollHeight - target.scrollTop - target.clientHeight < 40;
-          following.current = bottom;
-          setAtBottom(bottom);
-        }}
-      >
-        {state === "idle" && (
-          <div className="flex h-full min-h-56 flex-col items-center justify-center gap-3 text-center">
-            <Bot className="size-8 text-primary/70" />
-            <p className="text-sm font-medium">从一条消息开始</p>
-            <p className="max-w-xs text-sm text-muted-foreground">
-              选择模型并发送消息，响应会实时显示在这里。
-            </p>
-          </div>
-        )}
-        {error && (
-          <div
-            role="alert"
-            className="mb-4 rounded-lg bg-destructive/5 px-4 py-3 text-sm leading-6 text-destructive"
-          >
-            {error}
-          </div>
-        )}
-        {reasoning && (
-          <details className="group mb-5 border-b pb-4">
-            <summary className="flex cursor-pointer list-none items-center gap-2 text-sm text-muted-foreground [&::-webkit-details-marker]:hidden">
-              <ChevronDown className="size-4 transition-transform group-open:rotate-180" />
-              思考过程
-            </summary>
-            <div className="mt-3 whitespace-pre-wrap text-sm leading-7 text-muted-foreground">
-              {reasoning}
-            </div>
-          </details>
-        )}
-        {content && (
-          <Streamdown
-            className="response-markdown text-sm leading-7"
-            isAnimating={streaming}
-            mode={streaming ? "streaming" : "static"}
-            controls={{
-              code: { copy: true, download: false },
-              table: { copy: true, download: false, fullscreen: false },
-            }}
-            translations={{
-              copyCode: "复制代码",
-              copied: "已复制",
-              copyTable: "复制表格",
-              copyTableAsMarkdown: "复制为 Markdown",
-              copyTableAsCsv: "复制为 CSV",
-              copyTableAsTsv: "复制为 TSV",
-            }}
-            codeBlockMaxHeight={0}
-            tableMaxHeight={0}
-          >
-            {content}
-          </Streamdown>
-        )}
-        {streaming && !content && (
-          <div role="status" className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
-            <Spinner />
-            {reasoning ? "正在思考…" : "正在等待模型响应…"}
-          </div>
-        )}
-      </div>
-      {!atBottom && (
-        <Button
-          variant="outline"
-          size="sm"
-          className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-card shadow-sm"
-          onClick={scrollToBottom}
-        >
-          <ArrowDown className="size-3.5" />
-          回到底部
-        </Button>
-      )}
-      {usage && (
-        <div className="flex shrink-0 flex-wrap gap-x-4 gap-y-1 border-t px-5 py-3 text-xs text-muted-foreground">
-          <span>输入 {formatNumber(usage.inputTokens)}</span>
-          <span>输出 {formatNumber(usage.outputTokens)}</span>
-          <span>总计 {formatNumber(usageTotal(usage))} tokens</span>
-        </div>
-      )}
-    </Card>
-  );
-}
-
 export function PlaygroundScreen(props: Omit<ComponentProps<typeof PlaygroundPage>, "data">) {
-  const models = useModels(props.api, props.serviceAvailable);
+  const models = useModels(
+    props.api,
+    (props.serviceAvailable ?? true) && (props.active ?? true),
+    "available",
+  );
   return (
     <PlaygroundPage
       {...props}

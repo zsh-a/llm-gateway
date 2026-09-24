@@ -210,6 +210,14 @@ async fn output_budget_and_length_termination_are_visible_in_both_protocols() {
             2
         );
         assert_eq!(record.finish_reason.as_deref(), Some("length"));
+        let filtered = fixture
+            .metrics(
+                &format!("/metrics/requests?requestId={id}&finishReason=length"),
+                None,
+            )
+            .await;
+        assert_eq!(filtered["total"], 1);
+        assert_eq!(filtered["data"][0]["id"], id);
     }
     let chat = fixture
         .send(
@@ -907,6 +915,29 @@ async fn legacy_unscoped_metrics_remain_visible_without_exposing_managed_keys() 
             assert_eq!(
                 recent["data"][0]["id"],
                 if name == "key-a" { "a" } else { "b" }
+            );
+            let selected = fixture
+                .metrics(
+                    "/metrics/requests?requestId=a&finishReason=stop",
+                    Some(name),
+                )
+                .await;
+            assert_eq!(selected["total"], if name == "key-a" { 1 } else { 0 });
+            assert_eq!(
+                fixture
+                    .metrics("/metrics/requests?finishReason=length", Some(name))
+                    .await["total"],
+                0
+            );
+            // Detail filters must not change aggregate history.
+            assert_eq!(
+                fixture
+                    .metrics(
+                        "/metrics/summary?requestId=a&finishReason=length",
+                        Some(name)
+                    )
+                    .await["requests"],
+                1
             );
         }
         assert_eq!(

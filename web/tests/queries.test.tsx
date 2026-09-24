@@ -18,6 +18,34 @@ function clientWrapper() {
 }
 
 describe("resource queries", () => {
+  it("applies request diagnostics filters without refetching or narrowing aggregates", async () => {
+    const api = new GatewayApi({ apiKey: "", adminKey: "" });
+    const summary = vi
+      .spyOn(api, "metricsSummary")
+      .mockResolvedValue({ ...emptySummary, requests: 12 });
+    const series = vi.spyOn(api, "metricsTimeseries").mockResolvedValue([]);
+    const requests = vi
+      .spyOn(api, "metricsRequests")
+      .mockImplementation(async ({ requestId }) => ({ recent: [], total: requestId ? 1 : 12 }));
+    const { client, wrapper } = clientWrapper();
+    const { result, rerender, unmount } = renderHook(
+      ({ requestId }) => useMetrics(api, { window: "24h", requestId, finishReason: "length" }),
+      { wrapper, initialProps: { requestId: "" } },
+    );
+    await waitFor(() => expect(result.current.data?.total).toBe(12));
+    rerender({ requestId: "request-a" });
+    await waitFor(() => expect(result.current.data?.total).toBe(1));
+    expect(result.current.data?.summary.requests).toBe(12);
+    expect(summary).toHaveBeenCalledOnce();
+    expect(series).toHaveBeenCalledOnce();
+    expect(summary.mock.calls[0][0]).not.toHaveProperty("finishReason");
+    expect(requests.mock.calls.at(-1)?.[0]).toMatchObject({
+      requestId: "request-a",
+      finishReason: "length",
+    });
+    unmount();
+    client.clear();
+  });
   it("keeps a complete snapshot until all filtered resources finish", async () => {
     const api = new GatewayApi({ apiKey: "", adminKey: "" });
     vi.spyOn(api, "metricsSummary").mockImplementation(async ({ provider }) => ({

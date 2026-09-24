@@ -2,7 +2,13 @@ import { useIsFetching } from "@tanstack/react-query";
 import { AlertCircle } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { Toaster, toast } from "sonner";
-import { type Credentials, GatewayApi, gatewayBaseUrl, loadCredentials } from "./api";
+import {
+  type Credentials,
+  GatewayApi,
+  gatewayBaseUrl,
+  loadCredentials,
+  saveCredentials,
+} from "./api";
 import { DashboardLayout } from "./components/layout";
 import { ServiceBanner } from "./components/ServiceBanner";
 import { UpdateBanner } from "./components/UpdateBanner";
@@ -37,6 +43,12 @@ export function App() {
   const [location, setLocation] = useState(() => resolveLocation(window.location.hash));
   const [mobileNav, setMobileNav] = useState(false);
   const [credentials, setCredentials] = useState(loadCredentials);
+  const [credentialRevision, setCredentialRevision] = useState(0);
+  const [playgroundVisited, setPlaygroundVisited] = useState(location.page === "playground");
+  const [playgroundStreaming, setPlaygroundStreaming] = useState(false);
+  useEffect(() => {
+    if (location.page === "playground") setPlaygroundVisited(true);
+  }, [location.page]);
   const [themePreference, setThemePreference] = useState<ThemePreference>(() => {
     const saved = localStorage.getItem("llm-gateway.theme");
     return saved === "light" || saved === "dark" ? saved : "system";
@@ -70,6 +82,8 @@ export function App() {
     void queryClient.cancelQueries({ queryKey: gatewayQueryKeys.all });
     queryClient.removeQueries({ queryKey: gatewayQueryKeys.all });
     setCredentials(next);
+    setCredentialRevision((revision) => revision + 1);
+    setPlaygroundStreaming(false);
   }, []);
 
   useEffect(() => {
@@ -156,6 +170,20 @@ export function App() {
             </Button>
           </div>
         )}
+        {playgroundStreaming && location.page !== "playground" && (
+          <div
+            role="status"
+            className="mb-5 flex items-center justify-between gap-3 rounded-lg border bg-card p-3 text-sm"
+          >
+            <span className="flex items-center gap-2">
+              <Spinner />
+              工作台正在生成，切换页面不会中断请求。
+            </span>
+            <Button variant="outline" size="sm" onClick={() => navigate("playground")}>
+              查看响应
+            </Button>
+          </div>
+        )}
         <Suspense
           fallback={
             <div
@@ -175,14 +203,22 @@ export function App() {
               onNavigate={navigate}
             />
           )}
-          {location.page === "playground" && (
-            <PlaygroundPage
-              api={api}
-              initialModelId={location.modelId}
-              onNavigate={navigate}
-              onRefresh={() => void refresh()}
-              serviceAvailable={serviceReady}
-            />
+          {(playgroundVisited || location.page === "playground") && (
+            <div
+              hidden={location.page !== "playground"}
+              className={location.page === "playground" ? "min-h-0 flex-1" : undefined}
+            >
+              <PlaygroundPage
+                key={`${gatewayUrl}:${credentialRevision}`}
+                api={api}
+                active={location.page === "playground"}
+                onStreamingChange={setPlaygroundStreaming}
+                initialModelId={location.modelId}
+                onNavigate={navigate}
+                onRefresh={() => void refresh()}
+                serviceAvailable={serviceReady}
+              />
+            </div>
           )}
           {location.page === "metrics" && (
             <MetricsPage
@@ -190,11 +226,20 @@ export function App() {
               api={api}
               enabled={serviceReady}
               initialKeyId={location.apiKeyId}
+              initialRequestId={location.requestId}
               onNavigate={navigate}
             />
           )}
           {location.page === "management" && (
             <ManagementPage
+              initialTab={location.managementTab}
+              onUseKey={(apiKey) => {
+                const next = { ...credentials, apiKey };
+                saveCredentials(next);
+                updateCredentials(next);
+                showNotice("已用于当前工作台，本次会话有效");
+                navigate("playground");
+              }}
               initialKeyId={location.apiKeyId}
               health={health}
               api={api}

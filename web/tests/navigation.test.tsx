@@ -49,6 +49,43 @@ afterEach(() => {
 });
 
 describe("application navigation and query ownership", () => {
+  it("preserves a draft and an active stream across page navigation", async () => {
+    window.history.replaceState(null, "", "#playground");
+    vi.mocked(GatewayApi.prototype.models).mockResolvedValue([{ id: "test" }]);
+    let finish!: () => void;
+    let signal: AbortSignal | undefined;
+    vi.spyOn(GatewayApi.prototype, "streamChat").mockImplementation(
+      (_model, _prompt, _effort, update, nextSignal) => {
+        signal = nextSignal;
+        return new Promise<void>((resolve) => {
+          finish = () => {
+            update({ content: "后台完成的响应", finishReason: "stop" });
+            resolve();
+          };
+        });
+      },
+    );
+    render(
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>,
+    );
+    const user = userEvent.setup();
+    await screen.findByRole("combobox");
+    await user.type(screen.getByLabelText("消息"), "保留这条消息");
+    await user.click(screen.getByRole("link", { name: "统计分析" }));
+    await user.click(screen.getByRole("link", { name: "工作台" }));
+    expect((screen.getByLabelText("消息") as HTMLTextAreaElement).value).toBe("保留这条消息");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await user.click(screen.getByRole("link", { name: "设置" }));
+    expect(await screen.findByRole("button", { name: "查看响应" })).toBeTruthy();
+    expect(signal?.aborted).toBe(false);
+    await act(async () => finish());
+    await user.click(screen.getByRole("link", { name: "工作台" }));
+    expect(screen.getByText("后台完成的响应")).toBeTruthy();
+    expect((screen.getByLabelText("消息") as HTMLTextAreaElement).value).toBe("保留这条消息");
+    expect(signal?.aborted).toBe(false);
+  });
   it("keeps settings, deep links and the update banner on one route state", async () => {
     window.history.replaceState(null, "", "#settings?tab=updates");
     render(

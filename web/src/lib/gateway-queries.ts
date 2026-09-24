@@ -7,11 +7,12 @@ import { gatewayQueryKeys, queryErrorMessage } from "./query";
 
 function resourceState(query: {
   isPending: boolean;
+  isFetching: boolean;
   error: unknown;
   data: unknown;
 }): ResourceState {
   return {
-    pending: query.isPending,
+    pending: query.isPending && query.isFetching,
     error: query.error ? queryErrorMessage(query.error, "加载失败，请重试") : "",
     hasData: query.data !== undefined,
   };
@@ -19,7 +20,13 @@ function resourceState(query: {
 
 export function useMetrics(api: GatewayApi, filters: MetricsQuery, enabled = true) {
   // Pagination changes only the request list, not the chart or summary.
-  const { limit: _limit, offset: _offset, ...aggregate } = filters;
+  const {
+    limit: _limit,
+    offset: _offset,
+    requestId: _requestId,
+    finishReason: _finishReason,
+    ...aggregate
+  } = filters;
   const options = {
     enabled,
     refetchInterval: enabled ? 10000 : false,
@@ -61,7 +68,7 @@ export function useMetrics(api: GatewayApi, filters: MetricsQuery, enabled = tru
     authError: error instanceof ApiError && [401, 403, 503].includes(error.status),
     lastUpdated: Math.min(summary.dataUpdatedAt, timeseries.dataUpdatedAt, requests.dataUpdatedAt),
     error: error ? queryErrorMessage(error, "统计数据加载失败") : "",
-    isPending: !data && !error,
+    isPending: enabled && !data && !error,
     isFetching: summary.isFetching || timeseries.isFetching || requests.isFetching,
     isPlaceholderData: Boolean(data && !currentData),
     refetch: () => Promise.all([summary.refetch(), timeseries.refetch(), requests.refetch()]),
@@ -92,10 +99,14 @@ export function useAuth(api: GatewayApi, enabled = true) {
   return { data: query.data ?? emptyDashboard.auth, resource: resourceState(query) };
 }
 
-export function useModels(api: GatewayApi, enabled = true) {
+export function useModels(
+  api: GatewayApi,
+  enabled = true,
+  scope: "catalog" | "available" = "catalog",
+) {
   const query = useQuery({
-    queryKey: gatewayQueryKeys.resource(api.baseUrl, "models"),
-    queryFn: ({ signal }) => api.models(signal),
+    queryKey: [...gatewayQueryKeys.resource(api.baseUrl, "models"), scope],
+    queryFn: ({ signal }) => api.models(signal, scope),
     enabled,
     staleTime: 60000,
     refetchInterval: enabled ? 60000 : false,

@@ -16,22 +16,37 @@ import { emptySummary } from "../../lib/constants";
 import { formatCompact, formatDuration, formatNumber, formatTime } from "../../lib/format";
 import { useAuth, useMetrics, useModels } from "../../lib/gateway-queries";
 import type { DashboardData, Navigate } from "../../types";
+import { SetupGuide } from "./SetupGuide";
 
 export function OverviewPage({
   data,
   gatewayUrl,
   onNavigate,
+  canManage = false,
 }: {
   data: Pick<DashboardData, "auth" | "models" | "summary" | "timeseries" | "recent"> & {
     resources: Pick<DashboardData["resources"], "auth" | "models" | "metrics">;
   };
   gatewayUrl: string;
   onNavigate: Navigate;
+  canManage?: boolean;
 }) {
   const summary = data.summary;
   const providers = Object.entries(data.auth.providers);
   return (
     <div className="space-y-5">
+      {((data.resources.metrics.hasData && !summary.requests) ||
+        (data.resources.models.hasData && !data.models.length) ||
+        data.resources.models.error) && (
+        <SetupGuide
+          authenticated={providers.some(([, state]) => state.ready)}
+          callable={
+            data.resources.models.hasData && !data.resources.models.error && data.models.length > 0
+          }
+          canManage={canManage}
+          onNavigate={onNavigate}
+        />
+      )}
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-card px-5 py-4">
         <div className="min-w-0">
           <p className="mb-1 text-xs text-muted-foreground">OpenAI 兼容接口 · API Base URL</p>
@@ -55,7 +70,7 @@ export function OverviewPage({
               升级前部分请求明细可能已清理；历史数据不完整。
             </p>
           )}
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
           <StatCard
             icon={Activity}
             label="24h 请求"
@@ -191,11 +206,12 @@ export function OverviewScreen({
   ...props
 }: Omit<ComponentProps<typeof OverviewPage>, "data"> & { api: GatewayApi; enabled: boolean }) {
   const auth = useAuth(api, enabled);
-  const models = useModels(api, enabled);
+  const models = useModels(api, enabled, "available");
   const metrics = useMetrics(api, { window: "24h", limit: 6, offset: 0 }, enabled);
   return (
     <OverviewPage
       {...props}
+      canManage={api.isAdministrator}
       data={{
         auth: auth.data,
         models: models.data,

@@ -92,14 +92,21 @@ export function StatCard({
   };
   return (
     <Card>
-      <CardContent className="relative p-5">
+      <CardContent className="relative p-3 sm:p-5">
         <div className="relative flex items-start justify-between gap-3">
-          <div>
+          <div className="min-w-0">
             <div className="text-xs text-muted-foreground">{label}</div>
-            <div className="mt-2 text-2xl font-semibold tracking-tight">{value}</div>
-            <div className="mt-1 text-[11px] text-muted-foreground">{detail}</div>
+            <div className="mt-2 break-words text-xl font-semibold tracking-tight sm:text-2xl">
+              {value}
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground">{detail}</div>
           </div>
-          <div className={cn("flex size-9 items-center justify-center rounded-xl", tones[tone])}>
+          <div
+            className={cn(
+              "hidden size-9 shrink-0 items-center justify-center rounded-xl sm:flex",
+              tones[tone],
+            )}
+          >
             <Icon className="size-4" />
           </div>
         </div>
@@ -237,7 +244,7 @@ export function MetricChart({ points }: { points: TimeseriesPoint[] }) {
           </text>
         </svg>
       </div>
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px] text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-muted-foreground">
         <span className="inline-flex items-center gap-1.5">
           <span className="size-2 rounded-full bg-chart-1" />
           请求 <span className="font-mono text-foreground">{formatNumber(lastRequest)}</span>
@@ -314,8 +321,18 @@ export function ResourceContent({
         role={state.error ? "alert" : "status"}
         className="flex min-h-32 items-center justify-center gap-2 px-4 py-6 text-sm text-muted-foreground"
       >
-        {state.error ? <AlertCircle className="size-4 shrink-0 text-destructive" /> : <Spinner />}
-        <span>{state.error ? `${label}加载失败：${state.error}` : `正在加载${label}…`}</span>
+        {state.error ? (
+          <AlertCircle className="size-4 shrink-0 text-destructive" />
+        ) : state.pending ? (
+          <Spinner />
+        ) : null}
+        <span>
+          {state.error
+            ? `${label}加载失败：${state.error}`
+            : state.pending
+              ? `正在加载${label}…`
+              : `${label}暂未加载，请检查服务状态。`}
+        </span>
       </div>
     );
   }
@@ -349,7 +366,7 @@ export function InfoRow({
     >
       <span className="text-muted-foreground">{label}</span>
       <div className="flex min-w-0 items-center justify-between gap-2 sm:justify-end">
-        <code className="break-all font-mono text-[11px] text-foreground">{value}</code>
+        <code className="break-all font-mono text-xs text-foreground">{value}</code>
         {copyable && <CopyButton value={value} />}
       </div>
     </div>

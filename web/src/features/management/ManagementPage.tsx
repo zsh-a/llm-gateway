@@ -4,6 +4,7 @@ import { Plus } from "lucide-react";
 import type { ComponentProps } from "react";
 import { useEffect, useRef, useState } from "react";
 import type { GatewayApi } from "../../api";
+import { ApiExample } from "../../components/ApiExample";
 import { CopyButton, ResourceContent } from "../../components/common";
 import { Button, ConfirmDialog, Sheet } from "../../components/ui";
 import { useAuth, useChannels, useKeys, useModels } from "../../lib/gateway-queries";
@@ -30,11 +31,15 @@ export function ManagementPage({
   data,
   api,
   initialKeyId,
+  initialTab,
+  onUseKey,
   onNotice,
   onNavigate,
   serviceAvailable = true,
 }: {
   initialKeyId?: string;
+  initialTab?: "channels" | "keys";
+  onUseKey?: (secret: string) => void;
   data: Pick<DashboardData, "health" | "auth" | "models" | "channels" | "keys"> & {
     resources: Pick<DashboardData["resources"], "channels" | "keys">;
   };
@@ -43,7 +48,8 @@ export function ManagementPage({
   onNavigate: Navigate;
   serviceAvailable?: boolean;
 }) {
-  const [tab, setTab] = useState("channels");
+  const [tab, setTab] = useState(initialTab ?? "channels");
+  useEffect(() => setTab(initialTab ?? "channels"), [initialTab]);
   const [editor, setEditor] = useState<Editor | null>(null);
   const [dirty, setDirty] = useState(false);
   const openedKey = useRef<string | undefined>(undefined);
@@ -113,7 +119,16 @@ export function ManagementPage({
 
   return (
     <div className="space-y-5">
-      <Tabs.Root value={tab} onValueChange={(value) => setTab(String(value))}>
+      <Tabs.Root
+        value={tab}
+        onValueChange={(value) => {
+          setTab(value === "keys" ? "keys" : "channels");
+          onNavigate("management", {
+            managementTab: value === "keys" ? "keys" : "channels",
+            replace: true,
+          });
+        }}
+      >
         <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
           <Tabs.List className="inline-flex gap-1 rounded-lg bg-muted p-1" aria-label="资源类型">
             <Tabs.Tab
@@ -270,6 +285,22 @@ export function ManagementPage({
             <CopyButton value={secret} label="复制密钥" />
             <Button onClick={() => setSecret("")}>已保存，关闭</Button>
           </div>
+          {onUseKey && (
+            <Button
+              className="w-full"
+              onClick={() => {
+                const key = secret;
+                setSecret("");
+                onUseKey(key);
+              }}
+            >
+              用于当前工作台
+            </Button>
+          )}
+          <p className="text-xs text-muted-foreground">
+            用于工作台后可立即测试模型；外部客户端仍需单独保存密钥。
+          </p>
+          <ApiExample baseUrl={api.baseUrl} />
         </div>
       </Sheet>
       <ConfirmDialog

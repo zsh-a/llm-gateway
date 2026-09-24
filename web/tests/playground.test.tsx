@@ -6,6 +6,74 @@ import { PlaygroundPage } from "../src/features/playground/PlaygroundPage";
 import { emptyDashboard } from "../src/lib/constants";
 
 describe("playground request identity", () => {
+  it.each([
+    ["length", "达到输出上限"],
+    ["content_filter", "内容被过滤"],
+  ])("retains partial output and explains %s", async (finishReason, label) => {
+    const api = new GatewayApi({ apiKey: "", adminKey: "" });
+    vi.spyOn(api, "streamChat").mockImplementation(async (_model, _prompt, _effort, update) => {
+      update({ requestId: "request-test", content: "保留的输出", finishReason });
+    });
+    const navigate = vi.fn();
+    render(
+      <PlaygroundPage
+        data={{
+          ...emptyDashboard,
+          models: [{ id: "test" }],
+          resources: {
+            ...emptyDashboard.resources,
+            models: { hasData: true, pending: false, error: "" },
+          },
+        }}
+        api={api}
+        onNavigate={navigate}
+        onRefresh={vi.fn()}
+      />,
+    );
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("消息"), "hello");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByText(label)).toBeTruthy();
+    expect(screen.queryByText("已完成")).toBeNull();
+    expect(screen.getByText("保留的输出")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "查看请求记录" }));
+    expect(navigate).toHaveBeenCalledWith("metrics", { requestId: "request-test" });
+  });
+  it("validates budgets and retries the original budget after editing", async () => {
+    const api = new GatewayApi({ apiKey: "", adminKey: "" });
+    const stream = vi.spyOn(api, "streamChat").mockResolvedValue(undefined);
+    render(
+      <PlaygroundPage
+        data={{
+          ...emptyDashboard,
+          models: [{ id: "test" }],
+          resources: {
+            ...emptyDashboard.resources,
+            models: { hasData: true, pending: false, error: "" },
+          },
+        }}
+        api={api}
+        onNavigate={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("消息"), "hello");
+    await user.click(screen.getByText("高级参数"));
+    const input = screen.getByLabelText("最大输出 Token");
+    await user.type(input, "0");
+    expect(screen.getByRole("alert").textContent).toContain("大于 0");
+    expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.clear(input);
+    await user.type(input, "128");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await screen.findByText("已完成");
+    expect(stream.mock.calls[0][5]).toBe(128);
+    await user.clear(input);
+    await user.type(input, "256");
+    await user.click(screen.getByRole("button", { name: "重试原请求" }));
+    expect(stream.mock.calls[1][5]).toBe(128);
+  });
   it("clears a removed selection when the catalog becomes empty and recovers on refresh", async () => {
     const data = {
       ...emptyDashboard,

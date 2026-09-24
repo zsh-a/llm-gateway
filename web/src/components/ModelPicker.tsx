@@ -102,6 +102,9 @@ export function ModelPicker(props: Props) {
           <span className="min-w-0 truncate">
             <Combobox.Value placeholder={props.placeholder ?? "选择模型"} />
           </span>
+          {!Array.isArray(value) && value?.provider && (
+            <span className="ml-auto shrink-0 text-xs text-muted-foreground">{value.provider}</span>
+          )}
           <ChevronsUpDown className="size-4 shrink-0 text-muted-foreground" />
         </Combobox.Trigger>
       )}

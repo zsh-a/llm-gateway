@@ -4,6 +4,8 @@ export interface AppLocation {
   modelId?: string;
   apiKeyId?: string;
   settingsTab?: SettingsTab;
+  managementTab?: "channels" | "keys";
+  requestId?: string;
 }
 
 export type PageKey = "overview" | "playground" | "metrics" | "management" | "settings";
@@ -16,6 +18,8 @@ export interface NavigateOptions {
   apiKeyId?: string;
   replace?: boolean;
   settingsTab?: SettingsTab;
+  managementTab?: "channels" | "keys";
+  requestId?: string;
 }
 
 export type Navigate = (page: PageKey, options?: NavigateOptions) => void;
@@ -31,6 +35,8 @@ export interface MetricsQuery {
   status?: Exclude<MetricsStatus, "all">;
   limit?: number;
   offset?: number;
+  requestId?: string;
+  finishReason?: string;
 }
 
 export interface GatewayModel {
@@ -256,6 +262,7 @@ export interface ChatResult {
 }
 
 export interface ChatStreamUpdate {
+  requestId?: string;
   content?: string;
   reasoning?: string;
   usage?: Usage;

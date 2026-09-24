@@ -23,6 +23,8 @@ pub(crate) struct MetricQuery {
     limit: Option<usize>,
     offset: Option<usize>,
     bucket: Option<String>,
+    request_id: Option<String>,
+    finish_reason: Option<String>,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -99,7 +101,11 @@ pub(super) fn query_metrics(
                     row.provider.as_deref().unwrap_or("unknown"),
                     row.model.as_deref().unwrap_or("unknown"),
                     &row.status,
-                )
+                ) && query.request_id.as_deref().is_none_or(|id| id == row.id)
+                    && query
+                        .finish_reason
+                        .as_deref()
+                        .is_none_or(|reason| row.finish_reason.as_deref() == Some(reason))
             })
             .collect();
         let data: Vec<_> = rows
