@@ -1,6 +1,6 @@
 [package]
 name = "llm-gateway"
-version = "1.3.2"
+version = "1.3.3"
 description = "Rust/Tauri desktop gateway for LLM Gateway"
 authors = ["LLM Gateway"]
 edition = "2024"
